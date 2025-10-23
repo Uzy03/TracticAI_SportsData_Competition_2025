@@ -1,0 +1,148 @@
+# Sequential Training Protocol Configuration
+# 受け手→ショット→生成の順学習プロトコル
+
+# Training phases configuration
+phases:
+  receiver:
+    # Phase 1: Receiver prediction pretraining
+    config_file: "configs/receiver.yaml"
+    epochs: 20
+    checkpoint_path: "checkpoints/receiver/best.ckpt"
+    freeze_encoder: false
+    save_encoder: true
+    encoder_save_path: "checkpoints/shared_encoder_receiver.ckpt"
+    
+  shot:
+    # Phase 2: Shot prediction with receiver encoder
+    config_file: "configs/shot.yaml"
+    epochs: 15
+    checkpoint_path: "checkpoints/shot/best.ckpt"
+    freeze_encoder: true  # Freeze encoder from receiver phase
+    load_encoder: true
+    encoder_load_path: "checkpoints/shared_encoder_receiver.ckpt"
+    fine_tune_encoder: false  # Whether to fine-tune encoder during shot training
+    
+  generation:
+    # Phase 3: CVAE generation with frozen encoder
+    config_file: "configs/cvae.yaml"
+    epochs: 30
+    checkpoint_path: "checkpoints/cvae/best.ckpt"
+    freeze_encoder: true  # Freeze encoder from receiver phase
+    load_encoder: true
+    encoder_load_path: "checkpoints/shared_encoder_receiver.ckpt"
+    fine_tune_encoder: false  # Whether to fine-tune encoder during generation training
+
+# Encoder sharing configuration
+encoder_sharing:
+  # Encoder architecture (shared across all tasks)
+  input_dim: 8
+  hidden_dim: 128
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.2
+  
+  # Weight sharing strategy
+  strategy: "full_share"  # full_share, partial_share, task_specific
+  
+  # Partial sharing configuration (if strategy = "partial_share")
+  partial_share:
+    shared_layers: [0, 1]  # Which layers to share
+    task_specific_layers: [2]  # Which layers are task-specific
+  
+  # Task-specific configuration (if strategy = "task_specific")
+  task_specific:
+    receiver_layers: [0, 1, 2]
+    shot_layers: [0, 1, 2]
+    generation_layers: [0, 1, 2]
+
+# Training schedule
+schedule:
+  # Phase transitions
+  transitions:
+    receiver_to_shot:
+      # When to transition from receiver to shot training
+      trigger: "epoch_complete"  # epoch_complete, loss_threshold, metric_threshold
+      value: 20  # Number of epochs or threshold value
+      
+    shot_to_generation:
+      # When to transition from shot to generation training
+      trigger: "epoch_complete"
+      value: 15
+      
+  # Learning rate scheduling across phases
+  lr_schedule:
+    receiver:
+      initial_lr: 0.0003
+      decay_factor: 0.1
+      decay_epochs: [10, 15]
+      
+    shot:
+      initial_lr: 0.0001  # Lower LR for fine-tuning
+      decay_factor: 0.1
+      decay_epochs: [8, 12]
+      
+    generation:
+      initial_lr: 0.0001  # Lower LR for fine-tuning
+      decay_factor: 0.1
+      decay_epochs: [15, 25]
+
+# Evaluation and monitoring
+monitoring:
+  # Metrics to track across phases
+  metrics:
+    receiver: ["accuracy", "top_k_accuracy", "f1_score"]
+    shot: ["accuracy", "precision", "recall", "f1_score", "auc"]
+    generation: ["reconstruction_loss", "kl_loss", "total_loss", "mse", "mae"]
+  
+  # Checkpointing strategy
+  checkpointing:
+    save_frequency: 5  # Save every N epochs
+    save_best: true
+    save_last: true
+    metric_for_best: "val_loss"  # Metric to use for best model selection
+  
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 0.001
+    restore_best_weights: true
+
+# Data configuration
+data:
+  # Data paths for each phase
+  receiver:
+    train_path: "data/processed/receiver_train/data.pickle"
+    val_path: "data/processed/receiver_val/data.pickle"
+    test_path: "data/processed/receiver_test/data.pickle"
+    
+  shot:
+    train_path: "data/processed/shot_train/data.pickle"
+    val_path: "data/processed/shot_val/data.pickle"
+    test_path: "data/processed/shot_test/data.pickle"
+    
+  generation:
+    train_path: "data/processed/cvae_train/data.pickle"
+    val_path: "data/processed/cvae_val/data.pickle"
+    test_path: "data/processed/cvae_test/data.pickle"
+  
+  # Data augmentation
+  augmentation:
+    enabled: true
+    d2_transforms: true
+    noise_level: 0.01
+
+# System configuration
+system:
+  device: "auto"
+  seed: 42
+  num_workers: 4
+  log_level: "INFO"
+  log_dir: "runs/sequential_training"
+  checkpoint_dir: "checkpoints/sequential_training"
+  
+  # Memory management
+  memory:
+    gradient_checkpointing: true
+    mixed_precision: true
+    max_memory_usage: 0.8

@@ -1,0 +1,103 @@
+# Configuration for CVAE tactic generation task
+
+# Model configuration
+model:
+  input_dim: 8  # Node feature dimension (x, y, vx, vy, height, weight, ball, team)
+  condition_dim: 8  # Condition feature dimension
+  latent_dim: 32  # Latent space dimension
+  output_dim: 44  # Output dimension (22 players * 2 coordinates)
+  hidden_dim: 128
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.2
+
+# Optimizer configuration
+optimizer:
+  type: "adam"
+  lr: 0.0003
+  weight_decay: 0.0001
+
+# Scheduler configuration
+scheduler:
+  type: "cosine"
+  T_max: 50
+  eta_min: 0.000001
+  warmup_epochs: 5
+
+# Training configuration
+train:
+  batch_size: 4  # Much smaller batch size for M3 memory
+  epochs: 50
+  amp: false  # Disable AMP to avoid Metal issues
+
+# Data configuration
+data:
+  train_path: "data/processed/cvae_train/data.pickle"
+  val_path: "data/processed/cvae_val/data.pickle"
+  test_path: "data/processed/cvae_test/data.pickle"
+  format: "pickle"
+
+# Loss configuration
+loss:
+  # Enhanced CVAE loss with guidance and constraints
+  # L_total = λ_recon * L_recon + λ_kl * L_kl + λ_guidance * L_guidance + λ_movement * L_movement + λ_velocity * L_velocity
+  
+  # Reconstruction loss
+  # L_recon = MSE(pred, target) or L1(pred, target)
+  recon_type: "mse"  # mse, l1, huber
+  recon_weight: 1.0  # λ_recon
+  
+  # KL divergence loss
+  # L_kl = β * KL(q(z|x) || p(z)) where β controls disentanglement
+  beta: 1.0  # β-VAE parameter (β)
+  kl_weight: 1.0  # λ_kl
+  
+  # Shot guidance loss
+  # L_guidance = MSE(shot_prob, guidance_target) * guidance_lambda
+  guidance:
+    enabled: true
+    weight: 0.1  # λ_guidance
+    type: "score"  # score, gradient
+    max_lambda: 2.0  # Maximum guidance strength
+    
+  # Movement constraint loss
+  # L_movement = max(0, ||pred_pos - orig_pos||_2 - max_movement)
+  movement:
+    enabled: true
+    weight: 0.1  # λ_movement
+    max_movement: 10.0  # Maximum allowed movement (meters)
+    
+  # Velocity constraint loss
+  # L_velocity = max(0, ||velocity||_2 - max_velocity)
+  velocity:
+    enabled: true
+    weight: 0.1  # λ_velocity
+    max_velocity: 5.0  # Maximum allowed velocity (m/s)
+  
+  # Regularization terms
+  regularization:
+    l2_weight: 0.0001  # L2 regularization weight
+    dropout_rate: 0.2  # Dropout rate
+
+# D2 equivariance configuration
+d2:
+  group_pool: false  # Use group pooling instead of random flips
+  transforms:
+    hflip: true
+    vflip: true
+
+# Early stopping configuration
+early_stopping:
+  patience: 15  # More patience for CVAE
+
+# Evaluation configuration
+eval:
+  batch_size: 16
+
+# System configuration
+device: "cpu"  # Force CPU to avoid Metal memory issues
+seed: 42
+num_workers: 0
+log_level: "INFO"
+log_dir: "runs"
+checkpoint_dir: "checkpoints"

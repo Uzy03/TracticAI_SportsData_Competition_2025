@@ -1,0 +1,82 @@
+# Configuration for receiver prediction task
+
+# Model configuration
+model:
+  input_dim: 8  # Node feature dimension (x, y, vx, vy, height, weight, ball, team)
+  hidden_dim: 128
+  num_classes: 22  # Number of players
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.2
+
+# Optimizer configuration
+optimizer:
+  type: "adam"
+  lr: 0.0003
+  weight_decay: 0.0001
+
+# Scheduler configuration
+scheduler:
+  type: "cosine"
+  T_max: 50
+  eta_min: 0.000001
+  warmup_epochs: 5
+
+# Training configuration
+train:
+  batch_size: 8
+  epochs: 5
+  amp: true  # Automatic mixed precision
+
+# Data configuration
+data:
+  train_path: "data/processed/receiver_train/data.pickle"
+  val_path: "data/processed/receiver_val/data.pickle"
+  test_path: "data/processed/receiver_test/data.pickle"
+  format: "pickle"
+
+# Loss configuration
+loss:
+  # Cross-entropy loss with label smoothing
+  # L = -Σ y_i * log(p_i) where p_i = softmax(logits_i)
+  # With label smoothing: y_i = (1 - α) * y_i + α / num_classes
+  type: "cross_entropy"
+  label_smoothing: 0.1  # α parameter for label smoothing
+  weight: 1.0  # Loss weight
+  
+  # Focal loss parameters (alternative to cross-entropy)
+  focal_loss:
+    enabled: false
+    alpha: 1.0  # Weighting factor for rare class
+    gamma: 2.0  # Focusing parameter
+    
+  # Class weights for imbalanced datasets
+  class_weights: null  # [w_0, w_1, ..., w_{num_classes-1}]
+  
+  # Regularization terms
+  regularization:
+    l2_weight: 0.0001  # L2 regularization weight
+    dropout_rate: 0.2  # Dropout rate
+
+# D2 equivariance configuration
+d2:
+  group_pool: false  # Use group pooling instead of random flips
+  transforms:
+    hflip: true
+    vflip: true
+
+# Early stopping configuration
+early_stopping:
+  patience: 10
+
+# Evaluation configuration
+eval:
+  batch_size: 32
+
+# System configuration
+device: "auto"  # auto, cpu, cuda, mps
+seed: 42
+num_workers: 4
+log_level: "INFO"
+log_dir: "runs"
+checkpoint_dir: "checkpoints"
