@@ -41,7 +41,7 @@ class EdgeAttributeSchema:
         edge_index: torch.Tensor,
         team_ids: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """Compute edge attributes from positions and connectivity.
+        """Compute edge attributes from positions and connectivity (same_team only).
         
         Args:
             positions: Player positions [N, 2] (x, y in meters)
@@ -49,38 +49,18 @@ class EdgeAttributeSchema:
             team_ids: Team IDs [N] (optional)
             
         Returns:
-            Edge attributes [E, 3] (distance, bearing, same_team)
+            Edge attributes [E, 1] (same_team only)
         """
         src, dst = edge_index[0], edge_index[1]
         
-        # Compute distances
-        src_pos = positions[src]  # [E, 2]
-        dst_pos = positions[dst]  # [E, 2]
-        distances = torch.norm(dst_pos - src_pos, dim=1)  # [E]
-        
-        # Normalize distances if requested
-        if self.normalize_distance:
-            distances = distances / self.max_distance
-        
-        # Compute bearings (angle from source to destination)
-        dx = dst_pos[:, 0] - src_pos[:, 0]  # [E]
-        dy = dst_pos[:, 1] - src_pos[:, 1]  # [E]
-        bearings = torch.atan2(dy, dx)  # [E] in radians
-        
-        # Normalize bearings to [0, 2π]
-        bearings = torch.fmod(bearings + 2 * math.pi, 2 * math.pi)
-        
-        # Compute same team indicator
+        # Compute same team indicator only
         if team_ids is not None:
-            same_team = (team_ids[src] == team_ids[dst]).float()  # [E]
+            same_team = (team_ids[src] == team_ids[dst]).float().unsqueeze(-1)  # [E, 1]
         else:
             # Default: assume alternating teams
-            same_team = ((src // 11) == (dst // 11)).float()  # Assuming 11 players per team
+            same_team = ((src // 11) == (dst // 11)).float().unsqueeze(-1)  # [E, 1]
         
-        # Stack attributes
-        edge_attrs = torch.stack([distances, bearings, same_team], dim=1)  # [E, 3]
-        
-        return edge_attrs
+        return same_team
 
 
 class GraphAttributeSchema:
@@ -378,14 +358,40 @@ class ReceiverSchema(DataSchema):
             data: Raw data dictionary
             
         Returns:
-            Receiver ID tensor [N]
+            Receiver node index tensor (0-21)
         """
-        if isinstance(data, pd.DataFrame):
-            receiver_id = data[self.receiver_column].iloc[0]  # Assuming same for all players
-        else:
-            receiver_id = data[self.receiver_column]
+        # Prefer receiver_node_index if available (0-21), otherwise fall back to receiver_id
+        receiver_idx = None
         
-        return torch.tensor(receiver_id, dtype=torch.long)
+        if isinstance(data, pd.DataFrame):
+            if "receiver_node_index" in data.columns:
+                receiver_idx = data["receiver_node_index"].iloc[0]
+                if pd.isna(receiver_idx):
+                    receiver_idx = None
+            if receiver_idx is None:
+                # Fallback: use receiver_id, but this should be node index (0-21)
+                receiver_idx = data[self.receiver_column].iloc[0]
+        else:
+            if "receiver_node_index" in data and data["receiver_node_index"] is not None:
+                receiver_idx = data["receiver_node_index"]
+            if receiver_idx is None:
+                # Fallback: use receiver_id, but this should be node index (0-21)
+                receiver_id = data[self.receiver_column]
+                # Check if it's a valid node index (0-21) or a player ID
+                if receiver_id <= 21:
+                    receiver_idx = receiver_id
+                else:
+                    # This is a player ID, not a node index
+                    # Fallback: use ball owner (closest to ball) or first node
+                    if "ball" in data:
+                        ball = np.array(data["ball"])
+                        ball_owner = int(np.argmax(ball)) if ball.sum() > 0 else 0
+                        receiver_idx = ball_owner
+                    else:
+                        # Ultimate fallback: use node 0
+                        receiver_idx = 0
+        
+        return torch.tensor(int(receiver_idx), dtype=torch.long)
     
     def get_edge_attributes(self, data: Dict[str, Any]) -> Optional[torch.Tensor]:
         """Extract edge attributes for receiver prediction.
@@ -489,6 +495,7 @@ class ShotSchema(DataSchema):
         team_column: Optional[str] = "team",
         ball_column: Optional[str] = "ball",
         shot_column: str = "shot_occurred",
+        receiver_column: Optional[str] = "receiver_id",
         field_length: float = 105.0,
         field_width: float = 68.0,
     ):
@@ -501,6 +508,7 @@ class ShotSchema(DataSchema):
             team_column: Column name for team information (optional)
             ball_column: Column name for ball possession (optional)
             shot_column: Column name for shot occurrence
+            receiver_column: Column name for receiver identifier (optional)
             field_length: Field length for normalization
             field_width: Field width for normalization
         """
@@ -510,6 +518,7 @@ class ShotSchema(DataSchema):
         self.team_column = team_column
         self.ball_column = ball_column
         self.shot_column = shot_column
+        self.receiver_column = receiver_column
         self.field_length = field_length
         self.field_width = field_width
     
@@ -599,6 +608,18 @@ class ShotSchema(DataSchema):
             shot_occurred = data[self.shot_column]
         
         return torch.tensor(shot_occurred, dtype=torch.float32).unsqueeze(0)
+
+    def get_receiver_target(self, data: Dict[str, Any]) -> torch.Tensor:
+        """Extract receiver target if available."""
+        if not self.receiver_column:
+            raise ValueError("ShotSchema receiver_column is not set")
+
+        if isinstance(data, pd.DataFrame):
+            receiver_id = int(data[self.receiver_column].iloc[0])
+        else:
+            receiver_id = int(data[self.receiver_column])
+
+        return torch.tensor(receiver_id, dtype=torch.long)
 
 
 class CVAESchema(DataSchema):

@@ -32,6 +32,11 @@ from .utils import (
     CosineAnnealingScheduler,
     EarlyStopping,
 )
+from .view_ops import (
+    D2_VIEWS,
+    align_views,
+    apply_view_transform,
+)
 
 __all__ = [
     "GraphBuilder",
@@ -60,4 +65,7 @@ __all__ = [
     "save_training_history",
     "CosineAnnealingScheduler",
     "EarlyStopping",
+    "D2_VIEWS",
+    "align_views",
+    "apply_view_transform",
 ]

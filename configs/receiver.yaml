@@ -25,14 +25,14 @@ scheduler:
 # Training configuration
 train:
   batch_size: 8
-  epochs: 5
+  epochs: 20
   amp: true  # Automatic mixed precision
 
 # Data configuration
 data:
-  train_path: "data/processed/receiver_train/data.pickle"
-  val_path: "data/processed/receiver_val/data.pickle"
-  test_path: "data/processed/receiver_test/data.pickle"
+  train_path: "data/processed_ck/receiver_train/data.pickle"
+  val_path: "data/processed_ck/receiver_val/data.pickle"
+  test_path: "data/processed_ck/receiver_test/data.pickle"
   format: "pickle"
 
 # Loss configuration
@@ -76,7 +76,7 @@ eval:
 # System configuration
 device: "auto"  # auto, cpu, cuda, mps
 seed: 42
-num_workers: 4
+num_workers: 0
 log_level: "INFO"
 log_dir: "runs"
 checkpoint_dir: "checkpoints"

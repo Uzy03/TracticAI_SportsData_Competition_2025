@@ -4,7 +4,7 @@ This module implements various evaluation metrics including accuracy,
 top-k accuracy, F1 score, AUC, and calibration metrics.
 """
 
-from typing import Optional, Union
+from typing import Any, Optional, Union
 import torch
 import torch.nn.functional as F
 import numpy as np

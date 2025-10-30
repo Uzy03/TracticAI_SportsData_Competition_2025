@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from ..modules.edge_features import compute_edge_features, EdgeFeatureEncoder
+from ..modules.view_ops import D2_VIEWS
 
 
 class GATv2Layer(nn.Module):
@@ -83,27 +84,41 @@ class GATv2Layer(nn.Module):
         nn.init.xavier_uniform_(self.att)
         if self.bias is not None:
             nn.init.constant_(self.bias, 0)
+        if getattr(self, "view_linear", None) is not None:
+            nn.init.eye_(self.view_linear.weight)
+            if self.view_linear.bias is not None:
+                nn.init.constant_(self.view_linear.bias, 0)
     
     def forward(
         self,
         x: torch.Tensor,
         edge_index: torch.Tensor,
         edge_attr: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
         return_attention_weights: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass.
         
         Args:
-            x: Node features [N, in_features]
+            x: Node features [N, in_features] or [B, N, in_features]
             edge_index: Edge connectivity [2, E]
             edge_attr: Edge features [E, edge_dim] (optional)
+            mask: Node mask [B, N] where 1=valid, 0=missing (optional)
             return_attention_weights: Whether to return attention weights
             
         Returns:
             Updated node features [N, out_features * heads] or [N, out_features]
             Attention weights [E, heads] (optional)
         """
-        N = x.size(0)
+        # Handle batch dimension
+        if x.dim() == 3:
+            B, N, num_features = x.size()
+            x = x.view(B * N, num_features)
+            if mask is not None:
+                mask = mask.view(B * N)
+        else:
+            B = 1
+            N = x.size(0)
         
         # Linear transformation
         h = self.W(x)  # [N, heads * out_features]
@@ -116,12 +131,21 @@ class GATv2Layer(nn.Module):
         # Compute attention coefficients
         att_scores = self._compute_attention(h, edge_index, edge_attr)  # [E, heads]
         
+        # Apply mask to attention scores (mask out missing nodes)
+        if mask is not None:
+            # mask is [N] or [B*N], expand to [E, heads]
+            dst = edge_index[1]  # Destination nodes
+            mask_dst = mask[dst]  # [E] 
+            mask_dst = mask_dst.unsqueeze(1).expand(-1, self.heads)  # [E, heads]
+            # Apply mask: missing nodes get -1e9 (will be ~0 after softmax)
+            att_scores = att_scores + (1 - mask_dst) * (-1e9)  # [E, heads]
+        
         # Apply dropout
         if self.training and self.dropout > 0:
             att_scores = F.dropout(att_scores, p=self.dropout, training=True)
         
         # Apply attention and aggregate
-        out = self._aggregate(h, edge_index, att_scores)  # [N, heads, out_features]
+        out = self._aggregate(h, edge_index, att_scores, mask)  # [N, heads, out_features]
         
         # Concatenate or average heads
         if self.concat:
@@ -132,6 +156,13 @@ class GATv2Layer(nn.Module):
         # Add bias
         if self.bias is not None:
             out = out + self.bias
+        
+        # Reshape back to batch format if needed
+        if B > 1:
+            out = out.view(B, N, -1)
+            if return_attention_weights:
+                return out, att_scores
+            return out
         
         if return_attention_weights:
             return out, att_scores
@@ -201,21 +232,32 @@ class GATv2Layer(nn.Module):
         h: torch.Tensor,
         edge_index: torch.Tensor, 
         att_scores: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Aggregate neighbor features using attention weights.
         
         Args:
             h: Node features [N, heads, out_features]
             edge_index: Edge connectivity [2, E]
-            att_scores: Attention scores [E, heads]
+            att_scores: Attention scores [E, heads] (already masked)
+            mask: Node mask [N] (optional)
             
         Returns:
             Aggregated features [N, heads, out_features]
         """
         src, dst = edge_index[0], edge_index[1]
         
-        # Normalize attention scores
-        att_weights = F.softmax(att_scores, dim=0)  # [E, heads]
+        # Normalize attention scores (softmax over j for each destination node i)
+        # For each destination node, normalize attention from all source nodes
+        att_weights = torch.zeros_like(att_scores)  # [E, heads]
+        unique_dst = torch.unique(dst)
+        
+        for d in unique_dst:
+            mask_d = (dst == d)
+            if mask_d.sum() > 0:
+                # Apply softmax to attention scores for edges going to destination d
+                # Softmax over all edges with same destination (dim=0 within the group)
+                att_weights[mask_d] = F.softmax(att_scores[mask_d], dim=0)
         
         # Initialize output
         out = torch.zeros_like(h)  # [N, heads, out_features]
@@ -228,9 +270,17 @@ class GATv2Layer(nn.Module):
             # Apply attention weights
             weighted_features = src_features * att_weights[:, i:i+1]  # [E, out_features]
             
-            # Aggregate to destination nodes
-            for j in range(len(dst)):
-                out[dst[j], i, :] += weighted_features[j]
+            # Aggregate to destination nodes using scatter_add
+            out[:, i, :] = torch.zeros_like(h[:, i, :])
+            for d in unique_dst:
+                mask_d = (dst == d)
+                if mask_d.sum() > 0:
+                    out[d, i, :] = weighted_features[mask_d].sum(dim=0)
+        
+        # Zero out missing nodes
+        if mask is not None:
+            mask_expanded = mask.unsqueeze(1).unsqueeze(2).expand_as(out)  # [N, heads, out_features]
+            out = out * mask_expanded
         
         return out
 
@@ -257,7 +307,7 @@ class GATv2Layer4View(nn.Module):
         negative_slope: Negative slope for LeakyReLU
         add_self_loops: Whether to add self-loops
         bias: Whether to use bias
-        view_mixing: Type of inter-view mixing ('attention', 'conv1d', 'mlp')
+        view_mixing: Inter-view mixing strategy ('attention', 'conv1x1', or 'none')
         weight_sharing: Whether to use weight sharing across views (default: True)
     """
     
@@ -285,38 +335,35 @@ class GATv2Layer4View(nn.Module):
         self.add_self_loops = add_self_loops
         self.view_mixing = view_mixing
         self.weight_sharing = weight_sharing
-        
-        # Linear transformation for each head
+        if view_mixing not in {"attention", "conv1x1", "none"}:
+            raise ValueError(
+                "view_mixing must be one of {'attention', 'conv1x1', 'none'}; "
+                f"got {view_mixing!r}"
+            )
+
+        # Linear transformation for each head (shared across views)
         self.W = nn.Linear(in_features, heads * out_features, bias=False)
         
         # Attention mechanism
         self.att = nn.Parameter(torch.empty(1, heads, 2 * out_features))
+        self._att_embed_dim = heads * out_features if concat else out_features
+        attn_heads = heads if concat else 1
         
-        # Inter-view mixing
+        # Inter-view mixing operators
         if view_mixing == "attention":
             self.view_att = nn.MultiheadAttention(
-                embed_dim=heads * out_features if concat else out_features,
-                num_heads=heads,
+                embed_dim=self._att_embed_dim,
+                num_heads=attn_heads,
                 dropout=dropout,
-                batch_first=True
+                batch_first=True,
             )
-        elif view_mixing == "conv1d":
-            self.view_conv = nn.Conv1d(
-                in_channels=heads * out_features if concat else out_features,
-                out_channels=heads * out_features if concat else out_features,
-                kernel_size=4,
-                padding=1,
-                groups=heads if not concat else 1
-            )
-        elif view_mixing == "mlp":
-            self.view_mlp = nn.Sequential(
-                nn.Linear(heads * out_features if concat else out_features, 
-                         (heads * out_features if concat else out_features) * 2),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear((heads * out_features if concat else out_features) * 2,
-                         heads * out_features if concat else out_features)
-            )
+            self.view_linear = None
+        elif view_mixing == "conv1x1":
+            self.view_att = None
+            self.view_linear = nn.Linear(4, 4, bias=True)
+        else:
+            self.view_att = None
+            self.view_linear = None
         
         if bias:
             self.bias = nn.Parameter(torch.empty(heads * out_features if concat else out_features))
@@ -419,36 +466,24 @@ class GATv2Layer4View(nn.Module):
         """
         B, V, N, D = h.shape
         
-        if self.view_mixing == "attention":
-            # Reshape for attention: [B*N, V, D]
+        if self.view_mixing == "attention" and self.view_att is not None:
             h_att = h.permute(0, 2, 1, 3).contiguous().view(B * N, V, D)
-            
-            # Self-attention across views
-            h_mixed, _ = self.view_att(h_att, h_att, h_att)
-            
-            # Reshape back: [B, V, N, D]
+            if D != self._att_embed_dim:
+                raise ValueError(
+                    f"Expected feature dimension {self._att_embed_dim} for attention mixing, got {D}."
+                )
+            h_mixed, _ = self.view_att(h_att, h_att, h_att, need_weights=False)
             h_mixed = h_mixed.view(B, N, V, D).permute(0, 2, 1, 3).contiguous()
-            
-        elif self.view_mixing == "conv1d":
-            # Reshape for conv1d: [B*N, D, V]
-            h_conv = h.permute(0, 2, 3, 1).contiguous().view(B * N, D, V)
-            
-            # 1D convolution across views
-            h_mixed = self.view_conv(h_conv)
-            
-            # Reshape back: [B, V, N, D]
-            h_mixed = h_mixed.view(B, N, D, V).permute(0, 3, 1, 2).contiguous()
-            
-        elif self.view_mixing == "mlp":
-            # Reshape for MLP: [B*V*N, D]
-            h_mlp = h.view(B * V * N, D)
-            
-            # MLP processing
-            h_mixed = self.view_mlp(h_mlp)
-            
-            # Reshape back: [B, V, N, D]
-            h_mixed = h_mixed.view(B, V, N, D)
-        
+        elif self.view_mixing == "conv1x1" and self.view_linear is not None:
+            h_lin = h.permute(0, 2, 3, 1)  # [B, N, D, V]
+            h_lin = self.view_linear(h_lin)
+            h_mixed = h_lin.permute(0, 3, 1, 2).contiguous()
+        else:
+            h_mixed = h
+
+        if self.training and self.dropout > 0:
+            h_mixed = F.dropout(h_mixed, p=self.dropout, training=True)
+
         return h_mixed
     
     def _add_self_loops(
@@ -477,7 +512,8 @@ class GATv2Layer4View(nn.Module):
     def _compute_attention(
         self, 
         h: torch.Tensor, 
-        edge_index: torch.Tensor
+        edge_index: torch.Tensor,
+        edge_attr: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute attention coefficients.
         
@@ -492,14 +528,11 @@ class GATv2Layer4View(nn.Module):
         
         # Concatenate source and destination features
         h_cat = torch.cat([h[:, src], h[:, dst]], dim=-1)  # [B*V, E, heads, 2 * out_features]
-        
+
         # Compute attention: a^T * LeakyReLU(W * [h_i || h_j])
         att_input = F.leaky_relu(h_cat, negative_slope=self.negative_slope)
         att_scores = (self.att * att_input).sum(dim=-1)  # [B*V, E, heads]
-        
-        # Average across batch*view dimension
-        att_scores = att_scores.mean(dim=0)  # [E, heads]
-        
+
         return att_scores
     
     def _aggregate(
@@ -521,23 +554,20 @@ class GATv2Layer4View(nn.Module):
         src, dst = edge_index[0], edge_index[1]
         
         # Normalize attention scores
-        att_weights = F.softmax(att_scores, dim=0)  # [E, heads]
-        
+        att_weights = F.softmax(att_scores, dim=1)  # [B*V, E, heads]
+
         # Initialize output
         out = torch.zeros_like(h)  # [B*V, N, heads, out_features]
-        
-        # Aggregate features for each head
-        for i in range(self.heads):
-            # Get source features for this head
-            src_features = h[:, src, i, :]  # [B*V, E, out_features]
-            
-            # Apply attention weights
-            weighted_features = src_features * att_weights[:, i:i+1].unsqueeze(0)  # [B*V, E, out_features]
-            
-            # Aggregate to destination nodes
-            for j in range(len(dst)):
-                out[:, dst[j], i, :] += weighted_features[:, j]
-        
+
+        num_samples = h.size(0)
+        for sample in range(num_samples):
+            sample_weights = att_weights[sample]  # [E, heads]
+            for head in range(self.heads):
+                src_features = h[sample, src, head, :]  # [E, out_features]
+                weighted = src_features * sample_weights[:, head:head + 1]
+                for edge_idx, dst_idx in enumerate(dst):
+                    out[sample, dst_idx, head, :] += weighted[edge_idx]
+
         return out
 
 
@@ -608,28 +638,30 @@ class GATv2Network(nn.Module):
         edge_index: torch.Tensor,
         edge_attr: Optional[torch.Tensor] = None,
         batch: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass.
         
         Args:
-            x: Node features [N, input_dim]
+            x: Node features [N, input_dim] or [B, N, input_dim]
             edge_index: Edge connectivity [2, E]
             edge_attr: Edge features [E, edge_dim] (optional)
             batch: Batch assignment [N] (optional, for global readout)
+            mask: Node mask [B, N] where 1=valid, 0=missing (optional)
             
         Returns:
             If batch is None: Node embeddings [N, output_dim]
             If batch is provided: (node_embeddings, graph_embeddings)
         """
         # Input projection
-        h = self.input_proj(x)  # [N, hidden_dim]
+        h = self.input_proj(x)  # [N, hidden_dim] or [B, N, hidden_dim]
         
         # GATv2 layers with residual connections
         for i, layer in enumerate(self.gat_layers):
-            h_new = layer(h, edge_index, edge_attr)
+            h_new = layer(h, edge_index, edge_attr, mask=mask)
             
             # Residual connection (except first layer)
-            if self.residual and i > 0 and h_new.size(1) == h.size(1):
+            if self.residual and i > 0 and h_new.size(-1) == h.size(-1):
                 h = h + h_new
             else:
                 h = h_new
@@ -640,7 +672,7 @@ class GATv2Network(nn.Module):
                 h = self.dropout_layer(h)
         
         # Output projection
-        node_embeddings = self.output_proj(h)  # [N, output_dim]
+        node_embeddings = self.output_proj(h)  # [N, output_dim] or [B, N, output_dim]
         
         # Global readout if batch is provided
         if batch is not None:
@@ -685,7 +717,7 @@ class GATv2Network4View(nn.Module):
         dropout: Dropout probability
         readout: Global readout method ('mean', 'sum', 'max', or None)
         residual: Whether to use residual connections
-        view_mixing: Type of inter-view mixing ('attention', 'conv1d', 'mlp')
+        view_mixing: Type of inter-view mixing ('attention', 'conv1x1', 'none')
     """
     
     def __init__(
@@ -757,6 +789,11 @@ class GATv2Network4View(nn.Module):
             If batch is None: Node embeddings [B, V=4, N, output_dim]
             If batch is provided: (node_embeddings, graph_embeddings)
         """
+        if x.dim() != 4 or x.size(1) != len(D2_VIEWS):
+            raise ValueError(
+                f"Expected input shaped [B, {len(D2_VIEWS)}, N, D] for four views, "
+                f"got {tuple(x.shape)}."
+            )
         # Input projection
         h = self.input_proj(x)  # [B, V=4, N, hidden_dim]
         

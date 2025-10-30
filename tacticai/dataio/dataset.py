@@ -190,6 +190,18 @@ class ReceiverDataset(TacticAIDataset):
             "batch": batch,
         }
         
+        # Add mask, team, ball if available in sample
+        if isinstance(sample, dict):
+            if "mask" in sample:
+                mask = np.array(sample["mask"])
+                input_data["mask"] = torch.tensor(mask, dtype=torch.float32)
+            if "team" in sample:
+                team = np.array(sample["team"])
+                input_data["team"] = torch.tensor(team, dtype=torch.long)
+            if "ball" in sample:
+                ball = np.array(sample["ball"])
+                input_data["ball"] = torch.tensor(ball, dtype=torch.float32)
+        
         # Apply transforms
         input_data, target = self._apply_transforms(input_data, target)
         

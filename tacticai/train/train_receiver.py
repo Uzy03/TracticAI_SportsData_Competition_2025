@@ -6,7 +6,7 @@ This script trains a GATv2 model to predict pass receivers in football matches.
 import argparse
 import yaml
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,7 +14,8 @@ from torch.utils.data import DataLoader
 import numpy as np
 from tqdm import tqdm
 
-from tacticai.models import GATv2Network, ReceiverHead
+from tacticai.models import GATv2Network4View, ReceiverHead
+from tacticai.modules.view_ops import apply_view_transform, D2_VIEWS
 from tacticai.dataio import ReceiverDataset, create_dataloader, create_dummy_dataset
 from tacticai.modules import (
     CrossEntropyLoss, TopKAccuracy, Accuracy, F1Score,
@@ -39,14 +40,14 @@ def load_config(config_path: str) -> Dict[str, Any]:
 
 
 class ReceiverModel(nn.Module):
-    """Complete receiver prediction model."""
+    """Complete receiver prediction model with D2 equivariance."""
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
         model_config = config["model"]
         
-        # Create backbone
-        self.backbone = GATv2Network(
+        # Create backbone with 4-view D2 equivariance
+        self.backbone = GATv2Network4View(
             input_dim=model_config["input_dim"],
             hidden_dim=model_config["hidden_dim"],
             output_dim=model_config["hidden_dim"],
@@ -55,6 +56,7 @@ class ReceiverModel(nn.Module):
             dropout=model_config["dropout"],
             readout="mean",
             residual=True,
+            view_mixing="attention",
         )
         
         # Create head
@@ -65,26 +67,92 @@ class ReceiverModel(nn.Module):
             dropout=model_config["dropout"],
         )
     
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
-        """Forward pass.
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        edge_index: torch.Tensor, 
+        batch: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        team: Optional[torch.Tensor] = None,
+        ball: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Forward pass with D2 equivariance.
         
         Args:
-            x: Node features
-            edge_index: Edge indices
-            batch: Batch indices
+            x: Node features [N, input_dim]
+            edge_index: Edge indices [2, E]
+            batch: Batch indices [N]
+            mask: Node mask [N] where 1=valid, 0=missing (optional)
+            team: Team IDs [N] where 0=attacking team, 1=defending team (optional)
+            ball: Ball possession [N] where 1=has ball, 0=no ball (optional)
             
         Returns:
-            Receiver predictions
+            Receiver predictions - shape depends on filtering:
+            - If team and ball provided: [N_attacking, num_classes] (filtered)
+            - Otherwise: [N, num_classes] (all nodes)
         """
-        # Get node embeddings from backbone
-        outputs = self.backbone(x, edge_index, batch)
-        if isinstance(outputs, tuple):
-            node_embeddings = outputs[0]
-        else:
-            node_embeddings = outputs
+        # Process each graph in batch separately (since 4-view processing is per-graph)
+        B = batch.max().item() + 1 if batch is not None else 1
         
-        # Apply head
-        return self.head(node_embeddings)
+        # Collect node embeddings for each graph
+        all_node_embeddings = []
+        
+        for b in range(B):
+            batch_mask = batch == b if batch is not None else torch.ones(x.size(0), dtype=torch.bool, device=x.device)
+            x_b = x[batch_mask]  # [N_b, D]
+            
+            # Create 4 views for this graph: identity, horizontal flip, vertical flip, both flips
+            # x coordinates are at indices 0, 1; velocity x, y at indices 2, 3
+            views = []
+            for view_name in D2_VIEWS:
+                view_idx = D2_VIEWS.index(view_name)
+                x_view = apply_view_transform(x_b, view_idx, xy_indices=(0, 1))  # Only flip x, y positions
+                views.append(x_view)
+            x_4view = torch.stack(views, dim=0).unsqueeze(0)  # [1, 4, N_b, D]
+            
+            # Build per-graph edge_index by subsetting and remapping to 0..N_b-1
+            orig_idx = torch.where(batch_mask)[0]
+            # Map original indices -> 0..N_b-1
+            remap = -torch.ones(x.size(0), dtype=torch.long, device=x.device)
+            remap[orig_idx] = torch.arange(orig_idx.numel(), device=x.device)
+            src_all, dst_all = edge_index[0], edge_index[1]
+            src_m = remap[src_all]
+            dst_m = remap[dst_all]
+            valid = (src_m >= 0) & (dst_m >= 0)
+            edge_index_b = torch.stack([src_m[valid], dst_m[valid]], dim=0)
+            
+            # Get node embeddings from backbone: [1, 4, N_b, output_dim]
+            # Note: GATv2Network4View expects [B, 4, N, D] input
+            node_emb_4view = self.backbone(x_4view, edge_index_b, None)  # batch=None since we handle per-graph
+            
+            # Average over 4 views: [N_b, output_dim]
+            node_emb = node_emb_4view[0].mean(dim=0)  # [N_b, output_dim]
+            
+            all_node_embeddings.append(node_emb)
+        
+        # Concatenate all node embeddings
+        node_embeddings = torch.cat(all_node_embeddings, dim=0)  # [N_total, output_dim]
+        
+        # Apply mask if provided (element-wise multiplication, not pooling)
+        if mask is not None:
+            mask_expanded = mask.unsqueeze(-1).expand_as(node_embeddings)  # [N, D]
+            node_embeddings = node_embeddings * mask_expanded
+        
+        # Get logits for all nodes
+        all_logits = self.head(node_embeddings)  # [N_total, num_classes]
+        
+        # Filter to attacking nodes (team=0) and exclude ball owner if both provided
+        if team is not None and ball is not None:
+            attacking_mask = (team == 0) & (ball == 0)  # Attacking team and not ball owner
+            if attacking_mask.sum() > 0:
+                # Return only attacking nodes (excluding ball owner)
+                return all_logits[attacking_mask]
+            else:
+                # Fallback: return all nodes (should not happen in practice)
+                return all_logits
+        else:
+            # No filtering: return predictions for all nodes
+            return all_logits
 
 
 def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
@@ -207,22 +275,53 @@ def train_epoch(
         
         if use_amp and scaler is not None:
             with torch.cuda.amp.autocast():
-                outputs = model(data["x"], data["edge_index"], data["batch"])
+                # Pass mask, team, ball if available
+                outputs = model(
+                    data["x"], 
+                    data["edge_index"], 
+                    data["batch"],
+                    mask=data.get("mask"),
+                    team=data.get("team"),
+                    ball=data.get("ball"),
+                )
                 
-                # Extract predictions for first node of each graph (receiver prediction)
+                # Handle filtered outputs (only attacking nodes) or all nodes
                 batch_size = data["batch"].max().item() + 1
                 graph_outputs = []
                 graph_targets = []
+                output_idx = 0
                 
                 for i in range(batch_size):
                     node_mask = data["batch"] == i
                     if node_mask.any():
-                        first_node_idx = node_mask.nonzero(as_tuple=True)[0][0]
-                        graph_outputs.append(outputs[first_node_idx])
-                        graph_targets.append(targets[i])
+                        # Get attacking nodes for this graph
+                        if "team" in data and "ball" in data:
+                            team_i = data["team"][node_mask]
+                            ball_i = data["ball"][node_mask]
+                            attacking_mask = (team_i == 0) & (ball_i == 0)
+                            num_attacking = attacking_mask.sum().item()
+                            if num_attacking > 0:
+                                graph_outputs.append(outputs[output_idx:output_idx+num_attacking])
+                                # Find receiver node index within attacking nodes
+                                receiver_node_idx = targets[i].item()  # Original node index
+                                # Map to attacking node index
+                                attacking_indices = torch.where(node_mask)[0]
+                                attacking_indices_i = attacking_indices[attacking_mask]
+                                if receiver_node_idx in attacking_indices_i:
+                                    receiver_attacking_idx = (attacking_indices_i == receiver_node_idx).nonzero(as_tuple=True)[0][0].item()
+                                    graph_targets.append(receiver_attacking_idx)
+                                else:
+                                    # Receiver is ball owner or defender, skip or use fallback
+                                    graph_targets.append(0)
+                                output_idx += num_attacking
+                        else:
+                            # Fallback: use first node
+                            graph_outputs.append(outputs[output_idx:output_idx+1])
+                            graph_targets.append(targets[i])
+                            output_idx += 1
                 
                 if graph_outputs:
-                    graph_outputs = torch.stack(graph_outputs)
+                    graph_outputs = torch.cat(graph_outputs, dim=0)
                     graph_targets = torch.tensor(graph_targets, dtype=torch.long, device=outputs.device)
                     loss = criterion(graph_outputs, graph_targets)
                 else:
@@ -232,22 +331,56 @@ def train_epoch(
             scaler.step(optimizer)
             scaler.update()
         else:
-            outputs = model(data["x"], data["edge_index"], data["batch"])
+            # Pass mask, team, ball if available
+            outputs = model(
+                data["x"], 
+                data["edge_index"], 
+                data["batch"],
+                mask=data.get("mask"),
+                team=data.get("team"),
+                ball=data.get("ball"),
+            )
             
-            # Extract predictions for first node of each graph (receiver prediction)
+            # Handle filtered outputs (only attacking nodes) or all nodes
             batch_size = data["batch"].max().item() + 1
             graph_outputs = []
             graph_targets = []
+            output_idx = 0
             
             for i in range(batch_size):
                 node_mask = data["batch"] == i
                 if node_mask.any():
-                    first_node_idx = node_mask.nonzero(as_tuple=True)[0][0]
-                    graph_outputs.append(outputs[first_node_idx])
-                    graph_targets.append(targets[i])
+                    # Get attacking nodes for this graph
+                    if "team" in data and "ball" in data:
+                        team_i = data["team"][node_mask]
+                        ball_i = data["ball"][node_mask]
+                        attacking_mask = (team_i == 0) & (ball_i == 0)
+                        num_attacking = attacking_mask.sum().item()
+                        if num_attacking > 0:
+                            graph_outputs.append(outputs[output_idx:output_idx+num_attacking])
+                            # Find receiver node index within attacking nodes
+                            receiver_node_idx = targets[i].item()  # Original node index
+                            # Map to attacking node index
+                            attacking_indices = torch.where(node_mask)[0]
+                            attacking_indices_i = attacking_indices[attacking_mask]
+                            if len(attacking_indices_i) > 0 and receiver_node_idx < len(attacking_indices_i):
+                                # Check if receiver is in attacking nodes
+                                if receiver_node_idx in attacking_indices_i:
+                                    receiver_attacking_idx = (attacking_indices_i == receiver_node_idx).nonzero(as_tuple=True)[0][0].item()
+                                else:
+                                    receiver_attacking_idx = 0  # Fallback
+                            else:
+                                receiver_attacking_idx = 0  # Fallback
+                            graph_targets.append(receiver_attacking_idx)
+                            output_idx += num_attacking
+                    else:
+                        # Fallback: use first node
+                        graph_outputs.append(outputs[output_idx:output_idx+1])
+                        graph_targets.append(targets[i])
+                        output_idx += 1
             
             if graph_outputs:
-                graph_outputs = torch.stack(graph_outputs)
+                graph_outputs = torch.cat(graph_outputs, dim=0)
                 graph_targets = torch.tensor(graph_targets, dtype=torch.long, device=outputs.device)
                 loss = criterion(graph_outputs, graph_targets)
             else:
@@ -313,22 +446,56 @@ def validate_epoch(
             data = {k: v.to(device) for k, v in data.items()}
             targets = targets.to(device)
             
-            outputs = model(data["x"], data["edge_index"], data["batch"])
+            # Pass mask, team, ball if available
+            outputs = model(
+                data["x"], 
+                data["edge_index"], 
+                data["batch"],
+                mask=data.get("mask"),
+                team=data.get("team"),
+                ball=data.get("ball"),
+            )
             
-            # Extract predictions for first node of each graph (receiver prediction)
+            # Handle filtered outputs (only attacking nodes) or all nodes
             batch_size = data["batch"].max().item() + 1
             graph_outputs = []
             graph_targets = []
+            output_idx = 0
             
             for i in range(batch_size):
                 node_mask = data["batch"] == i
                 if node_mask.any():
-                    first_node_idx = node_mask.nonzero(as_tuple=True)[0][0]
-                    graph_outputs.append(outputs[first_node_idx])
-                    graph_targets.append(targets[i])
+                    # Get attacking nodes for this graph
+                    if "team" in data and "ball" in data:
+                        team_i = data["team"][node_mask]
+                        ball_i = data["ball"][node_mask]
+                        attacking_mask = (team_i == 0) & (ball_i == 0)
+                        num_attacking = attacking_mask.sum().item()
+                        if num_attacking > 0:
+                            graph_outputs.append(outputs[output_idx:output_idx+num_attacking])
+                            # Find receiver node index within attacking nodes
+                            receiver_node_idx = targets[i].item()  # Original node index
+                            # Map to attacking node index
+                            attacking_indices = torch.where(node_mask)[0]
+                            attacking_indices_i = attacking_indices[attacking_mask]
+                            if len(attacking_indices_i) > 0 and receiver_node_idx < len(attacking_indices_i):
+                                # Check if receiver is in attacking nodes
+                                if receiver_node_idx in attacking_indices_i:
+                                    receiver_attacking_idx = (attacking_indices_i == receiver_node_idx).nonzero(as_tuple=True)[0][0].item()
+                                else:
+                                    receiver_attacking_idx = 0  # Fallback
+                            else:
+                                receiver_attacking_idx = 0  # Fallback
+                            graph_targets.append(receiver_attacking_idx)
+                            output_idx += num_attacking
+                    else:
+                        # Fallback: use first node
+                        graph_outputs.append(outputs[output_idx:output_idx+1])
+                        graph_targets.append(targets[i])
+                        output_idx += 1
             
             if graph_outputs:
-                graph_outputs = torch.stack(graph_outputs)
+                graph_outputs = torch.cat(graph_outputs, dim=0)
                 graph_targets = torch.tensor(graph_targets, dtype=torch.long, device=outputs.device)
                 
                 loss = criterion(graph_outputs, graph_targets)

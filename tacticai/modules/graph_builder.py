@@ -84,49 +84,29 @@ def compute_edge_attributes(
     include_bearing: bool = True,
     include_team_info: Optional[torch.Tensor] = None,
 ) -> Optional[torch.Tensor]:
-    """Compute edge attributes from node positions and optional team information.
+    """Compute edge attributes from node positions (same_team only).
     
     Args:
         positions: Node positions [N, 2]
         edge_index: Edge connectivity [2, E]
-        include_distance: Whether to include distance as edge attribute
-        include_bearing: Whether to include bearing as edge attribute
-        include_team_info: Team information [N] (optional)
+        include_distance: Whether to include distance (unused, kept for compatibility)
+        include_bearing: Whether to include bearing (unused, kept for compatibility)
+        include_team_info: Team information [N] (required)
         
     Returns:
-        Edge attributes [E, edge_dim] or None if no attributes requested
+        Edge attributes [E, 1] (same_team only) or None if team_info not provided
     """
-    num_edges = edge_index.size(1)
-    edge_attrs = []
+    if include_team_info is None:
+        return None
     
     src, dst = edge_index[0], edge_index[1]
     
-    # Distance
-    if include_distance:
-        src_pos = positions[src]
-        dst_pos = positions[dst]
-        distance = torch.norm(dst_pos - src_pos, dim=1, keepdim=True)
-        edge_attrs.append(distance)
+    # Team information only (same_team)
+    src_team = include_team_info[src].float()
+    dst_team = include_team_info[dst].float()
+    same_team = (src_team == dst_team).float().unsqueeze(1)  # [E, 1]
     
-    # Bearing (angle from source to destination)
-    if include_bearing:
-        src_pos = positions[src]
-        dst_pos = positions[dst]
-        diff = dst_pos - src_pos
-        bearing = torch.atan2(diff[:, 1], diff[:, 0]).unsqueeze(1)
-        edge_attrs.append(bearing)
-    
-    # Team information
-    if include_team_info is not None:
-        src_team = include_team_info[src].float()
-        dst_team = include_team_info[dst].float()
-        same_team = (src_team == dst_team).float().unsqueeze(1)
-        edge_attrs.append(same_team)
-    
-    if not edge_attrs:
-        return None
-    
-    return torch.cat(edge_attrs, dim=1)
+    return same_team
 
 
 class GraphBuilder:

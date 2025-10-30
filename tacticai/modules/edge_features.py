@@ -43,58 +43,28 @@ def compute_edge_features(
     ball_positions: Optional[torch.Tensor] = None,
     set_piece_info: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Compute comprehensive edge features.
+    """Compute edge features (same_team only).
     
     Args:
         node_positions: Node positions [N, 2] (x, y)
         edge_index: Edge connectivity [2, E]
         team_ids: Team IDs [N] (0 for team A, 1 for team B)
-        ball_positions: Ball positions [N] (optional)
-        set_piece_info: Set piece information [N] (optional)
+        ball_positions: Ball positions [N] (optional, unused)
+        set_piece_info: Set piece information [N] (optional, unused)
         
     Returns:
-        Edge features [E, edge_dim]
+        Edge features [E, 1] (same_team only)
     """
     src, dst = edge_index[0], edge_index[1]
     
-    # Get source and destination positions
-    src_pos = node_positions[src]  # [E, 2]
-    dst_pos = node_positions[dst]  # [E, 2]
-    
-    # Compute distance and bearing
-    distance, bearing = compute_distance_bearing(src_pos, dst_pos)
-    
-    # Initialize edge features
-    edge_features = [distance, bearing]
-    
-    # Team membership features
+    # Team membership feature (same_team only)
     if team_ids is not None:
-        src_team = team_ids[src].float().unsqueeze(-1)  # [E, 1]
-        dst_team = team_ids[dst].float().unsqueeze(-1)  # [E, 1]
-        same_team = (src_team == dst_team).float()  # [E, 1]
-        
-        edge_features.extend([src_team, dst_team, same_team])
+        same_team = (team_ids[src] == team_ids[dst]).float().unsqueeze(-1)  # [E, 1]
+    else:
+        # Default: assume alternating teams (first 11 = team 0, next 11 = team 1)
+        same_team = ((src // 11) == (dst // 11)).float().unsqueeze(-1)  # [E, 1]
     
-    # Ball proximity features
-    if ball_positions is not None:
-        # Distance from source to ball
-        src_to_ball_dist, _ = compute_distance_bearing(src_pos, ball_positions[src])
-        # Distance from destination to ball
-        dst_to_ball_dist, _ = compute_distance_bearing(dst_pos, ball_positions[dst])
-        
-        edge_features.extend([src_to_ball_dist, dst_to_ball_dist])
-    
-    # Set piece features
-    if set_piece_info is not None:
-        src_set_piece = set_piece_info[src].float().unsqueeze(-1)  # [E, 1]
-        dst_set_piece = set_piece_info[dst].float().unsqueeze(-1)  # [E, 1]
-        
-        edge_features.extend([src_set_piece, dst_set_piece])
-    
-    # Concatenate all features
-    edge_features = torch.cat(edge_features, dim=-1)  # [E, edge_dim]
-    
-    return edge_features
+    return same_team
 
 
 def compute_graph_features(
@@ -271,28 +241,18 @@ def get_edge_feature_dim(
     include_ball: bool = True,
     include_set_piece: bool = True,
 ) -> int:
-    """Get edge feature dimension based on included features.
+    """Get edge feature dimension (same_team only).
     
     Args:
-        include_team: Whether to include team features
-        include_ball: Whether to include ball features
-        include_set_piece: Whether to include set piece features
+        include_team: Whether to include team features (must be True)
+        include_ball: Whether to include ball features (unused)
+        include_set_piece: Whether to include set piece features (unused)
         
     Returns:
-        Edge feature dimension
+        Edge feature dimension (always 1 for same_team only)
     """
-    dim = 2  # distance + bearing
-    
-    if include_team:
-        dim += 3  # src_team + dst_team + same_team
-    
-    if include_ball:
-        dim += 2  # src_to_ball_dist + dst_to_ball_dist
-    
-    if include_set_piece:
-        dim += 2  # src_set_piece + dst_set_piece
-    
-    return dim
+    # Only return same_team feature dimension
+    return 1
 
 
 def get_graph_feature_dim(

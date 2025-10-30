@@ -2,11 +2,11 @@
 
 This module implements task-specific heads for:
 - Receiver Prediction: Node classification head
-- Shot Prediction: Graph classification head  
+- Shot Prediction: Graph classification head
 - Tactic Generation: Conditional generation head
 """
 
-from typing import Optional
+from typing import Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -102,10 +102,10 @@ class ShotHeadConditional(nn.Module):
         )
     
     def forward(
-        self, 
-        graph_embeddings: torch.Tensor, 
+        self,
+        graph_embeddings: torch.Tensor,
         receiver_ids: Optional[torch.Tensor] = None,
-        training: bool = True
+        training: bool = True,
     ) -> torch.Tensor:
         """Forward pass.
         
@@ -118,8 +118,8 @@ class ShotHeadConditional(nn.Module):
             Shot predictions [B, 1] or [B, receiver_dim] (for inference)
         """
         if training and receiver_ids is not None:
-            # Training: use ground truth receiver
-            receiver_emb = self.receiver_embedding(receiver_ids)  # [B, hidden_dim]
+            # Training: use ground truth receiver encoding (index or one-hot)
+            receiver_emb = self._encode_receiver(receiver_ids)
             x = torch.cat([graph_embeddings, receiver_emb], dim=-1)
             return self.mlp(x)  # [B, 1]
         else:
@@ -144,6 +144,93 @@ class ShotHeadConditional(nn.Module):
             predictions = predictions.view(B, self.receiver_dim)
             
             return predictions
+
+    def _encode_receiver(self, receiver_ids: torch.Tensor) -> torch.Tensor:
+        """Encode receiver information as embeddings.
+
+        Supports integer indices or one-hot / probability distributions.
+        """
+        if receiver_ids.dim() == 1:
+            return self.receiver_embedding(receiver_ids)
+        if receiver_ids.dim() == 2 and receiver_ids.size(1) == self.receiver_dim:
+            # Weighted embedding (one-hot or distribution)
+            weight_matrix = receiver_ids
+            return weight_matrix @ self.receiver_embedding.weight  # [B, hidden_dim]
+        raise ValueError(
+            "receiver_ids must be shape [B] (indices) or [B, receiver_dim] (one-hot/distribution)."
+        )
+
+
+class ShotHeadNodeBased(nn.Module):
+    """Node-based conditional shot prediction head (per player parallel prediction).
+    
+    Predicts shot probability for each player as potential receiver using node embeddings.
+    Implements advice approach: H [B, N, d] -> shot_logits [B, N].
+    
+    Args:
+        input_dim: Node embedding dimension
+        hidden_dim: Hidden dimension for MLP
+        dropout: Dropout probability
+        use_context: Whether to inject global context
+    """
+    
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = 128,
+        dropout: float = 0.2,
+        use_context: bool = True,
+    ):
+        super().__init__()
+        
+        self.input_dim = input_dim
+        self.use_context = use_context
+        
+        if use_context:
+            # Input: concatenate node embedding and global context [node_dim, context_dim]
+            self.mlp = nn.Sequential(
+                nn.Linear(input_dim + input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, 1),
+            )
+        else:
+            self.mlp = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, 1),
+            )
+    
+    def forward(self, node_embeddings: torch.Tensor) -> torch.Tensor:
+        """Forward pass.
+        
+        Args:
+            node_embeddings: Node embeddings [B, N, input_dim]
+            
+        Returns:
+            Shot logits [B, N] (one prediction per player as receiver)
+        """
+        if self.use_context:
+            # Compute global context
+            ctx = node_embeddings.mean(dim=1, keepdim=True)  # [B, 1, input_dim]
+            ctx_tiled = ctx.expand_as(node_embeddings)  # [B, N, input_dim]
+            
+            # Concatenate node and context
+            x = torch.cat([node_embeddings, ctx_tiled], dim=-1)  # [B, N, 2*input_dim]
+        else:
+            x = node_embeddings
+        
+        # Apply MLP
+        logits = self.mlp(x)  # [B, N, 1]
+        
+        return logits.squeeze(-1)  # [B, N]
 
 
 class ShotHead(nn.Module):
@@ -450,3 +537,30 @@ class TacticAI(nn.Module):
             return self.head(graph_embeddings, conditions, training)
         else:
             raise ValueError(f"Unknown task: {self.task}")
+
+
+def marginalize_shot(
+    receiver_probs: torch.Tensor,
+    shot_given_receiver: torch.Tensor,
+) -> torch.Tensor:
+    """Marginalize conditional shot probabilities over receivers.
+
+    Args:
+        receiver_probs: Receiver probabilities ``[B, R]``.
+        shot_given_receiver: Conditional shot outputs ``[B, R]`` or
+            ``[B, R, 1]`` (logits or probabilities).
+
+    Returns:
+        Marginalized shot values ``[B, 1]`` in the same space (logit/prob)
+        as ``shot_given_receiver``.
+    """
+
+    if shot_given_receiver.dim() == 3:
+        shot_given_receiver = shot_given_receiver.squeeze(-1)
+
+    if receiver_probs.shape != shot_given_receiver.shape:
+        raise ValueError(
+            "receiver_probs and shot_given_receiver must have matching shapes."
+        )
+
+    return (receiver_probs * shot_given_receiver).sum(dim=1, keepdim=True)
