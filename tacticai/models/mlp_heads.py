@@ -15,13 +15,13 @@ from .gatv2 import GATv2Network
 
 
 class ReceiverHead(nn.Module):
-    """Node classification head for receiver prediction.
+    """Per-node logit head for receiver prediction (node-axis softmax用).
     
-    Predicts which player will receive the pass (22-class classification).
+    各ノードについて1スカラーlogitを出力し、候補集合上でsoftmaxを取る設計。
     
     Args:
         input_dim: Input feature dimension
-        num_classes: Number of receiver classes (default: 22)
+        num_classes: Unused (kept for compatibility)
         hidden_dim: Hidden dimension for MLP
         dropout: Dropout probability
     """
@@ -46,7 +46,7 @@ class ReceiverHead(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_classes),
+            nn.Linear(hidden_dim, 1),
         )
     
     def forward(self, node_embeddings: torch.Tensor) -> torch.Tensor:
@@ -56,7 +56,7 @@ class ReceiverHead(nn.Module):
             node_embeddings: Node embeddings [N, input_dim]
             
         Returns:
-            Receiver predictions [N, num_classes]
+            Per-node logits [N, 1]
         """
         return self.mlp(node_embeddings)
 

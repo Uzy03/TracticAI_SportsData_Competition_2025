@@ -1,0 +1,20 @@
+version: "3.9"
+services:
+  dev:
+    build: .
+    image: gpu-dev:cuda124
+    container_name: gpu-dev
+    working_dir: /workspace
+    volumes:
+      # 親ディレクトリ（プロジェクトルート）をマウント
+      - ..:/workspace
+    ports:
+      - "8888:8888"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    stdin_open: true
+    tty: true
+

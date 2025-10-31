@@ -260,8 +260,17 @@ def train_epoch(
     model.train()
     
     total_loss = 0.0
-    all_predictions = []
-    all_targets = []
+    num_graphs_total = 0
+    # metrics accumulators
+    acc_correct = 0
+    # diagnostics
+    excluded_not_attacking = 0
+    excluded_ball_owner = 0
+    excluded_invalid = 0
+    cand_counts = []
+    top1_correct = 0
+    top3_correct = 0
+    top5_correct = 0
     
     scaler = torch.cuda.amp.GradScaler() if use_amp else None
     
@@ -289,7 +298,7 @@ def train_epoch(
                 batch_size = data["batch"].max().item() + 1
                 graph_outputs = []
                 graph_targets = []
-                output_idx = 0
+                output_ptr = 0
                 
                 for i in range(batch_size):
                     node_mask = data["batch"] == i
@@ -301,31 +310,54 @@ def train_epoch(
                             attacking_mask = (team_i == 0) & (ball_i == 0)
                             num_attacking = attacking_mask.sum().item()
                             if num_attacking > 0:
-                                graph_outputs.append(outputs[output_idx:output_idx+num_attacking])
-                                # Find receiver node index within attacking nodes
-                                receiver_node_idx = targets[i].item()  # Original node index
-                                # Map to attacking node index
+                                # outputsは候補ノード連結順のロジット
+                                cand_logits = outputs[output_ptr:output_ptr+num_attacking].squeeze(-1)
+                                output_ptr += num_attacking
                                 attacking_indices = torch.where(node_mask)[0]
                                 attacking_indices_i = attacking_indices[attacking_mask]
-                                if receiver_node_idx in attacking_indices_i:
+                                receiver_node_idx = targets[i].item()
+                                # strict: include only if receiver is in candidates
+                                if (attacking_indices_i == receiver_node_idx).any():
                                     receiver_attacking_idx = (attacking_indices_i == receiver_node_idx).nonzero(as_tuple=True)[0][0].item()
+                                    graph_outputs.append(cand_logits)
                                     graph_targets.append(receiver_attacking_idx)
+                                    cand_counts.append(int(num_attacking))
                                 else:
-                                    # Receiver is ball owner or defender, skip or use fallback
-                                    graph_targets.append(0)
-                                output_idx += num_attacking
+                                    # count exclusions
+                                    if (ball_i.sum() > 0) and (ball_i[receiver_node_idx] if receiver_node_idx < ball_i.numel() else False):
+                                        excluded_ball_owner += 1
+                                    elif receiver_node_idx >= team_i.numel():
+                                        excluded_invalid += 1
+                                    else:
+                                        excluded_not_attacking += 1
                         else:
                             # Fallback: use first node
                             graph_outputs.append(outputs[output_idx:output_idx+1])
                             graph_targets.append(targets[i])
                             output_idx += 1
                 
-                if graph_outputs:
-                    graph_outputs = torch.cat(graph_outputs, dim=0)
-                    graph_targets = torch.tensor(graph_targets, dtype=torch.long, device=outputs.device)
-                    loss = criterion(graph_outputs, graph_targets)
-                else:
+                # 可変長のため、グラフ単位で損失を集計
+                loss = 0.0
+                graphs_in_batch = 0
+                for logits_b, target_b in zip(graph_outputs, graph_targets):
+                    # logits_b: 各候補ノードのスカラーlogit -> [num_attacking]
+                    lb_row = logits_b.view(-1)  # [num_attacking]
+                    lb = lb_row.unsqueeze(0)     # [1, num_attacking]
+                    target_t = torch.tensor([target_b], dtype=torch.long, device=lb.device)
+                    loss = loss + criterion(lb, target_t)
+                    # metrics
+                    pred_top1 = torch.argmax(lb, dim=1)
+                    acc_correct += int(pred_top1.item() == target_b)
+                    top1_correct += int(pred_top1.item() == target_b)
+                    k3 = min(3, lb.size(1))
+                    k5 = min(5, lb.size(1))
+                    top3_correct += int(target_b in torch.topk(lb, k=k3, dim=1).indices[0].tolist())
+                    top5_correct += int(target_b in torch.topk(lb, k=k5, dim=1).indices[0].tolist())
+                    graphs_in_batch += 1
+                if graphs_in_batch == 0:
                     continue
+                loss = loss / graphs_in_batch
+                num_graphs_total += graphs_in_batch
             
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -345,7 +377,7 @@ def train_epoch(
             batch_size = data["batch"].max().item() + 1
             graph_outputs = []
             graph_targets = []
-            output_idx = 0
+            output_ptr = 0
             
             for i in range(batch_size):
                 node_mask = data["batch"] == i
@@ -357,60 +389,66 @@ def train_epoch(
                         attacking_mask = (team_i == 0) & (ball_i == 0)
                         num_attacking = attacking_mask.sum().item()
                         if num_attacking > 0:
-                            graph_outputs.append(outputs[output_idx:output_idx+num_attacking])
-                            # Find receiver node index within attacking nodes
-                            receiver_node_idx = targets[i].item()  # Original node index
-                            # Map to attacking node index
+                            cand_logits = outputs[output_ptr:output_ptr+num_attacking].squeeze(-1)
+                            output_ptr += num_attacking
+                            receiver_node_idx = targets[i].item()
                             attacking_indices = torch.where(node_mask)[0]
                             attacking_indices_i = attacking_indices[attacking_mask]
-                            if len(attacking_indices_i) > 0 and receiver_node_idx < len(attacking_indices_i):
-                                # Check if receiver is in attacking nodes
-                                if receiver_node_idx in attacking_indices_i:
-                                    receiver_attacking_idx = (attacking_indices_i == receiver_node_idx).nonzero(as_tuple=True)[0][0].item()
-                                else:
-                                    receiver_attacking_idx = 0  # Fallback
+                            if (attacking_indices_i == receiver_node_idx).any():
+                                receiver_attacking_idx = (attacking_indices_i == receiver_node_idx).nonzero(as_tuple=True)[0][0].item()
+                                graph_outputs.append(cand_logits)
+                                graph_targets.append(receiver_attacking_idx)
                             else:
-                                receiver_attacking_idx = 0  # Fallback
-                            graph_targets.append(receiver_attacking_idx)
-                            output_idx += num_attacking
+                                continue
                     else:
                         # Fallback: use first node
                         graph_outputs.append(outputs[output_idx:output_idx+1])
                         graph_targets.append(targets[i])
                         output_idx += 1
             
-            if graph_outputs:
-                graph_outputs = torch.cat(graph_outputs, dim=0)
-                graph_targets = torch.tensor(graph_targets, dtype=torch.long, device=outputs.device)
-                loss = criterion(graph_outputs, graph_targets)
-            else:
+            # 可変長のため、グラフ単位で損失を集計
+            loss = 0.0
+            graphs_in_batch = 0
+            for logits_b, target_b in zip(graph_outputs, graph_targets):
+                lb_row = logits_b.view(-1)
+                lb = lb_row.unsqueeze(0)
+                target_t = torch.tensor([target_b], dtype=torch.long, device=lb.device)
+                loss = loss + criterion(lb, target_t)
+                # metrics
+                pred_top1 = torch.argmax(lb, dim=1)
+                acc_correct += int(pred_top1.item() == target_b)
+                top1_correct += int(pred_top1.item() == target_b)
+                k3 = min(3, lb.size(1))
+                k5 = min(5, lb.size(1))
+                top3_correct += int(target_b in torch.topk(lb, k=k3, dim=1).indices[0].tolist())
+                top5_correct += int(target_b in torch.topk(lb, k=k5, dim=1).indices[0].tolist())
+                graphs_in_batch += 1
+            if graphs_in_batch == 0:
                 continue
+            loss = loss / graphs_in_batch
+            num_graphs_total += graphs_in_batch
             
             loss.backward()
             optimizer.step()
         
         total_loss += loss.item()
         
-        # Collect predictions and targets for metrics
-        with torch.no_grad():
-            if 'graph_outputs' in locals():
-                all_predictions.append(graph_outputs.cpu())
-                all_targets.append(graph_targets.cpu())
-        
         # Update progress bar
         progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
     
-    # Compute metrics
-    all_predictions = torch.cat(all_predictions, dim=0)
-    all_targets = torch.cat(all_targets, dim=0)
-    
+    # Compute metrics (手計算)
+    denom = max(1, num_graphs_total)
     epoch_metrics = {
-        "loss": total_loss / len(dataloader),
-        "accuracy": metrics["accuracy"](all_predictions, all_targets).item(),
-        "top1": metrics["top1"](all_predictions, all_targets).item(),
-        "top3": metrics["top3"](all_predictions, all_targets).item(),
-        "top5": metrics["top5"](all_predictions, all_targets).item(),
+        "loss": total_loss / max(1, len(dataloader)),
+        "accuracy": acc_correct / denom,
+        "top1": top1_correct / denom,
+        "top3": top3_correct / denom,
+        "top5": top5_correct / denom,
     }
+    if hasattr(torch.utils, 'tensorboard'):
+        pass
+    # simple stdout diagnostics via logger in caller
+    print(f"[Train] excluded_not_attacking={excluded_not_attacking} excluded_ball_owner={excluded_ball_owner} excluded_invalid={excluded_invalid} avg_cand={sum(cand_counts)/len(cand_counts) if cand_counts else 0:.2f}")
     
     return epoch_metrics
 
@@ -437,8 +475,15 @@ def validate_epoch(
     model.eval()
     
     total_loss = 0.0
-    all_predictions = []
-    all_targets = []
+    num_graphs_total = 0
+    acc_correct = 0
+    top1_correct = 0
+    top3_correct = 0
+    top5_correct = 0
+    excluded_not_attacking = 0
+    excluded_ball_owner = 0
+    excluded_invalid = 0
+    cand_counts = []
     
     with torch.no_grad():
         for data, targets in tqdm(dataloader, desc="Validation"):
@@ -472,49 +517,58 @@ def validate_epoch(
                         attacking_mask = (team_i == 0) & (ball_i == 0)
                         num_attacking = attacking_mask.sum().item()
                         if num_attacking > 0:
-                            graph_outputs.append(outputs[output_idx:output_idx+num_attacking])
-                            # Find receiver node index within attacking nodes
-                            receiver_node_idx = targets[i].item()  # Original node index
-                            # Map to attacking node index
+                            cand_logits = outputs[attacking_indices[attacking_mask]]
                             attacking_indices = torch.where(node_mask)[0]
                             attacking_indices_i = attacking_indices[attacking_mask]
-                            if len(attacking_indices_i) > 0 and receiver_node_idx < len(attacking_indices_i):
-                                # Check if receiver is in attacking nodes
-                                if receiver_node_idx in attacking_indices_i:
-                                    receiver_attacking_idx = (attacking_indices_i == receiver_node_idx).nonzero(as_tuple=True)[0][0].item()
-                                else:
-                                    receiver_attacking_idx = 0  # Fallback
+                            receiver_node_idx = targets[i].item()
+                            if (attacking_indices_i == receiver_node_idx).any():
+                                receiver_attacking_idx = (attacking_indices_i == receiver_node_idx).nonzero(as_tuple=True)[0][0].item()
+                                graph_outputs.append(cand_logits)
+                                graph_targets.append(receiver_attacking_idx)
+                                cand_counts.append(int(num_attacking))
                             else:
-                                receiver_attacking_idx = 0  # Fallback
-                            graph_targets.append(receiver_attacking_idx)
-                            output_idx += num_attacking
+                                if (ball_i.sum() > 0) and (ball_i[receiver_node_idx] if receiver_node_idx < ball_i.numel() else False):
+                                    excluded_ball_owner += 1
+                                elif receiver_node_idx >= team_i.numel():
+                                    excluded_invalid += 1
+                                else:
+                                    excluded_not_attacking += 1
                     else:
                         # Fallback: use first node
                         graph_outputs.append(outputs[output_idx:output_idx+1])
                         graph_targets.append(targets[i])
                         output_idx += 1
             
-            if graph_outputs:
-                graph_outputs = torch.cat(graph_outputs, dim=0)
-                graph_targets = torch.tensor(graph_targets, dtype=torch.long, device=outputs.device)
-                
-                loss = criterion(graph_outputs, graph_targets)
-                total_loss += loss.item()
-                
-                all_predictions.append(graph_outputs.cpu())
-                all_targets.append(graph_targets.cpu())
+            # 可変長: グラフ単位で損失と指標
+            batch_loss = 0.0
+            graphs_in_batch = 0
+            for logits_b, target_b in zip(graph_outputs, graph_targets):
+                lb_row = logits_b.view(-1)
+                lb = lb_row.unsqueeze(0)
+                target_t = torch.tensor([target_b], dtype=torch.long, device=lb.device)
+                batch_loss = batch_loss + criterion(lb, target_t)
+                # metrics
+                pred_top1 = torch.argmax(lb, dim=1)
+                acc_correct += int(pred_top1.item() == target_b)
+                top1_correct += int(pred_top1.item() == target_b)
+                k3 = min(3, lb.size(1))
+                k5 = min(5, lb.size(1))
+                top3_correct += int(target_b in torch.topk(lb, k=k3, dim=1).indices[0].tolist())
+                top5_correct += int(target_b in torch.topk(lb, k=k5, dim=1).indices[0].tolist())
+                graphs_in_batch += 1
+            if graphs_in_batch > 0:
+                total_loss += (batch_loss / graphs_in_batch).item()
+                num_graphs_total += graphs_in_batch
     
-    # Compute metrics
-    all_predictions = torch.cat(all_predictions, dim=0)
-    all_targets = torch.cat(all_targets, dim=0)
-    
+    denom = max(1, num_graphs_total)
     epoch_metrics = {
-        "loss": total_loss / len(dataloader),
-        "accuracy": metrics["accuracy"](all_predictions, all_targets).item(),
-        "top1": metrics["top1"](all_predictions, all_targets).item(),
-        "top3": metrics["top3"](all_predictions, all_targets).item(),
-        "top5": metrics["top5"](all_predictions, all_targets).item(),
+        "loss": total_loss / max(1, len(dataloader)),
+        "accuracy": acc_correct / denom,
+        "top1": top1_correct / denom,
+        "top3": top3_correct / denom,
+        "top5": top5_correct / denom,
     }
+    print(f"[Val] excluded_not_attacking={excluded_not_attacking} excluded_ball_owner={excluded_ball_owner} excluded_invalid={excluded_invalid} avg_cand={sum(cand_counts)/len(cand_counts) if cand_counts else 0:.2f}")
     
     return epoch_metrics
 

@@ -24,8 +24,8 @@ scheduler:
 
 # Training configuration
 train:
-  batch_size: 8
-  epochs: 20
+  batch_size: 1
+  epochs: 3
   amp: true  # Automatic mixed precision
 
 # Data configuration
@@ -71,7 +71,7 @@ early_stopping:
 
 # Evaluation configuration
 eval:
-  batch_size: 32
+  batch_size: 1
 
 # System configuration
 device: "auto"  # auto, cpu, cuda, mps

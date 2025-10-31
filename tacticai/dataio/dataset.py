@@ -503,6 +503,13 @@ def collate_fn(batch: List[Tuple[Dict[str, torch.Tensor], torch.Tensor]]) -> Tup
         "batch": batch_tensor,
     }
     
+    # Optional per-node fields: mask, team, ball
+    # Concatenate if present in all items
+    opt_keys = ["mask", "team", "ball"]
+    for k in opt_keys:
+        if all(k in data for data in input_data_list):
+            batched_input[k] = torch.cat([data[k] for data in input_data_list], dim=0)
+    
     if conditions is not None:
         batched_input["conditions"] = conditions
     
