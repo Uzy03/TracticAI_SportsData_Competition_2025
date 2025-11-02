@@ -91,47 +91,31 @@ class ReceiverModel(nn.Module):
             - If team and ball provided: [N_attacking, num_classes] (filtered)
             - Otherwise: [N, num_classes] (all nodes)
         """
-        # Process each graph in batch separately (since 4-view processing is per-graph)
+        # Process entire batch at once for efficiency (all graphs are 22 nodes)
         B = batch.max().item() + 1 if batch is not None else 1
         
-        # Collect node embeddings for each graph
-        all_node_embeddings = []
+        # Create 4 views for entire batch at once
+        # x coordinates are at indices 0, 1; velocity x, y at indices 2, 3
+        views_list = []
+        for view_idx in range(len(D2_VIEWS)):
+            x_view = apply_view_transform(x, view_idx, xy_indices=(0, 1))  # Only flip x, y positions
+            views_list.append(x_view)
+        # Stack views: [B*N, D] -> [4, B*N, D] -> [B, 4, N_per_graph, D]
+        # Reshape to [B, 4, N_per_graph, D] where N_per_graph is same for all graphs (22)
+        x_views = torch.stack(views_list, dim=0)  # [4, N_total, D]
+        # Reshape: each graph has same number of nodes, so we can reshape directly
+        num_nodes_per_graph = x.size(0) // B if B > 1 else x.size(0)
+        x_4view = x_views.view(4, B, num_nodes_per_graph, -1).permute(1, 0, 2, 3)  # [B, 4, N, D]
         
-        for b in range(B):
-            batch_mask = batch == b if batch is not None else torch.ones(x.size(0), dtype=torch.bool, device=x.device)
-            x_b = x[batch_mask]  # [N_b, D]
-            
-            # Create 4 views for this graph: identity, horizontal flip, vertical flip, both flips
-            # x coordinates are at indices 0, 1; velocity x, y at indices 2, 3
-            views = []
-            for view_name in D2_VIEWS:
-                view_idx = D2_VIEWS.index(view_name)
-                x_view = apply_view_transform(x_b, view_idx, xy_indices=(0, 1))  # Only flip x, y positions
-                views.append(x_view)
-            x_4view = torch.stack(views, dim=0).unsqueeze(0)  # [1, 4, N_b, D]
-            
-            # Build per-graph edge_index by subsetting and remapping to 0..N_b-1
-            orig_idx = torch.where(batch_mask)[0]
-            # Map original indices -> 0..N_b-1
-            remap = -torch.ones(x.size(0), dtype=torch.long, device=x.device)
-            remap[orig_idx] = torch.arange(orig_idx.numel(), device=x.device)
-            src_all, dst_all = edge_index[0], edge_index[1]
-            src_m = remap[src_all]
-            dst_m = remap[dst_all]
-            valid = (src_m >= 0) & (dst_m >= 0)
-            edge_index_b = torch.stack([src_m[valid], dst_m[valid]], dim=0)
-            
-            # Get node embeddings from backbone: [1, 4, N_b, output_dim]
-            # Note: GATv2Network4View expects [B, 4, N, D] input
-            node_emb_4view = self.backbone(x_4view, edge_index_b, None)  # batch=None since we handle per-graph
-            
-            # Average over 4 views: [N_b, output_dim]
-            node_emb = node_emb_4view[0].mean(dim=0)  # [N_b, output_dim]
-            
-            all_node_embeddings.append(node_emb)
+        # Use edge_index as-is (already batched correctly by collate_fn)
+        # Get node embeddings from backbone: [B, 4, N, output_dim]
+        node_emb_4view = self.backbone(x_4view, edge_index, None)  # [B, 4, N, output_dim]
         
-        # Concatenate all node embeddings
-        node_embeddings = torch.cat(all_node_embeddings, dim=0)  # [N_total, output_dim]
+        # Average over 4 views: [B, N, output_dim]
+        node_emb_batched = node_emb_4view.mean(dim=1)  # [B, N, output_dim]
+        
+        # Reshape back to [N_total, output_dim]
+        node_embeddings = node_emb_batched.view(-1, node_emb_batched.size(-1))  # [N_total, output_dim]
         
         # Apply mask if provided (element-wise multiplication, not pooling)
         if mask is not None:
@@ -505,7 +489,7 @@ def validate_epoch(
             batch_size = data["batch"].max().item() + 1
             graph_outputs = []
             graph_targets = []
-            output_idx = 0
+            output_ptr = 0
             
             for i in range(batch_size):
                 node_mask = data["batch"] == i
@@ -517,7 +501,9 @@ def validate_epoch(
                         attacking_mask = (team_i == 0) & (ball_i == 0)
                         num_attacking = attacking_mask.sum().item()
                         if num_attacking > 0:
-                            cand_logits = outputs[attacking_indices[attacking_mask]]
+                            # outputsは候補ノード連結順のロジット
+                            cand_logits = outputs[output_ptr:output_ptr+num_attacking].squeeze(-1)
+                            output_ptr += num_attacking
                             attacking_indices = torch.where(node_mask)[0]
                             attacking_indices_i = attacking_indices[attacking_mask]
                             receiver_node_idx = targets[i].item()
@@ -535,9 +521,9 @@ def validate_epoch(
                                     excluded_not_attacking += 1
                     else:
                         # Fallback: use first node
-                        graph_outputs.append(outputs[output_idx:output_idx+1])
+                        graph_outputs.append(outputs[output_ptr:output_ptr+1])
                         graph_targets.append(targets[i])
-                        output_idx += 1
+                        output_ptr += 1
             
             # 可変長: グラフ単位で損失と指標
             batch_loss = 0.0

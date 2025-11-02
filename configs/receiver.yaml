@@ -20,11 +20,11 @@ scheduler:
   type: "cosine"
   T_max: 50
   eta_min: 0.000001
-  warmup_epochs: 5
+  warmup_epochs: 3
 
 # Training configuration
 train:
-  batch_size: 1
+  batch_size: 16
   epochs: 3
   amp: true  # Automatic mixed precision
 
@@ -76,7 +76,7 @@ eval:
 # System configuration
 device: "auto"  # auto, cpu, cuda, mps
 seed: 42
-num_workers: 0
+num_workers: 4
 log_level: "INFO"
 log_dir: "runs"
 checkpoint_dir: "checkpoints"

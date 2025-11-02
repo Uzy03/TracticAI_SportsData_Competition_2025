@@ -246,36 +246,36 @@ class GATv2Layer(nn.Module):
             Aggregated features [N, heads, out_features]
         """
         src, dst = edge_index[0], edge_index[1]
+        num_nodes = h.size(0)
+        num_heads = self.heads
+        out_features = h.size(2)
         
         # Normalize attention scores (softmax over j for each destination node i)
-        # For each destination node, normalize attention from all source nodes
-        att_weights = torch.zeros_like(att_scores)  # [E, heads]
-        unique_dst = torch.unique(dst)
+        # Use scatter to compute softmax efficiently
+        # First, compute exp(att_scores) and sum per destination
+        att_exp = att_scores.exp()  # [E, heads]
         
-        for d in unique_dst:
-            mask_d = (dst == d)
-            if mask_d.sum() > 0:
-                # Apply softmax to attention scores for edges going to destination d
-                # Softmax over all edges with same destination (dim=0 within the group)
-                att_weights[mask_d] = F.softmax(att_scores[mask_d], dim=0)
+        # Compute normalization per destination using scatter
+        # For each destination, sum all incoming attention exponentials
+        att_exp_sum = torch.zeros(num_nodes, num_heads, device=att_scores.device, dtype=att_scores.dtype)
+        att_exp_sum.scatter_add_(0, dst.unsqueeze(-1).expand(-1, num_heads), att_exp)
+        
+        # Normalize: att_weights = att_exp / att_exp_sum[dst]
+        att_weights = att_exp / (att_exp_sum[dst] + 1e-9)  # [E, heads]
         
         # Initialize output
-        out = torch.zeros_like(h)  # [N, heads, out_features]
+        out = torch.zeros(num_nodes, num_heads, out_features, device=h.device, dtype=h.dtype)
         
         # Aggregate features for each head
-        for i in range(self.heads):
+        for i in range(num_heads):
             # Get source features for this head
             src_features = h[src, i, :]  # [E, out_features]
             
             # Apply attention weights
             weighted_features = src_features * att_weights[:, i:i+1]  # [E, out_features]
             
-            # Aggregate to destination nodes using scatter_add
-            out[:, i, :] = torch.zeros_like(h[:, i, :])
-            for d in unique_dst:
-                mask_d = (dst == d)
-                if mask_d.sum() > 0:
-                    out[d, i, :] = weighted_features[mask_d].sum(dim=0)
+            # Aggregate to destination nodes using scatter_add (much faster than loops)
+            out.scatter_add_(0, dst.unsqueeze(-1).expand(-1, out_features), weighted_features)
         
         # Zero out missing nodes
         if mask is not None:
