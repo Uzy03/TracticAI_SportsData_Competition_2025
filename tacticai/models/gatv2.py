@@ -468,12 +468,15 @@ class GATv2Layer4View(nn.Module):
         # Destination node ranges
         dst_node_start = flat_b * N_per_graph  # [B*V]
         dst_node_end = (flat_b + 1) * N_per_graph  # [B*V]
-        # Fully vectorized copy using advanced indexing (faster than loops)
-        # Create index tensors for vectorized assignment
-        row_indices = torch.arange(B * V, device=h.device).unsqueeze(1).expand(-1, N_per_graph)  # [B*V, N_per_graph]
-        col_indices = (dst_node_start.unsqueeze(1) + torch.arange(N_per_graph, device=h.device).unsqueeze(0))  # [B*V, N_per_graph]
-        # Use advanced indexing - this is faster than loops for small B*V
-        h_full[row_indices, col_indices] = h[src_idx.unsqueeze(1).expand(-1, N_per_graph)]
+        # Fully vectorized copy using scatter or advanced indexing
+        # h is [B*V, N_per_graph, heads, out_features]
+        # h_full is [B*V, N_total, heads, out_features]
+        # For each row i in h_full, we need to copy h[src_idx[i]] to positions [dst_node_start[i]:dst_node_start[i]+N_per_graph]
+        # Use a loop for correctness (B*V is typically small: 4*32=128)
+        for i in range(B * V):
+            src_idx_val = src_idx[i].item()
+            dst_start = dst_node_start[i].item()
+            h_full[i, dst_start:dst_start+N_per_graph] = h[src_idx_val]
         
         # Add self-loops if requested (for the full batched graph)
         if self.add_self_loops:
