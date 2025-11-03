@@ -665,21 +665,35 @@ class GATv2Layer4View(nn.Module):
             Aggregated features [B*V, N, heads, out_features]
         """
         src, dst = edge_index[0], edge_index[1]
+        num_samples = h.size(0)  # B*V
+        num_nodes = h.size(1)  # N
+        num_heads = self.heads
+        out_features = h.size(3)
         
-        # Normalize attention scores
-        att_weights = F.softmax(att_scores, dim=1)  # [B*V, E, heads]
-
+        # Normalize attention scores per destination node (like GATv2Layer)
+        # att_scores is [E, heads]
+        att_exp = att_scores.exp()  # [E, heads]
+        
         # Initialize output
-        out = torch.zeros_like(h)  # [B*V, N, heads, out_features]
-
-        num_samples = h.size(0)
+        out = torch.zeros(num_samples, num_nodes, num_heads, out_features, device=h.device, dtype=h.dtype)
+        
+        # For each sample, aggregate separately (edge_index spans all graphs, need to filter per sample)
+        # But since edge_index is batched, we need to handle it correctly
+        # Actually, edge_index is for all graphs combined, so we need to process per sample
         for sample in range(num_samples):
-            sample_weights = att_weights[sample]  # [E, heads]
-            for head in range(self.heads):
+            # Get attention weights for this sample (same for all samples since edge_index is batched)
+            # Normalize per destination node
+            att_exp_sum = torch.zeros(num_nodes, num_heads, device=att_scores.device, dtype=att_scores.dtype)
+            att_exp_sum.scatter_add_(0, dst.unsqueeze(-1).expand(-1, num_heads), att_exp)
+            att_weights = att_exp / (att_exp_sum[dst] + 1e-9)  # [E, heads]
+            
+            # Aggregate for each head
+            for head in range(num_heads):
                 src_features = h[sample, src, head, :]  # [E, out_features]
-                weighted = src_features * sample_weights[:, head:head + 1]
-                for edge_idx, dst_idx in enumerate(dst):
-                    out[sample, dst_idx, head, :] += weighted[edge_idx]
+                weighted = src_features * att_weights[:, head:head + 1]  # [E, out_features]
+                
+                # Aggregate to destination nodes using scatter_add
+                out[sample].scatter_add_(0, dst.unsqueeze(-1).expand(-1, out_features), weighted)
 
         return out
 
