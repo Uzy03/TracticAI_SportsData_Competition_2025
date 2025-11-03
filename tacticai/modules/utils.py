@@ -166,9 +166,9 @@ def setup_logging(
     # Clear existing handlers
     logger.handlers.clear()
     
-    # Create formatter
+    # Create formatter with PID
     formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        "%(asctime)s - PID:%(process)d - %(name)s - %(levelname)s - %(message)s"
     )
     
     # File handler

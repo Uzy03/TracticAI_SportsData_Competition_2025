@@ -705,6 +705,13 @@ def main():
             train_history[key].append(train_metrics[key])
             val_history[key].append(val_metrics[key])
         
+        # Save training history after each epoch (so it's available even if interrupted)
+        history_path = Path(config.get("log_dir", "runs")) / "receiver_training_history.json"
+        save_training_history(
+            {"train": train_history, "val": val_history},
+            history_path
+        )
+        
         # Save best model
         if val_metrics["accuracy"] > best_val_accuracy:
             best_val_accuracy = val_metrics["accuracy"]
@@ -722,13 +729,6 @@ def main():
             break
     
     logger.info(f"Training completed. Best validation accuracy: {best_val_accuracy:.4f}")
-    
-    # Save training history
-    history_path = Path(config.get("log_dir", "runs")) / "receiver_training_history.json"
-    save_training_history(
-        {"train": train_history, "val": val_history},
-        history_path
-    )
 
 
 if __name__ == "__main__":
