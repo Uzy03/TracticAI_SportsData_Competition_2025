@@ -390,7 +390,8 @@ class GATv2Layer4View(nn.Module):
         
         Args:
             x: Node features [B, V=4, N, in_features]
-            edge_index: Edge connectivity [2, E]
+                If batch processing: N is per-graph nodes, edge_index spans all graphs
+            edge_index: Edge connectivity [2, E] - can be per-graph or batched
             edge_attr: Edge features [E, edge_dim] (optional)
             return_attention_weights: Whether to return attention weights
             
@@ -401,10 +402,13 @@ class GATv2Layer4View(nn.Module):
         B, V, N, _ = x.shape
         
         # Reshape for intra-view processing: [B*V, N, in_features]
+        # For batched processing, N is per-graph nodes, but edge_index spans B*N nodes
         x_flat = x.view(B * V, N, -1)
         
         # Intra-view GAT processing
-        h_flat = self._intra_view_gat(x_flat, edge_index, edge_attr)
+        # For batched edge_index, we need to handle it per view-batch combination
+        # Process each (view, batch) combination separately but in parallel
+        h_flat = self._intra_view_gat_batched(x_flat, edge_index, edge_attr, B, V, N)
         
         # Reshape back: [B, V, N, out_features]
         h = h_flat.view(B, V, N, -1)
@@ -420,13 +424,110 @@ class GATv2Layer4View(nn.Module):
             return h_mixed, None  # TODO: Return proper attention weights
         return h_mixed
     
+    def _intra_view_gat_batched(
+        self, 
+        x: torch.Tensor,  # [B*V, N_per_graph, in_features]
+        edge_index: torch.Tensor,  # [2, E_total] - edges for all graphs
+        edge_attr: Optional[torch.Tensor],
+        B: int,
+        V: int,
+        N_per_graph: int,
+    ) -> torch.Tensor:
+        """Intra-view GAT processing for batched graphs.
+        
+        Args:
+            x: Node features [B*V, N_per_graph, in_features]
+            edge_index: Edge connectivity [2, E_total] spanning all B graphs
+            edge_attr: Edge features [E_total, edge_dim] (optional)
+            B: Number of graphs in batch
+            V: Number of views (4)
+            N_per_graph: Number of nodes per graph
+            
+        Returns:
+            Output features [B*V, N_per_graph, out_features]
+        """
+        N_total = B * N_per_graph  # Total nodes across all graphs
+        
+        # Linear transformation
+        h = self.W(x)  # [B*V, N_per_graph, heads * out_features]
+        h = h.view(B * V, N_per_graph, self.heads, self.out_features)  # [B*V, N_per_graph, heads, out_features]
+        
+        # For batched processing, we need to expand h to [B*V, N_total, ...] to match edge_index
+        # Vectorized version: create h_full efficiently using scatter or advanced indexing
+        h_full = torch.zeros(B * V, N_total, self.heads, self.out_features, device=h.device, dtype=h.dtype)
+        # Create indices for all batches and views at once
+        batch_indices = torch.arange(B * V, device=h.device).view(B, V)  # [B, V]
+        node_start_indices = torch.arange(B, device=h.device) * N_per_graph  # [B]
+        # Fill using advanced indexing: much faster than loops
+        for b_idx, b in enumerate(range(B)):
+            b_start = b * N_per_graph
+            b_end = (b + 1) * N_per_graph
+            view_indices = torch.arange(b * V, (b + 1) * V, device=h.device)
+            h_full[view_indices, b_start:b_end] = h[view_indices]
+        
+        # Add self-loops if requested (for the full batched graph)
+        if self.add_self_loops:
+            edge_index, edge_attr = self._add_self_loops(edge_index, edge_attr, N_total)
+        
+        # Compute attention coefficients
+        att_scores = self._compute_attention_batched(h_full, edge_index, edge_attr, B, V)  # [E, heads]
+        
+        # Apply dropout
+        if self.training and self.dropout > 0:
+            att_scores = F.dropout(att_scores, p=self.dropout, training=True)
+        
+        # Apply attention and aggregate
+        out_full = self._aggregate(h_full, edge_index, att_scores)  # [B*V, N_total, heads, out_features]
+        
+        # Extract per-graph outputs (vectorized)
+        out = torch.zeros(B * V, N_per_graph, self.heads, self.out_features, device=out_full.device, dtype=out_full.dtype)
+        for b in range(B):
+            batch_indices = torch.arange(b * V, (b + 1) * V, device=h.device)  # [V]
+            node_indices = torch.arange(b * N_per_graph, (b + 1) * N_per_graph, device=h.device)  # [N_per_graph]
+            # Extract all views for this batch at once
+            out[batch_indices] = out_full[batch_indices[:, None], node_indices[None, :]]
+        
+        # Concatenate or average heads
+        if self.concat:
+            out = out.view(B * V, N_per_graph, self.heads * self.out_features)
+        else:
+            out = out.mean(dim=2)  # [B*V, N_per_graph, out_features]
+        
+        return out
+    
+    def _compute_attention_batched(
+        self, 
+        h: torch.Tensor,  # [B*V, N_total, heads, out_features]
+        edge_index: torch.Tensor,  # [2, E_total]
+        edge_attr: Optional[torch.Tensor],
+        B: int,
+        V: int,
+    ) -> torch.Tensor:
+        """Compute attention coefficients for batched graphs."""
+        src, dst = edge_index[0], edge_index[1]
+        
+        # Process all views and batches in parallel
+        # Reshape h to [B*V, N_total, heads, out_features] -> [B*V*N_total, heads, out_features]
+        h_flat = h.view(B * V * h.size(1), self.heads, h.size(3))  # [B*V*N_total, heads, out_features]
+        
+        # Concatenate source and destination features for all edges
+        h_src = h_flat[src]  # [E, heads, out_features]
+        h_dst = h_flat[dst]  # [E, heads, out_features]
+        h_cat = torch.cat([h_src, h_dst], dim=-1)  # [E, heads, 2 * out_features]
+        
+        # Compute attention: a^T * LeakyReLU(W * [h_i || h_j])
+        att_input = F.leaky_relu(h_cat, negative_slope=self.negative_slope)
+        att_scores = (self.att * att_input).sum(dim=-1)  # [E, heads]
+        
+        return att_scores
+    
     def _intra_view_gat(
         self, 
         x: torch.Tensor, 
         edge_index: torch.Tensor, 
         edge_attr: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """Intra-view GAT processing."""
+        """Intra-view GAT processing (legacy single-graph version)."""
         N = x.size(1)
         
         # Linear transformation

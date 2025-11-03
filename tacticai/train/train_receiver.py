@@ -91,7 +91,7 @@ class ReceiverModel(nn.Module):
             - If team and ball provided: [N_attacking, num_classes] (filtered)
             - Otherwise: [N, num_classes] (all nodes)
         """
-        # Process entire batch at once for efficiency (all graphs are 22 nodes)
+        # Process entire batch at once for maximum GPU utilization
         B = batch.max().item() + 1 if batch is not None else 1
         
         # Create 4 views for entire batch at once
@@ -100,19 +100,25 @@ class ReceiverModel(nn.Module):
         for view_idx in range(len(D2_VIEWS)):
             x_view = apply_view_transform(x, view_idx, xy_indices=(0, 1))  # Only flip x, y positions
             views_list.append(x_view)
-        # Stack views: [B*N, D] -> [4, B*N, D] -> [B, 4, N_per_graph, D]
-        # Reshape to [B, 4, N_per_graph, D] where N_per_graph is same for all graphs (22)
+        
+        # Stack views: [4, N_total, D] -> [B, 4, N_total, D]
+        # Note: N_total is the total number of nodes across all graphs in the batch
         x_views = torch.stack(views_list, dim=0)  # [4, N_total, D]
-        # Reshape: each graph has same number of nodes, so we can reshape directly
-        num_nodes_per_graph = x.size(0) // B if B > 1 else x.size(0)
-        x_4view = x_views.view(4, B, num_nodes_per_graph, -1).permute(1, 0, 2, 3)  # [B, 4, N, D]
+        N_total = x.size(0)
+        x_4view = x_views.view(4, N_total, -1).permute(1, 0, 2).unsqueeze(0)  # [1, 4, N_total, D]
+        # Expand to [B, 4, N_total, D] - each graph in batch uses same views
+        # Actually, we need to reshape properly: each graph should have its own views
+        # Reshape: [4, N_total, D] -> [4, B, N_per_graph, D] -> [B, 4, N_per_graph, D]
+        num_nodes_per_graph = N_total // B if B > 1 else N_total
+        x_4view = x_views.view(4, B, num_nodes_per_graph, -1).permute(1, 0, 2, 3)  # [B, 4, N_per_graph, D]
         
         # Use edge_index as-is (already batched correctly by collate_fn)
-        # Get node embeddings from backbone: [B, 4, N, output_dim]
-        node_emb_4view = self.backbone(x_4view, edge_index, None)  # [B, 4, N, output_dim]
+        # edge_index contains edges for all graphs with proper offsets
+        # Get node embeddings from backbone: [B, 4, N_per_graph, output_dim]
+        node_emb_4view = self.backbone(x_4view, edge_index, None)  # [B, 4, N_per_graph, output_dim]
         
-        # Average over 4 views: [B, N, output_dim]
-        node_emb_batched = node_emb_4view.mean(dim=1)  # [B, N, output_dim]
+        # Average over 4 views: [B, N_per_graph, output_dim]
+        node_emb_batched = node_emb_4view.mean(dim=1)  # [B, N_per_graph, output_dim]
         
         # Reshape back to [N_total, output_dim]
         node_embeddings = node_emb_batched.view(-1, node_emb_batched.size(-1))  # [N_total, output_dim]

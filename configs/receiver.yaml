@@ -24,7 +24,7 @@ scheduler:
 
 # Training configuration
 train:
-  batch_size: 16
+  batch_size: 32  # Increased for better GPU utilization
   epochs: 3
   amp: true  # Automatic mixed precision
 
@@ -76,7 +76,7 @@ eval:
 # System configuration
 device: "auto"  # auto, cpu, cuda, mps
 seed: 42
-num_workers: 4
+num_workers: 8  # Increased for faster data loading
 log_level: "INFO"
 log_dir: "runs"
 checkpoint_dir: "checkpoints"
