@@ -76,7 +76,9 @@ eval:
 # System configuration
 device: "auto"  # auto, cpu, cuda, mps
 seed: 42
-num_workers: 8  # Increased for faster data loading
+num_workers: 12  # Increased for faster data loading (adjust based on CPU cores)
+prefetch_factor: 4  # Number of batches prefetched per worker
+persistent_workers: true  # Keep workers alive between epochs (reduces overhead)
 log_level: "INFO"
 log_dir: "runs"
 checkpoint_dir: "checkpoints"

@@ -613,13 +613,19 @@ def main():
         batch_size=config["train"]["batch_size"],
         shuffle=True,
         num_workers=config.get("num_workers", 0),
+        pin_memory=True if str(device).startswith("cuda") else False,  # Enable for GPU
+        prefetch_factor=config.get("prefetch_factor", 2),
+        persistent_workers=config.get("persistent_workers", False) if config.get("num_workers", 0) > 0 else False,
     )
     
     val_loader = create_dataloader(
         val_dataset,
-        batch_size=config["train"]["batch_size"],
+        batch_size=config["eval"]["batch_size"],
         shuffle=False,
         num_workers=config.get("num_workers", 0),
+        pin_memory=True if str(device).startswith("cuda") else False,  # Enable for GPU
+        prefetch_factor=config.get("prefetch_factor", 2),
+        persistent_workers=config.get("persistent_workers", False) if config.get("num_workers", 0) > 0 else False,
     )
     
     # Create model

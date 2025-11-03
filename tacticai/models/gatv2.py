@@ -453,17 +453,27 @@ class GATv2Layer4View(nn.Module):
         h = h.view(B * V, N_per_graph, self.heads, self.out_features)  # [B*V, N_per_graph, heads, out_features]
         
         # For batched processing, we need to expand h to [B*V, N_total, ...] to match edge_index
-        # Vectorized version: create h_full efficiently using scatter or advanced indexing
+        # Fully vectorized: create h_full using scatter_add or advanced indexing
         h_full = torch.zeros(B * V, N_total, self.heads, self.out_features, device=h.device, dtype=h.dtype)
-        # Create indices for all batches and views at once
-        batch_indices = torch.arange(B * V, device=h.device).view(B, V)  # [B, V]
-        node_start_indices = torch.arange(B, device=h.device) * N_per_graph  # [B]
-        # Fill using advanced indexing: much faster than loops
-        for b_idx, b in enumerate(range(B)):
-            b_start = b * N_per_graph
-            b_end = (b + 1) * N_per_graph
-            view_indices = torch.arange(b * V, (b + 1) * V, device=h.device)
-            h_full[view_indices, b_start:b_end] = h[view_indices]
+        # Create all indices at once (vectorized)
+        # For each batch b and view v, copy h[b*V+v, :] to h_full[b*V+v, b*N_per_graph:(b+1)*N_per_graph]
+        batch_indices = torch.arange(B, device=h.device)  # [B]
+        view_indices = torch.arange(V, device=h.device)  # [V]
+        # Create meshgrid: [B, V] for batch-view combinations
+        b_grid, v_grid = torch.meshgrid(batch_indices, view_indices, indexing='ij')  # [B, V] each
+        flat_b = b_grid.flatten()  # [B*V]
+        flat_v = v_grid.flatten()  # [B*V]
+        # Compute source and destination indices
+        src_idx = flat_b * V + flat_v  # [B*V] - index in h
+        # Destination node ranges
+        dst_node_start = flat_b * N_per_graph  # [B*V]
+        dst_node_end = (flat_b + 1) * N_per_graph  # [B*V]
+        # Fully vectorized copy using advanced indexing (faster than loops)
+        # Create index tensors for vectorized assignment
+        row_indices = torch.arange(B * V, device=h.device).unsqueeze(1).expand(-1, N_per_graph)  # [B*V, N_per_graph]
+        col_indices = (dst_node_start.unsqueeze(1) + torch.arange(N_per_graph, device=h.device).unsqueeze(0))  # [B*V, N_per_graph]
+        # Use advanced indexing - this is faster than loops for small B*V
+        h_full[row_indices, col_indices] = h[src_idx.unsqueeze(1).expand(-1, N_per_graph)]
         
         # Add self-loops if requested (for the full batched graph)
         if self.add_self_loops:
@@ -479,13 +489,12 @@ class GATv2Layer4View(nn.Module):
         # Apply attention and aggregate
         out_full = self._aggregate(h_full, edge_index, att_scores)  # [B*V, N_total, heads, out_features]
         
-        # Extract per-graph outputs (vectorized)
-        out = torch.zeros(B * V, N_per_graph, self.heads, self.out_features, device=out_full.device, dtype=out_full.dtype)
-        for b in range(B):
-            batch_indices = torch.arange(b * V, (b + 1) * V, device=h.device)  # [V]
-            node_indices = torch.arange(b * N_per_graph, (b + 1) * N_per_graph, device=h.device)  # [N_per_graph]
-            # Extract all views for this batch at once
-            out[batch_indices] = out_full[batch_indices[:, None], node_indices[None, :]]
+        # Extract per-graph outputs (fully vectorized)
+        # Create indices for all batch-view combinations
+        row_idx = torch.arange(B * V, device=out_full.device).unsqueeze(1).expand(-1, N_per_graph)  # [B*V, N_per_graph]
+        col_idx = (flat_b * N_per_graph).unsqueeze(1) + torch.arange(N_per_graph, device=out_full.device).unsqueeze(0)  # [B*V, N_per_graph]
+        # Extract using advanced indexing
+        out = out_full[row_idx, col_idx]  # [B*V, N_per_graph, heads, out_features]
         
         # Concatenate or average heads
         if self.concat:

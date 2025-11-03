@@ -531,6 +531,8 @@ def create_dataloader(
     shuffle: bool = True,
     num_workers: int = 0,
     pin_memory: bool = True,
+    prefetch_factor: int = 2,
+    persistent_workers: bool = False,
 ) -> DataLoader:
     """Create a DataLoader for TacticAI dataset.
     
@@ -539,7 +541,9 @@ def create_dataloader(
         batch_size: Batch size
         shuffle: Whether to shuffle data
         num_workers: Number of worker processes
-        pin_memory: Whether to pin memory
+        pin_memory: Whether to pin memory (for GPU acceleration)
+        prefetch_factor: Number of batches prefetched per worker
+        persistent_workers: Whether to keep workers alive between epochs
         
     Returns:
         DataLoader instance
@@ -550,6 +554,8 @@ def create_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        persistent_workers=persistent_workers if num_workers > 0 else False,
         collate_fn=collate_fn,
     )
 
