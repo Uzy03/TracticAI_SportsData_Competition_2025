@@ -690,10 +690,12 @@ class GATv2Layer4View(nn.Module):
             # Aggregate for each head
             for head in range(num_heads):
                 src_features = h[sample, src, head, :]  # [E, out_features]
-                weighted = src_features * att_weights[:, head:head + 1]  # [E, out_features]
+                weighted = (src_features * att_weights[:, head:head + 1]).to(h.dtype)  # [E, out_features], ensure dtype match
                 
                 # Aggregate to destination nodes using scatter_add
-                out[sample].scatter_add_(0, dst.unsqueeze(-1).expand(-1, out_features), weighted)
+                # out[sample, :, head, :] is [N_total, out_features]
+                # dst is [E_total], weighted is [E_total, out_features]
+                out[sample, :, head, :].scatter_add_(0, dst.unsqueeze(-1).expand(-1, out_features), weighted)
 
         return out
 
