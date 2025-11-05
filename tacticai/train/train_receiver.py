@@ -517,6 +517,7 @@ def validate_epoch(
     cand_counts = []
     
     with torch.no_grad():
+        batch_idx = 0
         for data, targets in tqdm(dataloader, desc="Validation"):
             # Move data to device
             data = {k: v.to(device) for k, v in data.items()}
@@ -532,6 +533,18 @@ def validate_epoch(
                 team=data.get("team"),
                 ball=data.get("ball"),
             )
+            
+            # Debug: Log model output statistics for first batch of first epoch
+            if logger and batch_idx == 0 and num_graphs_total == 0:
+                batch_size = data["batch"].max().item() + 1
+                if batch_size > 0:
+                    first_graph_mask = data["batch"] == 0
+                    if first_graph_mask.any():
+                        first_graph_outputs = outputs[first_graph_mask]
+                        logger.info(f"Val model outputs (first batch): mean={first_graph_outputs.mean().item():.6f}, "
+                                   f"std={first_graph_outputs.std().item():.6f}, "
+                                   f"min={first_graph_outputs.min().item():.6f}, "
+                                   f"max={first_graph_outputs.max().item():.6f}")
             
             # TacticAI spec: outputs is [N_total] with cand_mask applied (-1e9 for non-candidates)
             # Process per graph: extract local logits and apply softmax
@@ -608,9 +621,16 @@ def validate_epoch(
                 batch_loss_val = batch_loss_sum.item()
                 total_loss += batch_loss_val  # Accumulate total loss (not average)
                 num_graphs_total += graphs_in_batch
-                # Debug: Log first batch loss to see if it changes
-                if logger and num_graphs_total == graphs_in_batch:  # First batch
-                    logger.info(f"Val first batch loss: {batch_loss_val:.6f}, graphs: {graphs_in_batch}")
+                # Debug: Log first batch details to see if model outputs change
+                if logger and batch_idx == 0:  # First batch
+                    first_logits = graph_outputs[0] if graph_outputs else None
+                    first_target = graph_targets[0] if graph_targets else None
+                    if first_logits is not None:
+                        logger.info(f"Val first batch: loss={batch_loss_val:.6f}, graphs={graphs_in_batch}, "
+                                   f"logits_mean={first_logits.mean().item():.6f}, logits_std={first_logits.std().item():.6f}, "
+                                   f"target={first_target}")
+            
+            batch_idx += 1
     
     denom = max(1, num_graphs_total)
     epoch_metrics = {

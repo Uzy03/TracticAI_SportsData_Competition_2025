@@ -72,7 +72,7 @@ early_stopping:
 
 # Evaluation configuration
 eval:
-  batch_size: 1
+  batch_size: 5
 
 # System configuration
 device: "auto"  # auto, cpu, cuda, mps
