@@ -60,7 +60,7 @@ loss:
 
 # D2 equivariance configuration
 d2:
-  group_pool: true  # Use group pooling (4-view average) for TacticAI spec
+  group_pool: false  # ReceiverModel has built-in D2 processing (4-view average), no need for GroupPoolingWrapper
   transforms:
     hflip: true
     vflip: true
