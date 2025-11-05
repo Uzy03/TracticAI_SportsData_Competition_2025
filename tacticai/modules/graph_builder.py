@@ -10,24 +10,27 @@ import torch.nn.functional as F
 import numpy as np
 
 
-def build_complete_graph(num_nodes: int, device: Optional[torch.device] = None) -> torch.Tensor:
+def build_complete_graph(num_nodes: int, device: Optional[torch.device] = None, include_self_loops: bool = True) -> torch.Tensor:
     """Build a complete graph connectivity matrix.
     
     Args:
         num_nodes: Number of nodes in the graph
         device: Device to place the tensor on
+        include_self_loops: Whether to include self-loops (default: True for TacticAI spec)
         
     Returns:
-        Edge index tensor [2, num_edges] where num_edges = num_nodes * (num_nodes - 1)
+        Edge index tensor [2, num_edges] where:
+        - num_edges = num_nodes * num_nodes (if include_self_loops=True)
+        - num_edges = num_nodes * (num_nodes - 1) (if include_self_loops=False)
     """
     if device is None:
         device = torch.device('cpu')
     
-    # Create all possible edges (excluding self-loops)
+    # Create all possible edges (including self-loops for TacticAI spec)
     edges = []
     for i in range(num_nodes):
         for j in range(num_nodes):
-            if i != j:
+            if include_self_loops or i != j:
                 edges.append([i, j])
     
     edge_index = torch.tensor(edges, dtype=torch.long, device=device).t().contiguous()

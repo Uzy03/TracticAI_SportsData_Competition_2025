@@ -64,6 +64,10 @@ def compute_edge_features(
         # Default: assume alternating teams (first 11 = team 0, next 11 = team 1)
         same_team = ((src // 11) == (dst // 11)).float().unsqueeze(-1)  # [E, 1]
     
+    # Self-loops (i==j) are always same_team=1 (TacticAI spec)
+    self_loop_mask = (src == dst)
+    same_team[self_loop_mask] = 1.0
+    
     return same_team
 
 

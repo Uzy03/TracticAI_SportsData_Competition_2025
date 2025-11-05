@@ -72,6 +72,7 @@ class ReceiverModel(nn.Module):
         x: torch.Tensor, 
         edge_index: torch.Tensor, 
         batch: torch.Tensor,
+        edge_attr: Optional[torch.Tensor] = None,  # TacticAI spec: same_team feature
         mask: Optional[torch.Tensor] = None,
         team: Optional[torch.Tensor] = None,
         ball: Optional[torch.Tensor] = None,
@@ -112,10 +113,11 @@ class ReceiverModel(nn.Module):
         num_nodes_per_graph = N_total // B if B > 1 else N_total
         x_4view = x_views.view(4, B, num_nodes_per_graph, -1).permute(1, 0, 2, 3)  # [B, 4, N_per_graph, D]
         
-        # Use edge_index as-is (already batched correctly by collate_fn)
+        # Use edge_index and edge_attr (already batched correctly by collate_fn)
         # edge_index contains edges for all graphs with proper offsets
+        # edge_attr contains same_team features [E, 1] (TacticAI spec)
         # Get node embeddings from backbone: [B, 4, N_per_graph, output_dim]
-        node_emb_4view = self.backbone(x_4view, edge_index, None)  # [B, 4, N_per_graph, output_dim]
+        node_emb_4view = self.backbone(x_4view, edge_index, edge_attr)  # [B, 4, N_per_graph, output_dim]
         
         # Average over 4 views: [B, N_per_graph, output_dim]
         node_emb_batched = node_emb_4view.mean(dim=1)  # [B, N_per_graph, output_dim]
@@ -128,20 +130,25 @@ class ReceiverModel(nn.Module):
             mask_expanded = mask.unsqueeze(-1).expand_as(node_embeddings)  # [N, D]
             node_embeddings = node_embeddings * mask_expanded
         
-        # Get logits for all nodes
-        all_logits = self.head(node_embeddings)  # [N_total, num_classes]
+        # Get logits for all nodes (TacticAI spec: [B, N] format)
+        all_logits = self.head(node_embeddings).squeeze(-1)  # [N_total] - per-node scalar logits
         
-        # Filter to attacking nodes (team=0) and exclude ball owner if both provided
-        if team is not None and ball is not None:
-            attacking_mask = (team == 0) & (ball == 0)  # Attacking team and not ball owner
-            if attacking_mask.sum() > 0:
-                # Return only attacking nodes (excluding ball owner)
-                return all_logits[attacking_mask]
-            else:
-                # Fallback: return all nodes (should not happen in practice)
-                return all_logits
+        # TacticAI spec: cand_mask = (team_flag==ATTACK) & (is_kicker==0) & (valid_mask==1)
+        # Apply cand_mask before softmax (not filtering, but masking with -1e9)
+        if team is not None and ball is not None and mask is not None:
+            # cand_mask: attacking team (team=0) and not ball owner (ball=0) and valid (mask=1)
+            cand_mask = (team == 0) & (ball == 0) & (mask == 1)
+            # Apply mask: set non-candidate logits to -1e9 (will be ~0 after softmax)
+            all_logits = all_logits + (~cand_mask).float() * (-1e9)
+            # Return all logits with mask applied (for softmax over candidate set)
+            return all_logits
+        elif team is not None and ball is not None:
+            # Without mask: cand_mask = (team==0) & (ball==0)
+            cand_mask = (team == 0) & (ball == 0)
+            all_logits = all_logits + (~cand_mask).float() * (-1e9)
+            return all_logits
         else:
-            # No filtering: return predictions for all nodes
+            # No filtering: return all nodes (should not happen in practice)
             return all_logits
 
 
@@ -274,65 +281,81 @@ def train_epoch(
         
         if use_amp and scaler is not None:
             with torch.cuda.amp.autocast():
-                # Pass mask, team, ball if available
+                # Pass edge_attr, mask, team, ball if available
                 outputs = model(
                     data["x"], 
                     data["edge_index"], 
                     data["batch"],
+                    edge_attr=data.get("edge_attr"),
                     mask=data.get("mask"),
                     team=data.get("team"),
                     ball=data.get("ball"),
                 )
                 
-                # Handle filtered outputs (only attacking nodes) or all nodes
+                # TacticAI spec: outputs is [N_total] with cand_mask applied (-1e9 for non-candidates)
+                # Process per graph: extract local logits and apply softmax
                 batch_size = data["batch"].max().item() + 1
                 graph_outputs = []
                 graph_targets = []
-                output_ptr = 0
                 
                 for i in range(batch_size):
                     node_mask = data["batch"] == i
                     if node_mask.any():
-                        # Get attacking nodes for this graph
-                        if "team" in data and "ball" in data:
+                        # Get local logits for this graph
+                        local_logits = outputs[node_mask]  # [N_per_graph]
+                        
+                        # Get cand_mask for this graph (TacticAI spec)
+                        if "team" in data and "ball" in data and "mask" in data:
                             team_i = data["team"][node_mask]
                             ball_i = data["ball"][node_mask]
-                            attacking_mask = (team_i == 0) & (ball_i == 0)
-                            num_attacking = attacking_mask.sum().item()
-                            if num_attacking > 0:
-                                # outputsは候補ノード連結順のロジット
-                                cand_logits = outputs[output_ptr:output_ptr+num_attacking].squeeze(-1)
-                                output_ptr += num_attacking
-                                attacking_indices = torch.where(node_mask)[0]
-                                attacking_indices_i = attacking_indices[attacking_mask]
-                                receiver_node_idx = targets[i].item()
-                                # strict: include only if receiver is in candidates
-                                if (attacking_indices_i == receiver_node_idx).any():
-                                    receiver_attacking_idx = (attacking_indices_i == receiver_node_idx).nonzero(as_tuple=True)[0][0].item()
-                                    graph_outputs.append(cand_logits)
-                                    graph_targets.append(receiver_attacking_idx)
-                                    cand_counts.append(int(num_attacking))
-                                else:
-                                    # count exclusions
-                                    if (ball_i.sum() > 0) and (ball_i[receiver_node_idx] if receiver_node_idx < ball_i.numel() else False):
-                                        excluded_ball_owner += 1
-                                    elif receiver_node_idx >= team_i.numel():
-                                        excluded_invalid += 1
-                                    else:
-                                        excluded_not_attacking += 1
+                            mask_i = data["mask"][node_mask]
+                            cand_mask = (team_i == 0) & (ball_i == 0) & (mask_i == 1)
+                        elif "team" in data and "ball" in data:
+                            team_i = data["team"][node_mask]
+                            ball_i = data["ball"][node_mask]
+                            cand_mask = (team_i == 0) & (ball_i == 0)
                         else:
-                            # Fallback: use first node
-                            graph_outputs.append(outputs[output_idx:output_idx+1])
-                            graph_targets.append(targets[i])
-                            output_idx += 1
+                            cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
+                        
+                        # Apply cand_mask: non-candidates already have -1e9 from forward
+                        # Get candidate logits (for loss/metrics)
+                        cand_logits = local_logits[cand_mask]  # [num_candidates]
+                        
+                        if cand_logits.numel() > 0:
+                            receiver_node_idx = targets[i].item()
+                            # Map receiver to local index
+                            local_indices = torch.where(node_mask)[0]
+                            
+                            # Check if receiver is in candidates
+                            if receiver_node_idx < len(local_indices):
+                                local_receiver_idx = (local_indices == receiver_node_idx).nonzero(as_tuple=True)[0]
+                                if local_receiver_idx.numel() > 0:
+                                    local_receiver_idx = local_receiver_idx.item()
+                                    if cand_mask[local_receiver_idx]:
+                                        # Receiver is in candidates: map to candidate index
+                                        cand_indices = torch.where(cand_mask)[0]
+                                        receiver_cand_idx = (cand_indices == local_receiver_idx).nonzero(as_tuple=True)[0]
+                                        if receiver_cand_idx.numel() > 0:
+                                            receiver_cand_idx = receiver_cand_idx.item()
+                                            graph_outputs.append(cand_logits)
+                                            graph_targets.append(receiver_cand_idx)
+                                            cand_counts.append(int(cand_mask.sum().item()))
+                                        else:
+                                            excluded_invalid += 1
+                                    else:
+                                        excluded_ball_owner += 1
+                                else:
+                                    excluded_invalid += 1
+                            else:
+                                excluded_invalid += 1
                 
-                # 可変長のため、グラフ単位で損失を集計
+                # Compute loss per graph (TacticAI spec: softmax over candidates)
                 loss = 0.0
                 graphs_in_batch = 0
                 for logits_b, target_b in zip(graph_outputs, graph_targets):
-                    # logits_b: 各候補ノードのスカラーlogit -> [num_attacking]
-                    lb_row = logits_b.view(-1)  # [num_attacking]
-                    lb = lb_row.unsqueeze(0)     # [1, num_attacking]
+                    # logits_b: candidate logits [num_candidates] (already masked)
+                    # Apply softmax and compute CrossEntropyLoss
+                    lb = logits_b.unsqueeze(0)  # [1, num_candidates]
                     target_t = torch.tensor([target_b], dtype=torch.long, device=lb.device)
                     loss = loss + criterion(lb, target_t)
                     # metrics
@@ -353,55 +376,80 @@ def train_epoch(
             scaler.step(optimizer)
             scaler.update()
         else:
-            # Pass mask, team, ball if available
+            # Pass edge_attr, mask, team, ball if available
             outputs = model(
                 data["x"], 
                 data["edge_index"], 
                 data["batch"],
+                edge_attr=data.get("edge_attr"),
                 mask=data.get("mask"),
                 team=data.get("team"),
                 ball=data.get("ball"),
             )
             
-            # Handle filtered outputs (only attacking nodes) or all nodes
+            # TacticAI spec: outputs is [N_total] with cand_mask applied (-1e9 for non-candidates)
+            # Process per graph: extract local logits and apply softmax
             batch_size = data["batch"].max().item() + 1
             graph_outputs = []
             graph_targets = []
-            output_ptr = 0
             
             for i in range(batch_size):
                 node_mask = data["batch"] == i
                 if node_mask.any():
-                    # Get attacking nodes for this graph
-                    if "team" in data and "ball" in data:
+                    # Get local logits for this graph
+                    local_logits = outputs[node_mask]  # [N_per_graph]
+                    
+                    # Get cand_mask for this graph (TacticAI spec)
+                    if "team" in data and "ball" in data and "mask" in data:
                         team_i = data["team"][node_mask]
                         ball_i = data["ball"][node_mask]
-                        attacking_mask = (team_i == 0) & (ball_i == 0)
-                        num_attacking = attacking_mask.sum().item()
-                        if num_attacking > 0:
-                            cand_logits = outputs[output_ptr:output_ptr+num_attacking].squeeze(-1)
-                            output_ptr += num_attacking
-                            receiver_node_idx = targets[i].item()
-                            attacking_indices = torch.where(node_mask)[0]
-                            attacking_indices_i = attacking_indices[attacking_mask]
-                            if (attacking_indices_i == receiver_node_idx).any():
-                                receiver_attacking_idx = (attacking_indices_i == receiver_node_idx).nonzero(as_tuple=True)[0][0].item()
-                                graph_outputs.append(cand_logits)
-                                graph_targets.append(receiver_attacking_idx)
-                            else:
-                                continue
+                        mask_i = data["mask"][node_mask]
+                        cand_mask = (team_i == 0) & (ball_i == 0) & (mask_i == 1)
+                    elif "team" in data and "ball" in data:
+                        team_i = data["team"][node_mask]
+                        ball_i = data["ball"][node_mask]
+                        cand_mask = (team_i == 0) & (ball_i == 0)
                     else:
-                        # Fallback: use first node
-                        graph_outputs.append(outputs[output_idx:output_idx+1])
-                        graph_targets.append(targets[i])
-                        output_idx += 1
+                        cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
+                    
+                    # Apply cand_mask: non-candidates already have -1e9 from forward
+                    # Get candidate logits (for loss/metrics)
+                    cand_logits = local_logits[cand_mask]  # [num_candidates]
+                    
+                    if cand_logits.numel() > 0:
+                        receiver_node_idx = targets[i].item()
+                        # Map receiver to local index
+                        local_indices = torch.where(node_mask)[0]
+                        
+                        # Check if receiver is in candidates
+                        if receiver_node_idx < len(local_indices):
+                            local_receiver_idx = (local_indices == receiver_node_idx).nonzero(as_tuple=True)[0]
+                            if local_receiver_idx.numel() > 0:
+                                local_receiver_idx = local_receiver_idx.item()
+                                if cand_mask[local_receiver_idx]:
+                                    # Receiver is in candidates: map to candidate index
+                                    cand_indices = torch.where(cand_mask)[0]
+                                    receiver_cand_idx = (cand_indices == local_receiver_idx).nonzero(as_tuple=True)[0]
+                                    if receiver_cand_idx.numel() > 0:
+                                        receiver_cand_idx = receiver_cand_idx.item()
+                                        graph_outputs.append(cand_logits)
+                                        graph_targets.append(receiver_cand_idx)
+                                    else:
+                                        excluded_invalid += 1
+                                else:
+                                    excluded_ball_owner += 1
+                            else:
+                                excluded_invalid += 1
+                        else:
+                            excluded_invalid += 1
             
-            # 可変長のため、グラフ単位で損失を集計
+            # Compute loss per graph (TacticAI spec: softmax over candidates)
             loss = 0.0
             graphs_in_batch = 0
             for logits_b, target_b in zip(graph_outputs, graph_targets):
-                lb_row = logits_b.view(-1)
-                lb = lb_row.unsqueeze(0)
+                # logits_b: candidate logits [num_candidates] (already masked)
+                # Apply softmax and compute CrossEntropyLoss
+                lb = logits_b.unsqueeze(0)  # [1, num_candidates]
                 target_t = torch.tensor([target_b], dtype=torch.long, device=lb.device)
                 loss = loss + criterion(lb, target_t)
                 # metrics
@@ -481,62 +529,81 @@ def validate_epoch(
             data = {k: v.to(device) for k, v in data.items()}
             targets = targets.to(device)
             
-            # Pass mask, team, ball if available
+            # Pass edge_attr, mask, team, ball if available
             outputs = model(
                 data["x"], 
                 data["edge_index"], 
                 data["batch"],
+                edge_attr=data.get("edge_attr"),
                 mask=data.get("mask"),
                 team=data.get("team"),
                 ball=data.get("ball"),
             )
             
-            # Handle filtered outputs (only attacking nodes) or all nodes
+            # TacticAI spec: outputs is [N_total] with cand_mask applied (-1e9 for non-candidates)
+            # Process per graph: extract local logits and apply softmax
             batch_size = data["batch"].max().item() + 1
             graph_outputs = []
             graph_targets = []
-            output_ptr = 0
             
             for i in range(batch_size):
                 node_mask = data["batch"] == i
                 if node_mask.any():
-                    # Get attacking nodes for this graph
-                    if "team" in data and "ball" in data:
+                    # Get local logits for this graph
+                    local_logits = outputs[node_mask]  # [N_per_graph]
+                    
+                    # Get cand_mask for this graph (TacticAI spec)
+                    if "team" in data and "ball" in data and "mask" in data:
                         team_i = data["team"][node_mask]
                         ball_i = data["ball"][node_mask]
-                        attacking_mask = (team_i == 0) & (ball_i == 0)
-                        num_attacking = attacking_mask.sum().item()
-                        if num_attacking > 0:
-                            # outputsは候補ノード連結順のロジット
-                            cand_logits = outputs[output_ptr:output_ptr+num_attacking].squeeze(-1)
-                            output_ptr += num_attacking
-                            attacking_indices = torch.where(node_mask)[0]
-                            attacking_indices_i = attacking_indices[attacking_mask]
-                            receiver_node_idx = targets[i].item()
-                            if (attacking_indices_i == receiver_node_idx).any():
-                                receiver_attacking_idx = (attacking_indices_i == receiver_node_idx).nonzero(as_tuple=True)[0][0].item()
-                                graph_outputs.append(cand_logits)
-                                graph_targets.append(receiver_attacking_idx)
-                                cand_counts.append(int(num_attacking))
-                            else:
-                                if (ball_i.sum() > 0) and (ball_i[receiver_node_idx] if receiver_node_idx < ball_i.numel() else False):
-                                    excluded_ball_owner += 1
-                                elif receiver_node_idx >= team_i.numel():
-                                    excluded_invalid += 1
-                                else:
-                                    excluded_not_attacking += 1
+                        mask_i = data["mask"][node_mask]
+                        cand_mask = (team_i == 0) & (ball_i == 0) & (mask_i == 1)
+                    elif "team" in data and "ball" in data:
+                        team_i = data["team"][node_mask]
+                        ball_i = data["ball"][node_mask]
+                        cand_mask = (team_i == 0) & (ball_i == 0)
                     else:
-                        # Fallback: use first node
-                        graph_outputs.append(outputs[output_ptr:output_ptr+1])
-                        graph_targets.append(targets[i])
-                        output_ptr += 1
+                        cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
+                    
+                    # Apply cand_mask: non-candidates already have -1e9 from forward
+                    # Get candidate logits (for loss/metrics)
+                    cand_logits = local_logits[cand_mask]  # [num_candidates]
+                    
+                    if cand_logits.numel() > 0:
+                        receiver_node_idx = targets[i].item()
+                        # Map receiver to local index
+                        local_indices = torch.where(node_mask)[0]
+                        
+                        # Check if receiver is in candidates
+                        if receiver_node_idx < len(local_indices):
+                            local_receiver_idx = (local_indices == receiver_node_idx).nonzero(as_tuple=True)[0]
+                            if local_receiver_idx.numel() > 0:
+                                local_receiver_idx = local_receiver_idx.item()
+                                if cand_mask[local_receiver_idx]:
+                                    # Receiver is in candidates: map to candidate index
+                                    cand_indices = torch.where(cand_mask)[0]
+                                    receiver_cand_idx = (cand_indices == local_receiver_idx).nonzero(as_tuple=True)[0]
+                                    if receiver_cand_idx.numel() > 0:
+                                        receiver_cand_idx = receiver_cand_idx.item()
+                                        graph_outputs.append(cand_logits)
+                                        graph_targets.append(receiver_cand_idx)
+                                        cand_counts.append(int(cand_mask.sum().item()))
+                                    else:
+                                        excluded_invalid += 1
+                                else:
+                                    excluded_ball_owner += 1
+                            else:
+                                excluded_invalid += 1
+                        else:
+                            excluded_invalid += 1
             
-            # 可変長: グラフ単位で損失と指標
+            # Compute loss per graph (TacticAI spec: softmax over candidates)
             batch_loss = 0.0
             graphs_in_batch = 0
             for logits_b, target_b in zip(graph_outputs, graph_targets):
-                lb_row = logits_b.view(-1)
-                lb = lb_row.unsqueeze(0)
+                # logits_b: candidate logits [num_candidates] (already masked)
+                # Apply softmax and compute CrossEntropyLoss
+                lb = logits_b.unsqueeze(0)  # [1, num_candidates]
                 target_t = torch.tensor([target_b], dtype=torch.long, device=lb.device)
                 batch_loss = batch_loss + criterion(lb, target_t)
                 # metrics

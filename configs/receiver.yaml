@@ -41,7 +41,7 @@ loss:
   # L = -Σ y_i * log(p_i) where p_i = softmax(logits_i)
   # With label smoothing: y_i = (1 - α) * y_i + α / num_classes
   type: "cross_entropy"
-  label_smoothing: 0.1  # α parameter for label smoothing
+  label_smoothing: 0.0  # TacticAI spec: no label smoothing for receiver prediction
   weight: 1.0  # Loss weight
   
   # Focal loss parameters (alternative to cross-entropy)
@@ -60,7 +60,7 @@ loss:
 
 # D2 equivariance configuration
 d2:
-  group_pool: false  # Use group pooling instead of random flips
+  group_pool: true  # Use group pooling (4-view average) for TacticAI spec
   transforms:
     hflip: true
     vflip: true

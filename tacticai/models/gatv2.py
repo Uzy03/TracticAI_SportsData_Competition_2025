@@ -323,6 +323,7 @@ class GATv2Layer4View(nn.Module):
         bias: bool = True,
         view_mixing: str = "attention",
         weight_sharing: bool = True,
+        edge_feature_dim: int = 1,  # TacticAI spec: same_team only (default=1)
     ):
         super().__init__()
         
@@ -344,8 +345,11 @@ class GATv2Layer4View(nn.Module):
         # Linear transformation for each head (shared across views)
         self.W = nn.Linear(in_features, heads * out_features, bias=False)
         
-        # Attention mechanism
-        self.att = nn.Parameter(torch.empty(1, heads, 2 * out_features))
+        # Attention mechanism (TacticAI spec: includes edge features)
+        # e_ij = a^T LeakyReLU(W₁ h_i + W₂ h_j + U * edge_attr_ij)
+        # Shape: [1, heads, 2*out_features + edge_feature_dim]
+        self.edge_feature_dim = edge_feature_dim
+        self.att = nn.Parameter(torch.empty(1, heads, 2 * out_features + edge_feature_dim))
         self._att_embed_dim = heads * out_features if concat else out_features
         attn_heads = heads if concat else 1
         
@@ -478,9 +482,9 @@ class GATv2Layer4View(nn.Module):
             dst_start = dst_node_start[i].item()
             h_full[i, dst_start:dst_start+N_per_graph] = h[src_idx_val]
         
-        # Add self-loops if requested (for the full batched graph)
-        if self.add_self_loops:
-            edge_index, edge_attr = self._add_self_loops(edge_index, edge_attr, N_total)
+        # Self-loops are already included in edge_index (TacticAI spec: 22×22 complete graph)
+        # Do not add self-loops again if they're already present
+        # Note: edge_index should already contain self-loops from data preprocessing
         
         # Compute attention coefficients
         att_scores = self._compute_attention_batched(h_full, edge_index, edge_attr, B, V)  # [E, heads]
@@ -515,19 +519,42 @@ class GATv2Layer4View(nn.Module):
         B: int,
         V: int,
     ) -> torch.Tensor:
-        """Compute attention coefficients for batched graphs."""
+        """Compute attention coefficients for batched graphs.
+        
+        TacticAI spec: e_ij = a^T LeakyReLU(W₁ h_i + W₂ h_j + U * edge_attr_ij)
+        """
         src, dst = edge_index[0], edge_index[1]
         
         # Process all views and batches in parallel
         # Reshape h to [B*V, N_total, heads, out_features] -> [B*V*N_total, heads, out_features]
         h_flat = h.view(B * V * h.size(1), self.heads, h.size(3))  # [B*V*N_total, heads, out_features]
         
-        # Concatenate source and destination features for all edges
+        # Get source and destination features
         h_src = h_flat[src]  # [E, heads, out_features]
         h_dst = h_flat[dst]  # [E, heads, out_features]
+        
+        # TacticAI spec: W₁ h_i + W₂ h_j (we use concatenation as approximation)
         h_cat = torch.cat([h_src, h_dst], dim=-1)  # [E, heads, 2 * out_features]
         
-        # Compute attention: a^T * LeakyReLU(W * [h_i || h_j])
+        # Include edge features if available (TacticAI spec: U * edge_attr_ij)
+        if edge_attr is not None:
+            # edge_attr is [E, edge_dim], expand to [E, heads, edge_dim]
+            edge_dim = edge_attr.size(1) if edge_attr.dim() > 1 else 1
+            if edge_attr.dim() == 1:
+                edge_attr = edge_attr.unsqueeze(-1)  # [E, 1]
+            edge_attr_expanded = edge_attr.unsqueeze(1).expand(-1, self.heads, -1)  # [E, heads, edge_dim]
+            
+            # Include edge features in attention computation (TacticAI spec)
+            h_cat = torch.cat([h_cat, edge_attr_expanded], dim=-1)  # [E, heads, 2*out_features + edge_dim]
+        else:
+            # No edge features: pad h_cat to match self.att size
+            if h_cat.size(-1) < self.att.size(-1):
+                padding_size = self.att.size(-1) - h_cat.size(-1)
+                padding = torch.zeros(h_cat.size(0), h_cat.size(1), padding_size, 
+                                    device=h_cat.device, dtype=h_cat.dtype)
+                h_cat = torch.cat([h_cat, padding], dim=-1)
+        
+        # Compute attention: a^T * LeakyReLU([h_i || h_j || edge_attr_ij])
         att_input = F.leaky_relu(h_cat, negative_slope=self.negative_slope)
         att_scores = (self.att * att_input).sum(dim=-1)  # [E, heads]
         
@@ -887,6 +914,8 @@ class GATv2Network4View(nn.Module):
                 concat=concat,
                 dropout=dropout,
                 view_mixing=view_mixing,
+                edge_feature_dim=1,  # TacticAI spec: same_team only
+                add_self_loops=False,  # Self-loops already in edge_index (22×22 complete graph)
             )
             self.gat_layers.append(layer)
         

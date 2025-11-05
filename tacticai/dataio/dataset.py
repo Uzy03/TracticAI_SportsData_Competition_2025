@@ -179,6 +179,7 @@ class ReceiverDataset(TacticAIDataset):
         # Extract features using schema
         node_features = self.schema.get_node_features(sample)
         edge_index = self.schema.get_edge_index(sample)
+        edge_attr = self.schema.get_edge_attributes(sample)  # TacticAI spec: include edge_attr
         target = self.schema.get_targets(sample)
         
         # Create batch tensor (all nodes belong to same graph)
@@ -189,6 +190,10 @@ class ReceiverDataset(TacticAIDataset):
             "edge_index": edge_index,
             "batch": batch,
         }
+        
+        # Add edge_attr if available (TacticAI spec: same_team feature)
+        if edge_attr is not None:
+            input_data["edge_attr"] = edge_attr
         
         # Add mask, team, ball if available in sample
         if isinstance(sample, dict):
@@ -502,6 +507,13 @@ def collate_fn(batch: List[Tuple[Dict[str, torch.Tensor], torch.Tensor]]) -> Tup
         "edge_index": edge_index,
         "batch": batch_tensor,
     }
+    
+    # Concatenate edge_attr if present (TacticAI spec: same_team feature)
+    if all("edge_attr" in data and data["edge_attr"] is not None for data in input_data_list):
+        edge_attrs = []
+        for data in input_data_list:
+            edge_attrs.append(data["edge_attr"])
+        batched_input["edge_attr"] = torch.cat(edge_attrs, dim=0)
     
     # Optional per-node fields: mask, team, ball
     # Concatenate if present in all items

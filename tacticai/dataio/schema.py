@@ -45,20 +45,26 @@ class EdgeAttributeSchema:
         
         Args:
             positions: Player positions [N, 2] (x, y in meters)
-            edge_index: Edge connectivity [2, E]
+            edge_index: Edge connectivity [2, E] (including self-loops)
             team_ids: Team IDs [N] (optional)
             
         Returns:
             Edge attributes [E, 1] (same_team only)
+            - same_team = 1 for same team edges and self-loops
+            - same_team = 0 for opponent edges
         """
         src, dst = edge_index[0], edge_index[1]
         
-        # Compute same team indicator only
+        # Compute same team indicator
         if team_ids is not None:
             same_team = (team_ids[src] == team_ids[dst]).float().unsqueeze(-1)  # [E, 1]
         else:
             # Default: assume alternating teams
             same_team = ((src // 11) == (dst // 11)).float().unsqueeze(-1)  # [E, 1]
+        
+        # Self-loops (i==j) are always same_team=1 (TacticAI spec)
+        self_loop_mask = (src == dst)
+        same_team[self_loop_mask] = 1.0
         
         return same_team
 
@@ -331,23 +337,22 @@ class ReceiverSchema(DataSchema):
         return torch.cat(features, dim=1)
     
     def get_edge_index(self, data: Dict[str, Any]) -> torch.Tensor:
-        """Extract edge connectivity (complete graph).
+        """Extract edge connectivity (complete graph with self-loops).
         
         Args:
             data: Raw data dictionary
             
         Returns:
-            Edge index tensor [2, E]
+            Edge index tensor [2, E] where E = num_nodes * num_nodes (22×22 = 484)
         """
-        # For receiver prediction, we typically use complete graphs
+        # For receiver prediction, use complete graph with self-loops (TacticAI spec)
         num_nodes = self._get_num_nodes(data)
         
-        # Create complete graph
+        # Create complete graph with self-loops (22×22 = 484 edges)
         edges = []
         for i in range(num_nodes):
             for j in range(num_nodes):
-                if i != j:
-                    edges.append([i, j])
+                edges.append([i, j])  # Include self-loops
         
         return torch.tensor(edges, dtype=torch.long).t().contiguous()
     
