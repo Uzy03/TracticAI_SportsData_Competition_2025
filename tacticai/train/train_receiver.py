@@ -334,7 +334,8 @@ def train_epoch(
                                     receiver_cand_idx = (cand_indices == receiver_node_idx).nonzero(as_tuple=True)[0]
                                     if receiver_cand_idx.numel() > 0:
                                         receiver_cand_idx = receiver_cand_idx.item()
-                                        graph_outputs.append(cand_logits)
+                                        # CRITICAL: Clone the tensor to avoid sharing memory
+                                        graph_outputs.append(cand_logits.detach().clone())
                                         graph_targets.append(receiver_cand_idx)
                                         cand_counts.append(int(cand_mask.sum().item()))
                                     else:
@@ -588,7 +589,8 @@ def validate_epoch(
                                 receiver_cand_idx = (cand_indices == receiver_node_idx).nonzero(as_tuple=True)[0]
                                 if receiver_cand_idx.numel() > 0:
                                     receiver_cand_idx = receiver_cand_idx.item()
-                                    graph_outputs.append(cand_logits)
+                                    # CRITICAL: Clone the tensor to avoid sharing memory
+                                    graph_outputs.append(cand_logits.detach().clone())
                                     graph_targets.append(receiver_cand_idx)
                                     cand_counts.append(int(cand_mask.sum().item()))
                                 else:
@@ -603,6 +605,11 @@ def validate_epoch(
             graphs_in_batch = 0
             for logits_b, target_b in zip(graph_outputs, graph_targets):
                 # logits_b: candidate logits [num_candidates] (already masked)
+                # CRITICAL: If only 1 candidate, we can't compute meaningful loss
+                # Skip single-candidate graphs as they don't provide learning signal
+                if logits_b.numel() <= 1:
+                    continue
+                    
                 # Apply softmax and compute CrossEntropyLoss
                 lb = logits_b.unsqueeze(0)  # [1, num_candidates]
                 target_t = torch.tensor([target_b], dtype=torch.long, device=lb.device)
@@ -625,10 +632,18 @@ def validate_epoch(
                 if logger and batch_idx == 0:  # First batch
                     first_logits = graph_outputs[0] if graph_outputs else None
                     first_target = graph_targets[0] if graph_targets else None
-                    if first_logits is not None:
+                    if first_logits is not None and first_logits.numel() > 1:
                         logger.info(f"Val first batch: loss={batch_loss_val:.6f}, graphs={graphs_in_batch}, "
+                                   f"logits_shape={first_logits.shape}, logits={first_logits.tolist()[:5]}, "
                                    f"logits_mean={first_logits.mean().item():.6f}, logits_std={first_logits.std().item():.6f}, "
                                    f"target={first_target}")
+                    elif logger and batch_idx == 0:
+                        logger.warning(f"Val first batch: No valid logits (first_logits={first_logits is not None}, "
+                                     f"numel={first_logits.numel() if first_logits is not None else 0})")
+            
+            # Clear graph_outputs and graph_targets for next batch
+            graph_outputs = []
+            graph_targets = []
             
             batch_idx += 1
     
