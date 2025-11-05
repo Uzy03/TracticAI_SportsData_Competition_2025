@@ -68,6 +68,7 @@ d2:
 # Early stopping configuration
 early_stopping:
   patience: 10
+  min_delta: 0.01  # 判定を緩める：0.01以上の改善が必要（1%以上改善がないとカウント）
 
 # Evaluation configuration
 eval:

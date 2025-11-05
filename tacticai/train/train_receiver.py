@@ -651,12 +651,13 @@ def main():
     # Create early stopping
     early_stopping = EarlyStopping(
         patience=config.get("early_stopping", {}).get("patience", 10),
+        min_delta=config.get("early_stopping", {}).get("min_delta", 0.0),
         mode="max",
         restore_best_weights=True,
     )
     
     # Training loop
-    best_val_accuracy = 0.0
+    best_val_top3 = 0.0
     train_history = {"loss": [], "accuracy": [], "top1": [], "top3": [], "top5": []}
     val_history = {"loss": [], "accuracy": [], "top1": [], "top3": [], "top5": []}
     
@@ -666,7 +667,7 @@ def main():
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
-        best_val_accuracy = checkpoint.get("metrics", {}).get("accuracy", 0.0)
+        best_val_top3 = checkpoint.get("metrics", {}).get("top3", 0.0)
         logger.info(f"Resumed from epoch {start_epoch}")
     
     for epoch in range(start_epoch, config["train"]["epochs"]):
@@ -718,23 +719,23 @@ def main():
             history_path
         )
         
-        # Save best model
-        if val_metrics["accuracy"] > best_val_accuracy:
-            best_val_accuracy = val_metrics["accuracy"]
+        # Save best model (based on Top-3 accuracy)
+        if val_metrics["top3"] > best_val_top3:
+            best_val_top3 = val_metrics["top3"]
             
             checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "receiver" / "best.ckpt"
             save_checkpoint(
                 model, optimizer, epoch, val_metrics["loss"], val_metrics,
                 checkpoint_path, scheduler
             )
-            logger.info(f"New best model saved with accuracy: {best_val_accuracy:.4f}")
+            logger.info(f"New best model saved with Top-3 accuracy: {best_val_top3:.4f}")
         
-        # Early stopping
-        if early_stopping(val_metrics["accuracy"], model):
+        # Early stopping (based on Top-3 accuracy)
+        if early_stopping(val_metrics["top3"], model):
             logger.info(f"Early stopping at epoch {epoch+1}")
             break
     
-    logger.info(f"Training completed. Best validation accuracy: {best_val_accuracy:.4f}")
+    logger.info(f"Training completed. Best validation Top-3 accuracy: {best_val_top3:.4f}")
 
 
 if __name__ == "__main__":
