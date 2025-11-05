@@ -25,7 +25,7 @@ scheduler:
 # Training configuration
 train:
   batch_size: 32  # Increased for better GPU utilization
-  epochs: 3
+  epochs: 50  # ~18秒/エポック × 50 = ~15分（余裕を持たせて50エポック）
   amp: true  # Automatic mixed precision
 
 # Data configuration
