@@ -345,14 +345,15 @@ def train_epoch(
                                 excluded_invalid += 1
                 
                 # Compute loss per graph (TacticAI spec: softmax over candidates)
-                loss = 0.0
+                batch_loss_sum = 0.0
                 graphs_in_batch = 0
                 for logits_b, target_b in zip(graph_outputs, graph_targets):
                     # logits_b: candidate logits [num_candidates] (already masked)
                     # Apply softmax and compute CrossEntropyLoss
                     lb = logits_b.unsqueeze(0)  # [1, num_candidates]
                     target_t = torch.tensor([target_b], dtype=torch.long, device=lb.device)
-                    loss = loss + criterion(lb, target_t)
+                    graph_loss = criterion(lb, target_t)
+                    batch_loss_sum += graph_loss
                     # metrics
                     pred_top1 = torch.argmax(lb, dim=1)
                     acc_correct += int(pred_top1.item() == target_b)
@@ -364,8 +365,9 @@ def train_epoch(
                     graphs_in_batch += 1
                 if graphs_in_batch == 0:
                     continue
-                loss = loss / graphs_in_batch
+                loss = batch_loss_sum / graphs_in_batch  # Average loss for this batch
                 num_graphs_total += graphs_in_batch
+                total_loss += batch_loss_sum.item()  # Accumulate total loss (not average)
             
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -434,14 +436,15 @@ def train_epoch(
                             excluded_invalid += 1
             
             # Compute loss per graph (TacticAI spec: softmax over candidates)
-            loss = 0.0
+            batch_loss_sum = 0.0
             graphs_in_batch = 0
             for logits_b, target_b in zip(graph_outputs, graph_targets):
                 # logits_b: candidate logits [num_candidates] (already masked)
                 # Apply softmax and compute CrossEntropyLoss
                 lb = logits_b.unsqueeze(0)  # [1, num_candidates]
                 target_t = torch.tensor([target_b], dtype=torch.long, device=lb.device)
-                loss = loss + criterion(lb, target_t)
+                graph_loss = criterion(lb, target_t)
+                batch_loss_sum += graph_loss
                 # metrics
                 pred_top1 = torch.argmax(lb, dim=1)
                 acc_correct += int(pred_top1.item() == target_b)
@@ -453,13 +456,12 @@ def train_epoch(
                 graphs_in_batch += 1
             if graphs_in_batch == 0:
                 continue
-            loss = loss / graphs_in_batch
+            loss = batch_loss_sum / graphs_in_batch  # Average loss for this batch
             num_graphs_total += graphs_in_batch
+            total_loss += batch_loss_sum.item()  # Accumulate total loss (not average)
             
             loss.backward()
             optimizer.step()
-        
-        total_loss += loss.item()
         
         # Update progress bar
         progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
@@ -467,7 +469,7 @@ def train_epoch(
     # Compute metrics (手計算)
     denom = max(1, num_graphs_total)
     epoch_metrics = {
-        "loss": total_loss / max(1, len(dataloader)),
+        "loss": total_loss / denom,  # Average loss per graph (not per batch)
         "accuracy": acc_correct / denom,
         "top1": top1_correct / denom,
         "top3": top3_correct / denom,
@@ -583,14 +585,15 @@ def validate_epoch(
                             excluded_invalid += 1
             
             # Compute loss per graph (TacticAI spec: softmax over candidates)
-            batch_loss = 0.0
+            batch_loss_sum = 0.0
             graphs_in_batch = 0
             for logits_b, target_b in zip(graph_outputs, graph_targets):
                 # logits_b: candidate logits [num_candidates] (already masked)
                 # Apply softmax and compute CrossEntropyLoss
                 lb = logits_b.unsqueeze(0)  # [1, num_candidates]
                 target_t = torch.tensor([target_b], dtype=torch.long, device=lb.device)
-                batch_loss = batch_loss + criterion(lb, target_t)
+                graph_loss = criterion(lb, target_t)
+                batch_loss_sum += graph_loss
                 # metrics
                 pred_top1 = torch.argmax(lb, dim=1)
                 acc_correct += int(pred_top1.item() == target_b)
@@ -601,12 +604,12 @@ def validate_epoch(
                 top5_correct += int(target_b in torch.topk(lb, k=k5, dim=1).indices[0].tolist())
                 graphs_in_batch += 1
             if graphs_in_batch > 0:
-                total_loss += (batch_loss / graphs_in_batch).item()
+                total_loss += batch_loss_sum.item()  # Accumulate total loss (not average)
                 num_graphs_total += graphs_in_batch
     
     denom = max(1, num_graphs_total)
     epoch_metrics = {
-        "loss": total_loss / max(1, len(dataloader)),
+        "loss": total_loss / denom,  # Average loss per graph (not per batch)
         "accuracy": acc_correct / denom,
         "top1": top1_correct / denom,
         "top3": top3_correct / denom,
