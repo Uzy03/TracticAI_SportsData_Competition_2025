@@ -615,7 +615,11 @@ def validate_epoch(
         "top3": top3_correct / denom,
         "top5": top5_correct / denom,
     }
-    print(f"[Val] excluded_not_attacking={excluded_not_attacking} excluded_ball_owner={excluded_ball_owner} excluded_invalid={excluded_invalid} avg_cand={sum(cand_counts)/len(cand_counts) if cand_counts else 0:.2f}")
+    print(f"[Val] excluded_not_attacking={excluded_not_attacking} excluded_ball_owner={excluded_ball_owner} excluded_invalid={excluded_invalid} avg_cand={sum(cand_counts)/len(cand_counts) if cand_counts else 0:.2f} num_graphs={num_graphs_total}")
+    
+    # Debug: Log per-batch loss to identify why Val Loss is fixed
+    if num_graphs_total == 0:
+        logger.warning("No valid graphs in validation set!")
     
     return epoch_metrics
 

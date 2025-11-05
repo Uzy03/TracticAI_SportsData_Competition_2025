@@ -20,7 +20,7 @@ scheduler:
   type: "cosine"
   T_max: 50
   eta_min: 0.000001
-  warmup_epochs: 3
+  warmup_epochs: 0  # Disable warmup for faster learning
 
 # Training configuration
 train:
