@@ -489,6 +489,7 @@ def validate_epoch(
     criterion: nn.Module,
     device: torch.device,
     metrics: Dict[str, Any],
+    logger: Optional[Any] = None,
 ) -> Dict[str, float]:
     """Validate model for one epoch.
     
@@ -604,8 +605,12 @@ def validate_epoch(
                 top5_correct += int(target_b in torch.topk(lb, k=k5, dim=1).indices[0].tolist())
                 graphs_in_batch += 1
             if graphs_in_batch > 0:
-                total_loss += batch_loss_sum.item()  # Accumulate total loss (not average)
+                batch_loss_val = batch_loss_sum.item()
+                total_loss += batch_loss_val  # Accumulate total loss (not average)
                 num_graphs_total += graphs_in_batch
+                # Debug: Log first batch loss to see if it changes
+                if logger and num_graphs_total == graphs_in_batch:  # First batch
+                    logger.info(f"Val first batch loss: {batch_loss_val:.6f}, graphs: {graphs_in_batch}")
     
     denom = max(1, num_graphs_total)
     epoch_metrics = {
@@ -617,9 +622,12 @@ def validate_epoch(
     }
     print(f"[Val] excluded_not_attacking={excluded_not_attacking} excluded_ball_owner={excluded_ball_owner} excluded_invalid={excluded_invalid} avg_cand={sum(cand_counts)/len(cand_counts) if cand_counts else 0:.2f} num_graphs={num_graphs_total}")
     
-    # Debug: Log per-batch loss to identify why Val Loss is fixed
-    if num_graphs_total == 0:
-        logger.warning("No valid graphs in validation set!")
+    # Debug: Log detailed information to identify why Val Loss is fixed
+    if logger:
+        if num_graphs_total == 0:
+            logger.warning("No valid graphs in validation set!")
+        else:
+            logger.info(f"Val Loss calculation: total_loss={total_loss:.6f}, num_graphs={num_graphs_total}, avg_loss={total_loss/num_graphs_total:.6f}")
     
     return epoch_metrics
 
@@ -739,7 +747,7 @@ def main():
         )
         
         # Validation
-        val_metrics = validate_epoch(model, val_loader, criterion, device, metrics)
+        val_metrics = validate_epoch(model, val_loader, criterion, device, metrics, logger)
         
         # Update learning rate
         if scheduler is not None:
