@@ -17,19 +17,23 @@ from .gatv2 import GATv2Network
 class ReceiverHead(nn.Module):
     """Minimal point-wise receiver scoring head.
 
-    Applies a shared linear projection to each node embedding and returns
-    per-node logits suitable for a softmax over candidates.
+    TacticAI spec: Applies Linear(d→1) point-wise to each node.
+    NO node aggregation (mean/sum/max) is allowed.
     """
 
     def __init__(self, input_dim: int, **_: int):
         super().__init__()
-        self.linear = nn.Linear(input_dim, 1)
+        # TacticAI spec: Linear(d→1) for point-wise projection
+        # Standard initialization (no zero init to avoid collapse)
+        self.proj = nn.Linear(input_dim, 1)
+        self._debug_count = 0  # Track debug prints (only first batch)
 
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        """Project node embeddings to scalar logits.
+    def forward(self, hidden: torch.Tensor, cand_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Project node embeddings to scalar logits (point-wise, no aggregation).
 
         Args:
             hidden: Node embeddings ``[B, N, d]`` or ``[N, d]``.
+            cand_mask: Candidate mask ``[B, N]`` or ``[N]`` (optional, for debug only).
 
         Returns:
             Per-node logits ``[B, N]`` (or ``[N]`` for 2-D input).
@@ -37,8 +41,38 @@ class ReceiverHead(nn.Module):
         original_2d = hidden.dim() == 2
         if original_2d:
             hidden = hidden.unsqueeze(0)  # [1, N, d]
+            if cand_mask is not None and cand_mask.dim() == 1:
+                cand_mask = cand_mask.unsqueeze(0)
 
-        logits = self.linear(hidden).squeeze(-1)  # [B, N]
+        # TacticAI spec: Point-wise projection (NO node aggregation)
+        # H: [B, N, d] -> proj(H): [B, N, 1] -> squeeze(-1): [B, N]
+        logits = self.proj(hidden).squeeze(-1)  # [B, N]
+
+        # Debug: Print only for first batch of first epoch
+        if self._debug_count < 1 and cand_mask is not None:
+            B, N = hidden.shape[:2]
+            # Pre-head H node-std (mean across graphs)
+            h_node_std = hidden.detach().std(dim=1).mean().item()
+            print(f"DBG pre-head H node-std (mean across graphs): {h_node_std:.6f}")
+            
+            # Raw logits std per graph
+            raw_logits_std_per_graph = logits.detach().std(dim=1).tolist()
+            print(f"DBG raw logits std per graph: {raw_logits_std_per_graph}")
+            
+            # Cand logits std per graph (after mask)
+            if cand_mask.dim() == 1:
+                cand_mask = cand_mask.unsqueeze(0)
+            masked = logits.detach().masked_fill(~cand_mask.bool(), float("-1e9"))
+            cand_only = [masked[b][cand_mask[b].bool()] for b in range(masked.size(0))]
+            cand_logits_std_per_graph = [float(x.std()) if x.numel() > 1 else -1.0 for x in cand_only]
+            print(f"DBG cand logits std per graph: {cand_logits_std_per_graph}")
+            
+            # Cand feature overall std per graph
+            cand_feat = [hidden[b][cand_mask[b].bool()] for b in range(hidden.size(0))]
+            cand_feat_std_per_graph = [float(x.std()) if x.numel() > 0 else -1.0 for x in cand_feat]
+            print(f"DBG cand feature overall std per graph: {cand_feat_std_per_graph}")
+            
+            self._debug_count += 1
 
         if original_2d:
             logits = logits.squeeze(0)

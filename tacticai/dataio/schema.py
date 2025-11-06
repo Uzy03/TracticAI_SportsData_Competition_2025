@@ -312,6 +312,30 @@ class ReceiverSchema(DataSchema):
             # Add default attributes (height, weight)
             features.append(torch.zeros(positions.shape[0], 2, dtype=torch.float32))
         
+        # Extract relative features to kicker (if available) - TacticAI spec: increase feature variance
+        relative_kicker_cols = ['dx_to_kicker', 'dy_to_kicker', 'dist_to_kicker', 'angle_to_kicker']
+        if all(col in data if isinstance(data, dict) else col in data.columns for col in relative_kicker_cols):
+            if isinstance(data, pd.DataFrame):
+                rel_kicker = np.array([data[col] for col in relative_kicker_cols]).T
+            else:
+                rel_kicker = np.array([data[col] for col in relative_kicker_cols]).T
+            features.append(torch.tensor(rel_kicker, dtype=torch.float32))
+        else:
+            # Add zero relative features as placeholder
+            features.append(torch.zeros(positions.shape[0], 4, dtype=torch.float32))
+        
+        # Extract relative features to goal (if available)
+        relative_goal_cols = ['dx_to_goal', 'dy_to_goal', 'dist_to_goal', 'angle_to_goal']
+        if all(col in data if isinstance(data, dict) else col in data.columns for col in relative_goal_cols):
+            if isinstance(data, pd.DataFrame):
+                rel_goal = np.array([data[col] for col in relative_goal_cols]).T
+            else:
+                rel_goal = np.array([data[col] for col in relative_goal_cols]).T
+            features.append(torch.tensor(rel_goal, dtype=torch.float32))
+        else:
+            # Add zero relative features as placeholder
+            features.append(torch.zeros(positions.shape[0], 4, dtype=torch.float32))
+        
         # Extract ball information if available
         if self.ball_column:
             if isinstance(data, pd.DataFrame):

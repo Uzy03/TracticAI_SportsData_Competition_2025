@@ -96,10 +96,25 @@ class ReceiverModel(nn.Module):
         B = batch.max().item() + 1 if batch is not None else 1
         
         # Create 4 views for entire batch at once
-        # x coordinates are at indices 0, 1; velocity x, y at indices 2, 3
+        # TacticAI spec: D2 reflection applies to coordinates and velocity vectors
+        # x, y at indices 0, 1; vx, vy at indices 2, 3
+        # dx_to_kicker, dy_to_kicker at indices 6, 7; dx_to_goal, dy_to_goal at indices 10, 11
+        # dist and angle are invariant (not flipped)
         views_list = []
         for view_idx in range(len(D2_VIEWS)):
-            x_view = apply_view_transform(x, view_idx, xy_indices=(0, 1))  # Only flip x, y positions
+            x_view = x.clone()
+            # Apply D2 reflection to coordinate-like features
+            # x, y coordinates: indices 0, 1
+            x_view = apply_view_transform(x_view, view_idx, xy_indices=(0, 1))
+            # vx, vy velocities: indices 2, 3
+            if x_view.size(-1) > 3:
+                x_view = apply_view_transform(x_view, view_idx, xy_indices=(2, 3))
+            # dx_to_kicker, dy_to_kicker: indices 6, 7
+            if x_view.size(-1) > 7:
+                x_view = apply_view_transform(x_view, view_idx, xy_indices=(6, 7))
+            # dx_to_goal, dy_to_goal: indices 10, 11
+            if x_view.size(-1) > 11:
+                x_view = apply_view_transform(x_view, view_idx, xy_indices=(10, 11))
             views_list.append(x_view)
         
         # Stack views: [4, N_total, D] -> [B, 4, N_total, D]
@@ -120,43 +135,58 @@ class ReceiverModel(nn.Module):
         node_emb_4view = self.backbone(x_4view, edge_index, edge_attr)  # [B, 4, N_per_graph, output_dim]
         
         # TacticAI spec: Average over 4 views: [B, N_per_graph, output_dim]
-        node_emb_batched = node_emb_4view.mean(dim=1)  # [B, N_per_graph, output_dim]
-        
-        # Debug: Log pre-head H std (node variance) for collapse detection
-        pre_head_h_std = node_emb_batched.std(dim=1).mean().item()  # Average std across nodes
-        if hasattr(self, '_logger') and self._logger is not None:
-            self._logger.debug(f"Pre-head H std (node variance): {pre_head_h_std:.6f}")
-        
-        # Reshape back to [N_total, output_dim]
-        node_embeddings = node_emb_batched.view(-1, node_emb_batched.size(-1))  # [N_total, output_dim]
+        H = node_emb_4view.mean(dim=1)  # [B, N_per_graph, output_dim]
         
         # Apply mask if provided (element-wise multiplication, not pooling)
         if mask is not None:
-            mask_expanded = mask.unsqueeze(-1).expand_as(node_embeddings)  # [N, D]
-            node_embeddings = node_embeddings * mask_expanded
+            # Reshape mask to [B, N_per_graph]
+            mask_batched = mask.view(B, num_nodes_per_graph) if mask.dim() == 1 else mask
+            if mask_batched.dim() == 1:
+                mask_batched = mask_batched.unsqueeze(0).expand(B, -1)
+            mask_expanded = mask_batched.unsqueeze(-1).expand_as(H)  # [B, N_per_graph, D]
+            H = H * mask_expanded.float()
+        
+        # Compute cand_mask BEFORE head (for debug output)
+        if team is not None and ball is not None and mask is not None:
+            # Reshape team, ball, mask to [B, N_per_graph]
+            team_batched = team.view(B, num_nodes_per_graph) if team.dim() == 1 else team
+            ball_batched = ball.view(B, num_nodes_per_graph) if ball.dim() == 1 else ball
+            mask_batched = mask.view(B, num_nodes_per_graph) if mask.dim() == 1 else mask
+            if team_batched.dim() == 1:
+                team_batched = team_batched.unsqueeze(0).expand(B, -1)
+            if ball_batched.dim() == 1:
+                ball_batched = ball_batched.unsqueeze(0).expand(B, -1)
+            if mask_batched.dim() == 1:
+                mask_batched = mask_batched.unsqueeze(0).expand(B, -1)
+            # cand_mask: attacking team (team=0) and not ball owner (ball=0) and valid (mask=1)
+            cand_mask = (team_batched == 0) & (ball_batched == 0) & (mask_batched == 1)
+        elif team is not None and ball is not None:
+            team_batched = team.view(B, num_nodes_per_graph) if team.dim() == 1 else team
+            ball_batched = ball.view(B, num_nodes_per_graph) if ball.dim() == 1 else ball
+            if team_batched.dim() == 1:
+                team_batched = team_batched.unsqueeze(0).expand(B, -1)
+            if ball_batched.dim() == 1:
+                ball_batched = ball_batched.unsqueeze(0).expand(B, -1)
+            cand_mask = (team_batched == 0) & (ball_batched == 0)
+        else:
+            cand_mask = None
         
         # Get logits for all nodes (TacticAI spec: [B, N] format)
         # TacticAI spec: Each node outputs 1 scalar logit (no node-mean/sum aggregation)
         # ReceiverHead applies Linear(d→1) point-wise to each node
-        all_logits = self.head(node_embeddings)  # [N_total] - per-node scalar logits
+        # Pass cand_mask for debug output (only first batch)
+        logits = self.head(H, cand_mask=cand_mask)  # [B, N_per_graph]
         
         # TacticAI spec: cand_mask = (team_flag==ATTACK) & (is_kicker==0) & (valid_mask==1)
         # Apply cand_mask LAST (after logits creation) before softmax
-        if team is not None and ball is not None and mask is not None:
-            # cand_mask: attacking team (team=0) and not ball owner (ball=0) and valid (mask=1)
-            cand_mask = (team == 0) & (ball == 0) & (mask == 1)
+        if cand_mask is not None:
             # Apply mask: set non-candidate logits to -1e9 (will be ~0 after softmax)
-            all_logits = all_logits + (~cand_mask).float() * (-1e9)
-            # Return all logits with mask applied (for softmax over candidate set)
-            return all_logits
-        elif team is not None and ball is not None:
-            # Without mask: cand_mask = (team==0) & (ball==0)
-            cand_mask = (team == 0) & (ball == 0)
-            all_logits = all_logits + (~cand_mask).float() * (-1e9)
-            return all_logits
-        else:
-            # No filtering: return all nodes (should not happen in practice)
-            return all_logits
+            logits = logits.masked_fill(~cand_mask.bool(), float("-1e9"))
+        
+        # Reshape back to [N_total] for compatibility
+        all_logits = logits.view(-1)  # [N_total]
+        
+        return all_logits
 
 
 def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:

@@ -2,7 +2,7 @@
 
 # Model configuration
 model:
-  input_dim: 8  # Node feature dimension (x, y, vx, vy, height, weight, ball, team)
+  input_dim: 16  # Node feature dimension: x, y, vx, vy, height, weight, dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker, dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal, ball, team
   hidden_dim: 128
   num_classes: 22  # Number of players
   num_layers: 3
