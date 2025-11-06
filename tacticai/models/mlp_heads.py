@@ -15,50 +15,34 @@ from .gatv2 import GATv2Network
 
 
 class ReceiverHead(nn.Module):
-    """Per-node logit head for receiver prediction (node-axis softmax用).
-    
-    各ノードについて1スカラーlogitを出力し、候補集合上でsoftmaxを取る設計。
-    
-    Args:
-        input_dim: Input feature dimension
-        num_classes: Unused (kept for compatibility)
-        hidden_dim: Hidden dimension for MLP
-        dropout: Dropout probability
+    """Minimal point-wise receiver scoring head.
+
+    Applies a shared linear projection to each node embedding and returns
+    per-node logits suitable for a softmax over candidates.
     """
-    
-    def __init__(
-        self,
-        input_dim: int,
-        num_classes: int = 22,
-        hidden_dim: int = 128,
-        dropout: float = 0.2,
-    ):
+
+    def __init__(self, input_dim: int, **_: int):
         super().__init__()
-        
-        self.input_dim = input_dim
-        self.num_classes = num_classes
-        
-        # MLP layers
-        self.mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1),
-        )
-    
-    def forward(self, node_embeddings: torch.Tensor) -> torch.Tensor:
-        """Forward pass.
-        
+        self.linear = nn.Linear(input_dim, 1)
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Project node embeddings to scalar logits.
+
         Args:
-            node_embeddings: Node embeddings [N, input_dim]
-            
+            hidden: Node embeddings ``[B, N, d]`` or ``[N, d]``.
+
         Returns:
-            Per-node logits [N, 1]
+            Per-node logits ``[B, N]`` (or ``[N]`` for 2-D input).
         """
-        return self.mlp(node_embeddings)
+        original_2d = hidden.dim() == 2
+        if original_2d:
+            hidden = hidden.unsqueeze(0)  # [1, N, d]
+
+        logits = self.linear(hidden).squeeze(-1)  # [B, N]
+
+        if original_2d:
+            logits = logits.squeeze(0)
+        return logits
 
 
 class ShotHeadConditional(nn.Module):

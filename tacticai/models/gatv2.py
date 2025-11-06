@@ -56,20 +56,23 @@ class GATv2Layer(nn.Module):
         # Linear transformation for each head
         self.W = nn.Linear(in_features, heads * out_features, bias=False)
         
-        # Attention mechanism
+        # TacticAI spec: W1 for source nodes, W2 for destination nodes, U for edge features
+        # W1 and W2 are shared across heads, but we need separate for multi-head
+        # Actually, we can use W for both, but need separate projections
+        # For simplicity, we'll use W for both but apply separately
+        self.W1 = nn.Linear(in_features, heads * out_features, bias=False)  # For h_i
+        self.W2 = nn.Linear(in_features, heads * out_features, bias=False)  # For h_j
+        
+        # Attention mechanism: TacticAI spec: e_ij = a^T LeakyReLU(W1*h_i + W2*h_j + U*edge_attr_ij)
         if use_edge_features and edge_feature_dim > 0:
-            # Include edge features in attention computation
-            self.att = nn.Parameter(torch.empty(1, heads, 2 * out_features + edge_feature_dim))
-            # Edge feature encoder
-            self.edge_encoder = EdgeFeatureEncoder(
-                edge_dim=edge_feature_dim,
-                hidden_dim=min(edge_feature_dim, 32),
-                output_dim=edge_feature_dim,
-                dropout=dropout
-            )
+            # U for edge features (linear transformation)
+            self.U = nn.Linear(edge_feature_dim, heads * out_features, bias=False)
+            # Attention vector: a^T acts on [out_features] (W1*h_i + W2*h_j + U*edge_attr_ij)
+            self.att = nn.Parameter(torch.empty(1, heads, out_features))
         else:
-            self.att = nn.Parameter(torch.empty(1, heads, 2 * out_features))
-            self.edge_encoder = None
+            # No edge features: e_ij = a^T LeakyReLU(W1*h_i + W2*h_j)
+            self.U = None
+            self.att = nn.Parameter(torch.empty(1, heads, out_features))
         
         if bias:
             self.bias = nn.Parameter(torch.empty(heads * out_features if concat else out_features))
@@ -81,6 +84,10 @@ class GATv2Layer(nn.Module):
     def _reset_parameters(self):
         """Initialize parameters."""
         nn.init.xavier_uniform_(self.W.weight)
+        nn.init.xavier_uniform_(self.W1.weight)
+        nn.init.xavier_uniform_(self.W2.weight)
+        if self.U is not None:
+            nn.init.xavier_uniform_(self.U.weight)
         nn.init.xavier_uniform_(self.att)
         if self.bias is not None:
             nn.init.constant_(self.bias, 0)
@@ -97,75 +104,86 @@ class GATv2Layer(nn.Module):
         mask: Optional[torch.Tensor] = None,
         return_attention_weights: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """Forward pass.
-        
-        Args:
-            x: Node features [N, in_features] or [B, N, in_features]
-            edge_index: Edge connectivity [2, E]
-            edge_attr: Edge features [E, edge_dim] (optional)
-            mask: Node mask [B, N] where 1=valid, 0=missing (optional)
-            return_attention_weights: Whether to return attention weights
-            
-        Returns:
-            Updated node features [N, out_features * heads] or [N, out_features]
-            Attention weights [E, heads] (optional)
-        """
-        # Handle batch dimension
-        if x.dim() == 3:
-            B, N, num_features = x.size()
-            x = x.view(B * N, num_features)
-            if mask is not None:
-                mask = mask.view(B * N)
+        """Forward pass following e_ij = a^T LeakyReLU(W₁h_i + W₂h_j + Ue_ij)."""
+        original_2d = x.dim() == 2
+        if original_2d:
+            x = x.unsqueeze(0)  # [1, N, d_in]
+
+        B, N, _ = x.shape
+        device = x.device
+
+        if mask is None:
+            mask = torch.ones(B, N, dtype=torch.bool, device=device)
         else:
-            B = 1
-            N = x.size(0)
-        
-        # Linear transformation
-        h = self.W(x)  # [N, heads * out_features]
-        h = h.view(N, self.heads, self.out_features)  # [N, heads, out_features]
-        
-        # Add self-loops if requested
-        if self.add_self_loops:
-            edge_index, edge_attr = self._add_self_loops(edge_index, edge_attr, N)
-        
-        # Compute attention coefficients
-        att_scores = self._compute_attention(h, edge_index, edge_attr)  # [E, heads]
-        
-        # Apply mask to attention scores (mask out missing nodes)
-        if mask is not None:
-            # mask is [N] or [B*N], expand to [E, heads]
-            dst = edge_index[1]  # Destination nodes
-            mask_dst = mask[dst]  # [E] 
-            mask_dst = mask_dst.unsqueeze(1).expand(-1, self.heads)  # [E, heads]
-            # Apply mask: missing nodes get -1e9 (will be ~0 after softmax)
-            att_scores = att_scores + (1 - mask_dst) * (-1e9)  # [E, heads]
-        
-        # Apply dropout
-        if self.training and self.dropout > 0:
-            att_scores = F.dropout(att_scores, p=self.dropout, training=True)
-        
-        # Apply attention and aggregate
-        out = self._aggregate(h, edge_index, att_scores, mask)  # [N, heads, out_features]
-        
-        # Concatenate or average heads
+            if mask.dim() == 1:
+                mask = mask.unsqueeze(0).expand(B, -1)
+            mask = mask.to(device=device, dtype=torch.bool)
+
+        src_idx, dst_idx = edge_index[0], edge_index[1]  # [E], [E]
+        E = src_idx.numel()
+
+        x_flat = x.reshape(B * N, -1)  # [B*N, d_in]
+        h_src = self.W1(x_flat).view(B, N, self.heads, self.out_features)  # [B, N, H, d_out]
+        h_dst = self.W2(x_flat).view(B, N, self.heads, self.out_features)  # [B, N, H, d_out]
+        values = self.W(x_flat).view(B, N, self.heads, self.out_features)  # [B, N, H, d_out]
+
+        h_i = h_src[:, src_idx, :, :]  # [B, E, H, d_out]
+        h_j = h_dst[:, dst_idx, :, :]  # [B, E, H, d_out]
+
+        if self.use_edge_features and edge_attr is not None and self.U is not None:
+            edge_term = self.U(edge_attr).view(1, E, self.heads, self.out_features)  # [1, E, H, d_out]
+        else:
+            edge_term = 0.0
+
+        att_input = h_i + h_j + edge_term  # [B, E, H, d_out]
+        att_input = F.leaky_relu(att_input, negative_slope=self.negative_slope)
+        att_logits = (att_input * self.att.view(1, 1, self.heads, self.out_features)).sum(-1)  # [B, E, H]
+
+        dst_mask = mask[:, dst_idx]  # [B, E]
+        att_logits = att_logits.masked_fill(~dst_mask.unsqueeze(-1), -1e9)
+
+        att_weights = torch.zeros_like(att_logits)  # [B, E, H]
+        for node in range(N):
+            edge_mask = dst_idx == node  # [E]
+            if not edge_mask.any():
+                continue
+            node_logits = att_logits[:, edge_mask, :]  # [B, E_node, H]
+            node_valid = dst_mask[:, edge_mask].unsqueeze(-1)  # [B, E_node, 1]
+            safe_logits = node_logits.masked_fill(~node_valid, -1e9)
+            node_weights = torch.softmax(safe_logits, dim=1)  # [B, E_node, H]
+            node_weights = node_weights * node_valid.float()
+            att_weights[:, edge_mask, :] = node_weights
+
+        if self.training and self.dropout > 0.0:
+            att_weights = F.dropout(att_weights, p=self.dropout, training=True)
+
+        value_edges = values[:, src_idx, :, :]  # [B, E, H, d_out]
+        weighted_values = att_weights.unsqueeze(-1) * value_edges  # [B, E, H, d_out]
+
+        out = torch.zeros(B, N, self.heads, self.out_features, device=device, dtype=x.dtype)
+        for node in range(N):
+            edge_mask = dst_idx == node
+            if not edge_mask.any():
+                continue
+            contribution = weighted_values[:, edge_mask, :, :].sum(dim=1)  # [B, H, d_out]
+            out[:, node, :, :] = contribution
+
+        out = out * mask.unsqueeze(-1).unsqueeze(-1).float()
+
         if self.concat:
-            out = out.view(N, self.heads * self.out_features)
+            out = out.reshape(B, N, self.heads * self.out_features)  # [B, N, H*d_out]
         else:
-            out = out.mean(dim=1)  # [N, out_features]
-        
-        # Add bias
+            out = out.mean(dim=2)  # [B, N, d_out]
+
         if self.bias is not None:
             out = out + self.bias
-        
-        # Reshape back to batch format if needed
-        if B > 1:
-            out = out.view(B, N, -1)
-            if return_attention_weights:
-                return out, att_scores
-            return out
-        
+
+        att_return = att_weights if not original_2d else att_weights.squeeze(0)
+        if original_2d:
+            out = out.squeeze(0)
+
         if return_attention_weights:
-            return out, att_scores
+            return out, att_return
         return out
     
     def _add_self_loops(
@@ -193,14 +211,18 @@ class GATv2Layer(nn.Module):
     
     def _compute_attention(
         self, 
-        h: torch.Tensor, 
+        h1: torch.Tensor, 
+        h2: torch.Tensor,
         edge_index: torch.Tensor,
         edge_attr: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """Compute attention coefficients.
+        """Compute attention coefficients (TacticAI spec).
+        
+        TacticAI spec: e_ij = a^T LeakyReLU(W1*h_i + W2*h_j + U*edge_attr_ij)
         
         Args:
-            h: Node features [N, heads, out_features]
+            h1: Node features [N, heads, out_features] (from W1)
+            h2: Node features [N, heads, out_features] (from W2)
             edge_index: Edge connectivity [2, E]
             edge_attr: Edge features [E, edge_dim] (optional)
             
@@ -209,20 +231,21 @@ class GATv2Layer(nn.Module):
         """
         src, dst = edge_index[0], edge_index[1]
         
-        # Concatenate source and destination features
-        h_cat = torch.cat([h[src], h[dst]], dim=-1)  # [E, heads, 2 * out_features]
+        # TacticAI spec: W1*h_i + W2*h_j
+        h_src = h1[src]  # [E, heads, out_features] - W1*h_i
+        h_dst = h2[dst]  # [E, heads, out_features] - W2*h_j
+        h_sum = h_src + h_dst  # [E, heads, out_features]
         
-        # Include edge features if available
-        if self.use_edge_features and edge_attr is not None and self.edge_encoder is not None:
-            # Encode edge features
-            edge_encoded = self.edge_encoder(edge_attr)  # [E, edge_feature_dim]
-            edge_encoded = edge_encoded.unsqueeze(1).expand(-1, self.heads, -1)  # [E, heads, edge_feature_dim]
-            
-            # Concatenate with node features
-            h_cat = torch.cat([h_cat, edge_encoded], dim=-1)  # [E, heads, 2 * out_features + edge_feature_dim]
+        # Include edge features if available: TacticAI spec: U*edge_attr_ij
+        if self.use_edge_features and edge_attr is not None and self.U is not None:
+            # Apply U to edge features
+            edge_transformed = self.U(edge_attr)  # [E, heads * out_features]
+            edge_transformed = edge_transformed.view(edge_attr.size(0), self.heads, self.out_features)  # [E, heads, out_features]
+            # TacticAI spec: W1*h_i + W2*h_j + U*edge_attr_ij
+            h_sum = h_sum + edge_transformed  # [E, heads, out_features]
         
-        # Compute attention: a^T * LeakyReLU(W * [h_i || h_j || edge_ij])
-        att_input = F.leaky_relu(h_cat, negative_slope=self.negative_slope)
+        # TacticAI spec: a^T LeakyReLU(W1*h_i + W2*h_j + U*edge_attr_ij)
+        att_input = F.leaky_relu(h_sum, negative_slope=self.negative_slope)  # [E, heads, out_features]
         att_scores = (self.att * att_input).sum(dim=-1)  # [E, heads]
         
         return att_scores
@@ -345,11 +368,23 @@ class GATv2Layer4View(nn.Module):
         # Linear transformation for each head (shared across views)
         self.W = nn.Linear(in_features, heads * out_features, bias=False)
         
+        # TacticAI spec: W1 for source nodes, W2 for destination nodes, U for edge features
+        self.W1 = nn.Linear(in_features, heads * out_features, bias=False)  # For h_i
+        self.W2 = nn.Linear(in_features, heads * out_features, bias=False)  # For h_j
+        
         # Attention mechanism (TacticAI spec: includes edge features)
         # e_ij = a^T LeakyReLU(W₁ h_i + W₂ h_j + U * edge_attr_ij)
-        # Shape: [1, heads, 2*out_features + edge_feature_dim]
+        # Shape: [1, heads, out_features] (not 2*out_features + edge_feature_dim)
         self.edge_feature_dim = edge_feature_dim
-        self.att = nn.Parameter(torch.empty(1, heads, 2 * out_features + edge_feature_dim))
+        if edge_feature_dim > 0:
+            # U for edge features (linear transformation)
+            self.U = nn.Linear(edge_feature_dim, heads * out_features, bias=False)
+            # Attention vector: a^T acts on [out_features] (W1*h_i + W2*h_j + U*edge_attr_ij)
+            self.att = nn.Parameter(torch.empty(1, heads, out_features))
+        else:
+            # No edge features: e_ij = a^T LeakyReLU(W1*h_i + W2*h_j)
+            self.U = None
+            self.att = nn.Parameter(torch.empty(1, heads, out_features))
         self._att_embed_dim = heads * out_features if concat else out_features
         attn_heads = heads if concat else 1
         
@@ -379,6 +414,10 @@ class GATv2Layer4View(nn.Module):
     def _reset_parameters(self):
         """Initialize parameters."""
         nn.init.xavier_uniform_(self.W.weight)
+        nn.init.xavier_uniform_(self.W1.weight)
+        nn.init.xavier_uniform_(self.W2.weight)
+        if self.U is not None:
+            nn.init.xavier_uniform_(self.U.weight)
         nn.init.xavier_uniform_(self.att)
         if self.bias is not None:
             nn.init.constant_(self.bias, 0)
@@ -452,17 +491,20 @@ class GATv2Layer4View(nn.Module):
         """
         N_total = B * N_per_graph  # Total nodes across all graphs
         
-        # Linear transformation
-        h = self.W(x)  # [B*V, N_per_graph, heads * out_features]
-        h = h.view(B * V, N_per_graph, self.heads, self.out_features)  # [B*V, N_per_graph, heads, out_features]
+        # Linear transformation: TacticAI spec - W1 and W2 separately
+        h1 = self.W1(x)  # [B*V, N_per_graph, heads * out_features]
+        h1 = h1.view(B * V, N_per_graph, self.heads, self.out_features)  # [B*V, N_per_graph, heads, out_features]
+        h2 = self.W2(x)  # [B*V, N_per_graph, heads * out_features]
+        h2 = h2.view(B * V, N_per_graph, self.heads, self.out_features)  # [B*V, N_per_graph, heads, out_features]
         
-        # For batched processing, we need to expand h to [B*V, N_total, ...] to match edge_index
-        # Fully vectorized: create h_full using scatter_add or advanced indexing
-        h_full = torch.zeros(B * V, N_total, self.heads, self.out_features, device=h.device, dtype=h.dtype)
+        # For batched processing, we need to expand h1 and h2 to [B*V, N_total, ...] to match edge_index
+        # Fully vectorized: create h1_full and h2_full using scatter_add or advanced indexing
+        h1_full = torch.zeros(B * V, N_total, self.heads, self.out_features, device=h1.device, dtype=h1.dtype)
+        h2_full = torch.zeros(B * V, N_total, self.heads, self.out_features, device=h2.device, dtype=h2.dtype)
         # Create all indices at once (vectorized)
         # For each batch b and view v, copy h[b*V+v, :] to h_full[b*V+v, b*N_per_graph:(b+1)*N_per_graph]
-        batch_indices = torch.arange(B, device=h.device)  # [B]
-        view_indices = torch.arange(V, device=h.device)  # [V]
+        batch_indices = torch.arange(B, device=h1.device)  # [B]
+        view_indices = torch.arange(V, device=h1.device)  # [V]
         # Create meshgrid: [B, V] for batch-view combinations
         b_grid, v_grid = torch.meshgrid(batch_indices, view_indices, indexing='ij')  # [B, V] each
         flat_b = b_grid.flatten()  # [B*V]
@@ -480,21 +522,22 @@ class GATv2Layer4View(nn.Module):
         for i in range(B * V):
             src_idx_val = src_idx[i].item()
             dst_start = dst_node_start[i].item()
-            h_full[i, dst_start:dst_start+N_per_graph] = h[src_idx_val]
+            h1_full[i, dst_start:dst_start+N_per_graph] = h1[src_idx_val]
+            h2_full[i, dst_start:dst_start+N_per_graph] = h2[src_idx_val]
         
         # Self-loops are already included in edge_index (TacticAI spec: 22×22 complete graph)
         # Do not add self-loops again if they're already present
         # Note: edge_index should already contain self-loops from data preprocessing
         
-        # Compute attention coefficients
-        att_scores = self._compute_attention_batched(h_full, edge_index, edge_attr, B, V)  # [E, heads]
+        # Compute attention coefficients: TacticAI spec: e_ij = a^T LeakyReLU(W1*h_i + W2*h_j + U*edge_attr_ij)
+        att_scores = self._compute_attention_batched(h1_full, h2_full, edge_index, edge_attr, B, V)  # [E, heads]
         
         # Apply dropout
         if self.training and self.dropout > 0:
             att_scores = F.dropout(att_scores, p=self.dropout, training=True)
         
-        # Apply attention and aggregate
-        out_full = self._aggregate(h_full, edge_index, att_scores)  # [B*V, N_total, heads, out_features]
+        # Apply attention and aggregate (use h1_full for aggregation)
+        out_full = self._aggregate(h1_full, edge_index, att_scores)  # [B*V, N_total, heads, out_features]
         
         # Extract per-graph outputs (fully vectorized)
         # Create indices for all batch-view combinations
@@ -513,49 +556,42 @@ class GATv2Layer4View(nn.Module):
     
     def _compute_attention_batched(
         self, 
-        h: torch.Tensor,  # [B*V, N_total, heads, out_features]
+        h1: torch.Tensor,  # [B*V, N_total, heads, out_features] - W1*h
+        h2: torch.Tensor,  # [B*V, N_total, heads, out_features] - W2*h
         edge_index: torch.Tensor,  # [2, E_total]
         edge_attr: Optional[torch.Tensor],
         B: int,
         V: int,
     ) -> torch.Tensor:
-        """Compute attention coefficients for batched graphs.
+        """Compute attention coefficients for batched graphs (TacticAI spec).
         
         TacticAI spec: e_ij = a^T LeakyReLU(W₁ h_i + W₂ h_j + U * edge_attr_ij)
         """
         src, dst = edge_index[0], edge_index[1]
         
         # Process all views and batches in parallel
-        # Reshape h to [B*V, N_total, heads, out_features] -> [B*V*N_total, heads, out_features]
-        h_flat = h.view(B * V * h.size(1), self.heads, h.size(3))  # [B*V*N_total, heads, out_features]
+        # Reshape h1 and h2 to [B*V*N_total, heads, out_features]
+        N_total = h1.size(1)
+        h1_flat = h1.view(B * V * N_total, self.heads, h1.size(3))  # [B*V*N_total, heads, out_features]
+        h2_flat = h2.view(B * V * N_total, self.heads, h2.size(3))  # [B*V*N_total, heads, out_features]
         
         # Get source and destination features
-        h_src = h_flat[src]  # [E, heads, out_features]
-        h_dst = h_flat[dst]  # [E, heads, out_features]
+        h1_src = h1_flat[src]  # [E, heads, out_features] - W1*h_i
+        h2_dst = h2_flat[dst]  # [E, heads, out_features] - W2*h_j
         
-        # TacticAI spec: W₁ h_i + W₂ h_j (we use concatenation as approximation)
-        h_cat = torch.cat([h_src, h_dst], dim=-1)  # [E, heads, 2 * out_features]
+        # TacticAI spec: W₁ h_i + W₂ h_j
+        h_sum = h1_src + h2_dst  # [E, heads, out_features]
         
         # Include edge features if available (TacticAI spec: U * edge_attr_ij)
-        if edge_attr is not None:
-            # edge_attr is [E, edge_dim], expand to [E, heads, edge_dim]
-            edge_dim = edge_attr.size(1) if edge_attr.dim() > 1 else 1
-            if edge_attr.dim() == 1:
-                edge_attr = edge_attr.unsqueeze(-1)  # [E, 1]
-            edge_attr_expanded = edge_attr.unsqueeze(1).expand(-1, self.heads, -1)  # [E, heads, edge_dim]
-            
-            # Include edge features in attention computation (TacticAI spec)
-            h_cat = torch.cat([h_cat, edge_attr_expanded], dim=-1)  # [E, heads, 2*out_features + edge_dim]
-        else:
-            # No edge features: pad h_cat to match self.att size
-            if h_cat.size(-1) < self.att.size(-1):
-                padding_size = self.att.size(-1) - h_cat.size(-1)
-                padding = torch.zeros(h_cat.size(0), h_cat.size(1), padding_size, 
-                                    device=h_cat.device, dtype=h_cat.dtype)
-                h_cat = torch.cat([h_cat, padding], dim=-1)
+        if edge_attr is not None and self.U is not None:
+            # Apply U to edge features
+            edge_transformed = self.U(edge_attr)  # [E, heads * out_features]
+            edge_transformed = edge_transformed.view(edge_attr.size(0), self.heads, self.out_features)  # [E, heads, out_features]
+            # TacticAI spec: W₁ h_i + W₂ h_j + U * edge_attr_ij
+            h_sum = h_sum + edge_transformed  # [E, heads, out_features]
         
-        # Compute attention: a^T * LeakyReLU([h_i || h_j || edge_attr_ij])
-        att_input = F.leaky_relu(h_cat, negative_slope=self.negative_slope)
+        # TacticAI spec: a^T LeakyReLU(W₁ h_i + W₂ h_j + U * edge_attr_ij)
+        att_input = F.leaky_relu(h_sum, negative_slope=self.negative_slope)  # [E, heads, out_features]
         att_scores = (self.att * att_input).sum(dim=-1)  # [E, heads]
         
         return att_scores
@@ -569,23 +605,30 @@ class GATv2Layer4View(nn.Module):
         """Intra-view GAT processing (legacy single-graph version)."""
         N = x.size(1)
         
-        # Linear transformation
-        h = self.W(x)  # [B*V, N, heads * out_features]
-        h = h.view(-1, N, self.heads, self.out_features)  # [B*V, N, heads, out_features]
+        # Linear transformation: TacticAI spec - W1 and W2 separately
+        h1 = self.W1(x)  # [B*V, N, heads * out_features]
+        h1 = h1.view(-1, N, self.heads, self.out_features)  # [B*V, N, heads, out_features]
+        h2 = self.W2(x)  # [B*V, N, heads * out_features]
+        h2 = h2.view(-1, N, self.heads, self.out_features)  # [B*V, N, heads, out_features]
         
         # Add self-loops if requested
         if self.add_self_loops:
             edge_index, edge_attr = self._add_self_loops(edge_index, edge_attr, N)
         
-        # Compute attention coefficients
-        att_scores = self._compute_attention(h, edge_index, edge_attr)  # [E, heads]
+        # Compute attention coefficients: TacticAI spec: e_ij = a^T LeakyReLU(W1*h_i + W2*h_j + U*edge_attr_ij)
+        # Reshape for _compute_attention: [B*V*N, heads, out_features]
+        B_V = h1.size(0)
+        h1_flat = h1.view(B_V * N, self.heads, self.out_features)
+        h2_flat = h2.view(B_V * N, self.heads, self.out_features)
+        att_scores = self._compute_attention(h1_flat, h2_flat, edge_index, edge_attr)  # [E, heads]
         
         # Apply dropout
         if self.training and self.dropout > 0:
             att_scores = F.dropout(att_scores, p=self.dropout, training=True)
         
-        # Apply attention and aggregate
-        out = self._aggregate(h, edge_index, att_scores)  # [B*V, N, heads, out_features]
+        # Apply attention and aggregate (use h1 for aggregation)
+        out = self._aggregate(h1_flat, edge_index, att_scores)  # [B*V*N, heads, out_features]
+        out = out.view(B_V, N, self.heads, self.out_features)  # [B*V, N, heads, out_features]
         
         # Concatenate or average heads
         if self.concat:

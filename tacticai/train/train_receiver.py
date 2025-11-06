@@ -119,8 +119,13 @@ class ReceiverModel(nn.Module):
         # Get node embeddings from backbone: [B, 4, N_per_graph, output_dim]
         node_emb_4view = self.backbone(x_4view, edge_index, edge_attr)  # [B, 4, N_per_graph, output_dim]
         
-        # Average over 4 views: [B, N_per_graph, output_dim]
+        # TacticAI spec: Average over 4 views: [B, N_per_graph, output_dim]
         node_emb_batched = node_emb_4view.mean(dim=1)  # [B, N_per_graph, output_dim]
+        
+        # Log node variance for collapse detection (TacticAI spec requirement)
+        node_var = node_emb_batched.var(dim=1).mean().item()  # Average variance across nodes
+        if hasattr(self, '_logger') and self._logger is not None:
+            self._logger.debug(f"Node variance after GATv2: {node_var:.6f}")
         
         # Reshape back to [N_total, output_dim]
         node_embeddings = node_emb_batched.view(-1, node_emb_batched.size(-1))  # [N_total, output_dim]
@@ -131,6 +136,7 @@ class ReceiverModel(nn.Module):
             node_embeddings = node_embeddings * mask_expanded
         
         # Get logits for all nodes (TacticAI spec: [B, N] format)
+        # TacticAI spec: Each node outputs 1 scalar logit (no node-mean/sum aggregation)
         all_logits = self.head(node_embeddings).squeeze(-1)  # [N_total] - per-node scalar logits
         
         # TacticAI spec: cand_mask = (team_flag==ATTACK) & (is_kicker==0) & (valid_mask==1)
@@ -633,10 +639,14 @@ def validate_epoch(
                     first_logits = graph_outputs[0] if graph_outputs else None
                     first_target = graph_targets[0] if graph_targets else None
                     if first_logits is not None and first_logits.numel() > 1:
+                        # TacticAI spec: Log cand logits_std (should not be 0)
+                        cand_logits_std = first_logits.std().item()
                         logger.info(f"Val first batch: loss={batch_loss_val:.6f}, graphs={graphs_in_batch}, "
                                    f"logits_shape={first_logits.shape}, logits={first_logits.tolist()[:5]}, "
-                                   f"logits_mean={first_logits.mean().item():.6f}, logits_std={first_logits.std().item():.6f}, "
+                                   f"logits_mean={first_logits.mean().item():.6f}, logits_std={cand_logits_std:.6f}, "
                                    f"target={first_target}")
+                        if cand_logits_std < 1e-6:
+                            logger.warning(f"Val first batch: cand logits_std is too small ({cand_logits_std:.6f}), possible collapse!")
                     elif logger and batch_idx == 0:
                         logger.warning(f"Val first batch: No valid logits (first_logits={first_logits is not None}, "
                                      f"numel={first_logits.numel() if first_logits is not None else 0})")

@@ -399,13 +399,17 @@ class ReceiverSchema(DataSchema):
         return torch.tensor(int(receiver_idx), dtype=torch.long)
     
     def get_edge_attributes(self, data: Dict[str, Any]) -> Optional[torch.Tensor]:
-        """Extract edge attributes for receiver prediction.
+        """Extract edge attributes for receiver prediction (TacticAI spec).
+        
+        TacticAI spec: same_team only [E, 1]
+        - same_team = 1 for same team edges and self-loops
+        - same_team = 0 for opponent edges
         
         Args:
             data: Raw data dictionary
             
         Returns:
-            Edge attributes tensor [E, 3] or None
+            Edge attributes tensor [E, 1] (TacticAI spec: same_team only) or None
         """
         if not self.use_edge_attributes or self.edge_schema is None:
             return None
@@ -433,8 +437,25 @@ class ReceiverSchema(DataSchema):
                 team_ids = np.array(data[self.team_column])
             team_ids = torch.tensor(team_ids, dtype=torch.long)
         
-        # Compute edge attributes
+        # Compute edge attributes (TacticAI spec: same_team only)
         edge_attrs = self.edge_schema.compute_edge_attributes(positions, edge_index, team_ids)
+        
+        # TacticAI spec assertion: edge_index should contain 22 self-loops
+        num_nodes = self._get_num_nodes(data)
+        expected_edges = num_nodes * num_nodes  # 22×22 = 484
+        assert edge_index.size(1) == expected_edges, \
+            f"edge_index should have {expected_edges} edges (complete graph with self-loops), got {edge_index.size(1)}"
+        
+        # TacticAI spec assertion: self-loops (i==j) should have same_team=1
+        if edge_attrs is not None:
+            src, dst = edge_index[0], edge_index[1]
+            self_loop_mask = (src == dst)
+            assert self_loop_mask.sum().item() == num_nodes, \
+                f"Expected {num_nodes} self-loops, got {self_loop_mask.sum().item()}"
+            if self_loop_mask.any():
+                self_loop_edge_attr = edge_attrs[self_loop_mask]
+                assert torch.allclose(self_loop_edge_attr, torch.ones_like(self_loop_edge_attr)), \
+                    f"Self-loops should have same_team=1, got {self_loop_edge_attr.unique()}"
         
         return edge_attrs
     
