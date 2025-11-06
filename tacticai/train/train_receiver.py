@@ -170,10 +170,9 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
     """
     model = ReceiverModel(config)
     
-    # Apply D2 group pooling if enabled
-    if config.get("d2", {}).get("group_pool", False):
-        from tacticai.modules.transforms import GroupPoolingWrapper
-        model = GroupPoolingWrapper(model, average_logits=True)
+    # Note: ReceiverModel already implements D2 equivariance internally (4-view average)
+    # No need to wrap with GroupPoolingWrapper
+    # The group_pool config is for models that don't have built-in D2 processing
     
     return model.to(device)
 
