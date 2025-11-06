@@ -122,10 +122,10 @@ class ReceiverModel(nn.Module):
         # TacticAI spec: Average over 4 views: [B, N_per_graph, output_dim]
         node_emb_batched = node_emb_4view.mean(dim=1)  # [B, N_per_graph, output_dim]
         
-        # Log node variance for collapse detection (TacticAI spec requirement)
-        node_var = node_emb_batched.var(dim=1).mean().item()  # Average variance across nodes
+        # Debug: Log pre-head H std (node variance) for collapse detection
+        pre_head_h_std = node_emb_batched.std(dim=1).mean().item()  # Average std across nodes
         if hasattr(self, '_logger') and self._logger is not None:
-            self._logger.debug(f"Node variance after GATv2: {node_var:.6f}")
+            self._logger.debug(f"Pre-head H std (node variance): {pre_head_h_std:.6f}")
         
         # Reshape back to [N_total, output_dim]
         node_embeddings = node_emb_batched.view(-1, node_emb_batched.size(-1))  # [N_total, output_dim]
@@ -137,10 +137,11 @@ class ReceiverModel(nn.Module):
         
         # Get logits for all nodes (TacticAI spec: [B, N] format)
         # TacticAI spec: Each node outputs 1 scalar logit (no node-mean/sum aggregation)
-        all_logits = self.head(node_embeddings).squeeze(-1)  # [N_total] - per-node scalar logits
+        # ReceiverHead applies Linear(d→1) point-wise to each node
+        all_logits = self.head(node_embeddings)  # [N_total] - per-node scalar logits
         
         # TacticAI spec: cand_mask = (team_flag==ATTACK) & (is_kicker==0) & (valid_mask==1)
-        # Apply cand_mask before softmax (not filtering, but masking with -1e9)
+        # Apply cand_mask LAST (after logits creation) before softmax
         if team is not None and ball is not None and mask is not None:
             # cand_mask: attacking team (team=0) and not ball owner (ball=0) and valid (mask=1)
             cand_mask = (team == 0) & (ball == 0) & (mask == 1)
@@ -540,17 +541,49 @@ def validate_epoch(
                 ball=data.get("ball"),
             )
             
-            # Debug: Log model output statistics for first batch of first epoch
+            # Debug: Log detailed statistics for first batch of first epoch
             if logger and batch_idx == 0 and num_graphs_total == 0:
                 batch_size = data["batch"].max().item() + 1
                 if batch_size > 0:
                     first_graph_mask = data["batch"] == 0
                     if first_graph_mask.any():
                         first_graph_outputs = outputs[first_graph_mask]
-                        logger.info(f"Val model outputs (first batch): mean={first_graph_outputs.mean().item():.6f}, "
-                                   f"std={first_graph_outputs.std().item():.6f}, "
-                                   f"min={first_graph_outputs.min().item():.6f}, "
-                                   f"max={first_graph_outputs.max().item():.6f}")
+                        # Raw logits std (before cand_mask filtering)
+                        raw_logits_std = first_graph_outputs.std().item()
+                        
+                        # Get cand_mask for first graph
+                        if "team" in data and "ball" in data and "mask" in data:
+                            team_first = data["team"][first_graph_mask]
+                            ball_first = data["ball"][first_graph_mask]
+                            mask_first = data["mask"][first_graph_mask]
+                            cand_mask_first = (team_first == 0) & (ball_first == 0) & (mask_first == 1)
+                            cand_logits_first = first_graph_outputs[cand_mask_first]
+                            cand_logits_std = cand_logits_first.std().item() if cand_logits_first.numel() > 1 else 0.0
+                            cand_unique_count = cand_logits_first.unique().numel()
+                            
+                            # Cand node input features std (if available)
+                            if "x" in data:
+                                x_first = data["x"][first_graph_mask]
+                                cand_x_first = x_first[cand_mask_first]
+                                cand_x_std = cand_x_first.std(dim=0).mean().item() if cand_x_first.numel() > 0 else 0.0
+                            else:
+                                cand_x_std = 0.0
+                        else:
+                            cand_logits_std = raw_logits_std
+                            cand_unique_count = first_graph_outputs.unique().numel()
+                            cand_x_std = 0.0
+                        
+                        logger.info(f"Val debug (first batch): raw_logits_std={raw_logits_std:.6f}, "
+                                   f"cand_logits_std={cand_logits_std:.6f}, "
+                                   f"cand_unique_count={cand_unique_count}, "
+                                   f"cand_x_std={cand_x_std:.6f}, "
+                                   f"logits_mean={first_graph_outputs.mean().item():.6f}, "
+                                   f"logits_min={first_graph_outputs.min().item():.6f}, "
+                                   f"logits_max={first_graph_outputs.max().item():.6f}")
+                        if cand_logits_std < 1e-6:
+                            logger.warning(f"Val debug: cand_logits_std is too small ({cand_logits_std:.6f}), possible collapse!")
+                        if cand_x_std < 1e-6:
+                            logger.warning(f"Val debug: cand_x_std is too small ({cand_x_std:.6f}), check preprocessing!")
             
             # TacticAI spec: outputs is [N_total] with cand_mask applied (-1e9 for non-candidates)
             # Process per graph: extract local logits and apply softmax
@@ -640,10 +673,11 @@ def validate_epoch(
                     if first_logits is not None and first_logits.numel() > 1:
                         # TacticAI spec: Log cand logits_std (should not be 0)
                         cand_logits_std = first_logits.std().item()
+                        cand_unique_count = first_logits.unique().numel()
                         logger.info(f"Val first batch: loss={batch_loss_val:.6f}, graphs={graphs_in_batch}, "
                                    f"logits_shape={first_logits.shape}, logits={first_logits.tolist()[:5]}, "
                                    f"logits_mean={first_logits.mean().item():.6f}, logits_std={cand_logits_std:.6f}, "
-                                   f"target={first_target}")
+                                   f"cand_unique_count={cand_unique_count}, target={first_target}")
                         if cand_logits_std < 1e-6:
                             logger.warning(f"Val first batch: cand logits_std is too small ({cand_logits_std:.6f}), possible collapse!")
                     elif logger and batch_idx == 0:
