@@ -339,8 +339,8 @@ def train_epoch(
                                     receiver_cand_idx = (cand_indices == receiver_node_idx).nonzero(as_tuple=True)[0]
                                     if receiver_cand_idx.numel() > 0:
                                         receiver_cand_idx = receiver_cand_idx.item()
-                                        # CRITICAL: Clone the tensor to avoid sharing memory
-                                        graph_outputs.append(cand_logits.detach().clone())
+                                        # CRITICAL: Clone the tensor to avoid sharing memory, but keep gradients
+                                        graph_outputs.append(cand_logits.clone())
                                         graph_targets.append(receiver_cand_idx)
                                         cand_counts.append(int(cand_mask.sum().item()))
                                     else:
