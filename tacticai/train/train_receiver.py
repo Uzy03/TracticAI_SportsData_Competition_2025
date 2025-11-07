@@ -15,6 +15,7 @@ import numpy as np
 from tqdm import tqdm
 
 from tacticai.models import GATv2Network4View, ReceiverHead
+from tacticai.models.mlp_heads import mask_logits
 from tacticai.modules.view_ops import apply_view_transform, D2_VIEWS
 from tacticai.dataio import ReceiverDataset, create_dataloader, create_dummy_dataset
 from tacticai.modules import (
@@ -179,9 +180,8 @@ class ReceiverModel(nn.Module):
         
         # TacticAI spec: cand_mask = (team_flag==ATTACK) & (is_kicker==0) & (valid_mask==1)
         # Apply cand_mask LAST (after logits creation) before softmax
-        if cand_mask is not None:
-            # Apply mask: set non-candidate logits to -1e9 (will be ~0 after softmax)
-            logits = logits.masked_fill(~cand_mask.bool(), float("-1e9"))
+        # Note: Masking will be done in training loop with FP32 for stability
+        # (mask_logits function is called there to avoid FP16 overflow)
         
         # Reshape back to [N_total] for compatibility
         all_logits = logits.view(-1)  # [N_total]
@@ -305,7 +305,7 @@ def train_epoch(
     top3_correct = 0
     top5_correct = 0
     
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    scaler = torch.amp.GradScaler(device_type="cuda") if use_amp else None
     
     progress_bar = tqdm(dataloader, desc="Training")
     for batch_idx, (data, targets) in enumerate(progress_bar):
@@ -316,7 +316,7 @@ def train_epoch(
         optimizer.zero_grad()
         
         if use_amp and scaler is not None:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device_type="cuda"):
                 # Pass edge_attr, mask, team, ball if available
                 outputs = model(
                     data["x"], 
@@ -327,9 +327,12 @@ def train_epoch(
                     team=data.get("team"),
                     ball=data.get("ball"),
                 )
-                
-                # TacticAI spec: outputs is [N_total] with cand_mask applied (-1e9 for non-candidates)
-                # Process per graph: extract local logits and apply softmax
+            
+            # TacticAI spec: Apply mask and compute loss in FP32 for stability
+            # Convert outputs to FP32 before masking and loss computation
+            outputs = outputs.float()
+            
+            # Process per graph: extract local logits and apply softmax
                 batch_size = data["batch"].max().item() + 1
                 graph_outputs = []
                 graph_targets = []
@@ -353,7 +356,9 @@ def train_epoch(
                         else:
                             cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
                         
-                        # Apply cand_mask: non-candidates already have -1e9 from forward
+                        # Apply cand_mask using mask_logits (FP32 safe)
+                        local_logits = mask_logits(local_logits, cand_mask)
+                        
                         # Get candidate logits (for loss/metrics)
                         cand_logits = local_logits[cand_mask]  # [num_candidates]
                         
@@ -446,7 +451,9 @@ def train_epoch(
                     else:
                         cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
                     
-                    # Apply cand_mask: non-candidates already have -1e9 from forward
+                    # Apply cand_mask using mask_logits (FP32 safe)
+                    local_logits = mask_logits(local_logits, cand_mask)
+                    
                     # Get candidate logits (for loss/metrics)
                     cand_logits = local_logits[cand_mask]  # [num_candidates]
                     
@@ -571,6 +578,9 @@ def validate_epoch(
                 ball=data.get("ball"),
             )
             
+            # Convert to FP32 for mask and loss computation (same as training)
+            outputs = outputs.float()
+            
             # Debug: Log detailed statistics for first batch of first epoch
             if logger and batch_idx == 0 and num_graphs_total == 0:
                 batch_size = data["batch"].max().item() + 1
@@ -640,7 +650,9 @@ def validate_epoch(
                     else:
                         cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
                     
-                    # Apply cand_mask: non-candidates already have -1e9 from forward
+                    # Apply cand_mask using mask_logits (FP32 safe)
+                    local_logits = mask_logits(local_logits, cand_mask)
+                    
                     # Get candidate logits (for loss/metrics)
                     cand_logits = local_logits[cand_mask]  # [num_candidates]
                     

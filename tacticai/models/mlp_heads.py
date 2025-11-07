@@ -14,6 +14,25 @@ import torch.nn.functional as F
 from .gatv2 import GATv2Network
 
 
+def mask_logits(logits: torch.Tensor, cand_mask: torch.Tensor) -> torch.Tensor:
+    """Apply candidate mask to logits with dtype-safe negative value.
+    
+    Args:
+        logits: Logits tensor [B, N] or [N]
+        cand_mask: Boolean mask [B, N] or [N] where True=candidate
+        
+    Returns:
+        Masked logits with non-candidates set to a safe negative value
+    """
+    # FP16/bf16対応: dtypeに応じた安全な負の値を使用
+    if logits.dtype in (torch.float16, torch.bfloat16):
+        # FP16の最小値は約-65504だが、数値安定性のため-1e4を使用
+        neg = torch.tensor(-1e4, device=logits.device, dtype=logits.dtype)
+    else:
+        neg = torch.tensor(-1e9, device=logits.device, dtype=logits.dtype)
+    return logits.masked_fill(~cand_mask.bool(), neg)
+
+
 class ReceiverHead(nn.Module):
     """Minimal point-wise receiver scoring head.
 
@@ -61,14 +80,16 @@ class ReceiverHead(nn.Module):
             
             # Cand logits std per graph (after mask)
             if cand_mask.dim() == 1:
-                cand_mask = cand_mask.unsqueeze(0)
-            masked = logits.detach().masked_fill(~cand_mask.bool(), float("-1e9"))
-            cand_only = [masked[b][cand_mask[b].bool()] for b in range(masked.size(0))]
+                cand_mask_debug = cand_mask.unsqueeze(0)
+            else:
+                cand_mask_debug = cand_mask
+            masked = mask_logits(logits.detach(), cand_mask_debug)
+            cand_only = [masked[b][cand_mask_debug[b].bool()] for b in range(masked.size(0))]
             cand_logits_std_per_graph = [float(x.std()) if x.numel() > 1 else -1.0 for x in cand_only]
             print(f"DBG cand logits std per graph: {cand_logits_std_per_graph}")
             
             # Cand feature overall std per graph
-            cand_feat = [hidden[b][cand_mask[b].bool()] for b in range(hidden.size(0))]
+            cand_feat = [hidden[b][cand_mask_debug[b].bool()] for b in range(hidden.size(0))]
             cand_feat_std_per_graph = [float(x.std()) if x.numel() > 0 else -1.0 for x in cand_feat]
             print(f"DBG cand feature overall std per graph: {cand_feat_std_per_graph}")
             
