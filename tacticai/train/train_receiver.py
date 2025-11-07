@@ -305,7 +305,7 @@ def train_epoch(
     top3_correct = 0
     top5_correct = 0
     
-    scaler = torch.amp.GradScaler(device="cuda") if use_amp else None
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
     
     progress_bar = tqdm(dataloader, desc="Training")
     for batch_idx, (data, targets) in enumerate(progress_bar):
@@ -317,193 +317,106 @@ def train_epoch(
         
         if use_amp and scaler is not None:
             with torch.amp.autocast(device_type="cuda"):
-                # Pass edge_attr, mask, team, ball if available
                 outputs = model(
-                    data["x"], 
-                    data["edge_index"], 
+                    data["x"],
+                    data["edge_index"],
                     data["batch"],
                     edge_attr=data.get("edge_attr"),
                     mask=data.get("mask"),
                     team=data.get("team"),
                     ball=data.get("ball"),
                 )
-            
-            # TacticAI spec: Apply mask and compute loss in FP32 for stability
-            # Convert outputs to FP32 before masking and loss computation
-            outputs = outputs.float()
-            
-            # Process per graph: extract local logits and apply softmax
-                batch_size = data["batch"].max().item() + 1
-                graph_outputs = []
-                graph_targets = []
-                
-                for i in range(batch_size):
-                    node_mask = data["batch"] == i
-                    if node_mask.any():
-                    # Get local logits for this graph
-                    local_logits = outputs[node_mask]  # [N_per_graph]
-                    
-                    # Get cand_mask for this graph (TacticAI spec)
-                    if "team" in data and "ball" in data and "mask" in data:
-                        team_i = data["team"][node_mask]
-                        ball_i = data["ball"][node_mask]
-                        mask_i = data["mask"][node_mask]
-                        cand_mask = (team_i == 0) & (ball_i == 0) & (mask_i == 1)
-                    elif "team" in data and "ball" in data:
-                        team_i = data["team"][node_mask]
-                        ball_i = data["ball"][node_mask]
-                        cand_mask = (team_i == 0) & (ball_i == 0)
-                    else:
-                        cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
-                    
-                    # Apply cand_mask using mask_logits (FP32 safe)
-                    local_logits = mask_logits(local_logits, cand_mask)
-                    
-                    # Get candidate logits (for loss/metrics)
-                    cand_logits = local_logits[cand_mask]  # [num_candidates]
-                    
-                    if cand_logits.numel() > 0:
-                        receiver_node_idx = targets[i].item()  # Graph-local index (0-21)
-                        # receiver_node_idx is already the local index within the graph
-                        # Check if receiver is within the graph bounds
-                        num_nodes_in_graph = node_mask.sum().item()
-                        if receiver_node_idx < num_nodes_in_graph:
-                            # receiver_node_idx is the local index within this graph
-                            if cand_mask[receiver_node_idx]:
-                                # Receiver is in candidates: map to candidate index
-                                cand_indices = torch.where(cand_mask)[0]  # Local indices that are candidates
-                                receiver_cand_idx = (cand_indices == receiver_node_idx).nonzero(as_tuple=True)[0]
-                                if receiver_cand_idx.numel() > 0:
-                                    receiver_cand_idx = receiver_cand_idx.item()
-                                    # CRITICAL: Clone the tensor to avoid sharing memory, but keep gradients
-                                    graph_outputs.append(cand_logits.clone())
-                                    graph_targets.append(receiver_cand_idx)
-                                    cand_counts.append(int(cand_mask.sum().item()))
-                                else:
-                                    excluded_invalid += 1
-                            else:
-                                excluded_ball_owner += 1
-                else:
-                            excluded_invalid += 1
-            
-            # Compute loss per graph (TacticAI spec: softmax over candidates)
-            batch_loss_sum = 0.0
-            graphs_in_batch = 0
-            for logits_b, target_b in zip(graph_outputs, graph_targets):
-                # logits_b: candidate logits [num_candidates] (already masked)
-                # Apply softmax and compute CrossEntropyLoss
-                lb = logits_b.unsqueeze(0)  # [1, num_candidates]
-                target_t = torch.tensor([target_b], dtype=torch.long, device=lb.device)
-                graph_loss = criterion(lb, target_t)
-                batch_loss_sum += graph_loss
-                # metrics
-                pred_top1 = torch.argmax(lb, dim=1)
-                acc_correct += int(pred_top1.item() == target_b)
-                top1_correct += int(pred_top1.item() == target_b)
-                k3 = min(3, lb.size(1))
-                k5 = min(5, lb.size(1))
-                top3_correct += int(target_b in torch.topk(lb, k=k3, dim=1).indices[0].tolist())
-                top5_correct += int(target_b in torch.topk(lb, k=k5, dim=1).indices[0].tolist())
-                graphs_in_batch += 1
-            if graphs_in_batch == 0:
-                    continue
-            loss = batch_loss_sum / graphs_in_batch  # Average loss for this batch
-            num_graphs_total += graphs_in_batch
-            total_loss += batch_loss_sum.item()  # Accumulate total loss (not average)
-            
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
         else:
-            # Pass edge_attr, mask, team, ball if available
             outputs = model(
-                data["x"], 
-                data["edge_index"], 
+                data["x"],
+                data["edge_index"],
                 data["batch"],
                 edge_attr=data.get("edge_attr"),
                 mask=data.get("mask"),
                 team=data.get("team"),
                 ball=data.get("ball"),
             )
-            
-            # TacticAI spec: outputs is [N_total] with cand_mask applied (-1e9 for non-candidates)
-            # Process per graph: extract local logits and apply softmax
-            batch_size = data["batch"].max().item() + 1
-            graph_outputs = []
-            graph_targets = []
-            
-            for i in range(batch_size):
-                node_mask = data["batch"] == i
-                if node_mask.any():
-                    # Get local logits for this graph
-                    local_logits = outputs[node_mask]  # [N_per_graph]
-                    
-                    # Get cand_mask for this graph (TacticAI spec)
-                    if "team" in data and "ball" in data and "mask" in data:
-                        team_i = data["team"][node_mask]
-                        ball_i = data["ball"][node_mask]
-                        mask_i = data["mask"][node_mask]
-                        cand_mask = (team_i == 0) & (ball_i == 0) & (mask_i == 1)
-                    elif "team" in data and "ball" in data:
-                        team_i = data["team"][node_mask]
-                        ball_i = data["ball"][node_mask]
-                        cand_mask = (team_i == 0) & (ball_i == 0)
-                    else:
-                        cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
-                    
-                    # Apply cand_mask using mask_logits (FP32 safe)
-                    local_logits = mask_logits(local_logits, cand_mask)
-                    
-                    # Get candidate logits (for loss/metrics)
-                    cand_logits = local_logits[cand_mask]  # [num_candidates]
-                    
-                    if cand_logits.numel() > 0:
-                        receiver_node_idx = targets[i].item()  # Graph-local index (0-21)
-                        # receiver_node_idx is already the local index within the graph
-                        # Check if receiver is within the graph bounds
-                        num_nodes_in_graph = node_mask.sum().item()
-                        if receiver_node_idx < num_nodes_in_graph:
-                            # receiver_node_idx is the local index within this graph
-                            if cand_mask[receiver_node_idx]:
-                                # Receiver is in candidates: map to candidate index
-                                cand_indices = torch.where(cand_mask)[0]  # Local indices that are candidates
-                                receiver_cand_idx = (cand_indices == receiver_node_idx).nonzero(as_tuple=True)[0]
-                                if receiver_cand_idx.numel() > 0:
-                                    receiver_cand_idx = receiver_cand_idx.item()
-                                    graph_outputs.append(cand_logits)
-                                    graph_targets.append(receiver_cand_idx)
-                                else:
-                                    excluded_invalid += 1
-                            else:
-                                excluded_ball_owner += 1
-                        else:
-                            excluded_invalid += 1
-            
-            # Compute loss per graph (TacticAI spec: softmax over candidates)
-            batch_loss_sum = 0.0
-            graphs_in_batch = 0
-            for logits_b, target_b in zip(graph_outputs, graph_targets):
-                # logits_b: candidate logits [num_candidates] (already masked)
-                # Apply softmax and compute CrossEntropyLoss
-                lb = logits_b.unsqueeze(0)  # [1, num_candidates]
-                target_t = torch.tensor([target_b], dtype=torch.long, device=lb.device)
-                graph_loss = criterion(lb, target_t)
-                batch_loss_sum += graph_loss
-                # metrics
-                pred_top1 = torch.argmax(lb, dim=1)
-                acc_correct += int(pred_top1.item() == target_b)
-                top1_correct += int(pred_top1.item() == target_b)
-                k3 = min(3, lb.size(1))
-                k5 = min(5, lb.size(1))
-                top3_correct += int(target_b in torch.topk(lb, k=k3, dim=1).indices[0].tolist())
-                top5_correct += int(target_b in torch.topk(lb, k=k5, dim=1).indices[0].tolist())
-                graphs_in_batch += 1
-            if graphs_in_batch == 0:
+
+        if outputs.dtype != torch.float32:
+            outputs = outputs.float()
+
+        batch_size = data["batch"].max().item() + 1
+        graph_outputs = []
+        graph_targets = []
+
+        for i in range(batch_size):
+            node_mask = data["batch"] == i
+            if not node_mask.any():
                 continue
-            loss = batch_loss_sum / graphs_in_batch  # Average loss for this batch
-            num_graphs_total += graphs_in_batch
-            total_loss += batch_loss_sum.item()  # Accumulate total loss (not average)
-            
+
+            local_logits = outputs[node_mask]
+
+            if "team" in data and "ball" in data and "mask" in data:
+                team_i = data["team"][node_mask]
+                ball_i = data["ball"][node_mask]
+                mask_i = data["mask"][node_mask]
+                cand_mask = (team_i == 0) & (ball_i == 0) & (mask_i == 1)
+            elif "team" in data and "ball" in data:
+                team_i = data["team"][node_mask]
+                ball_i = data["ball"][node_mask]
+                cand_mask = (team_i == 0) & (ball_i == 0)
+            else:
+                cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
+
+            local_logits = mask_logits(local_logits, cand_mask)
+            cand_logits = local_logits[cand_mask]
+            if cand_logits.numel() == 0:
+                continue
+
+            receiver_node_idx = targets[i].item()
+            num_nodes_in_graph = node_mask.sum().item()
+            if receiver_node_idx >= num_nodes_in_graph:
+                excluded_invalid += 1
+                continue
+
+            if not cand_mask[receiver_node_idx]:
+                excluded_ball_owner += 1
+                continue
+
+            cand_indices = torch.where(cand_mask)[0]
+            receiver_cand_idx = (cand_indices == receiver_node_idx).nonzero(as_tuple=True)[0]
+            if receiver_cand_idx.numel() == 0:
+                excluded_invalid += 1
+                continue
+
+            receiver_cand_idx = receiver_cand_idx.item()
+            graph_outputs.append(cand_logits.clone())
+            graph_targets.append(receiver_cand_idx)
+            cand_counts.append(int(cand_mask.sum().item()))
+
+        batch_loss_sum = 0.0
+        graphs_in_batch = 0
+        for logits_b, target_b in zip(graph_outputs, graph_targets):
+            lb = logits_b.unsqueeze(0)
+            target_t = torch.tensor([target_b], dtype=torch.long, device=lb.device)
+            graph_loss = criterion(lb, target_t)
+            batch_loss_sum += graph_loss
+            pred_top1 = torch.argmax(lb, dim=1)
+            acc_correct += int(pred_top1.item() == target_b)
+            top1_correct += int(pred_top1.item() == target_b)
+            k3 = min(3, lb.size(1))
+            k5 = min(5, lb.size(1))
+            top3_correct += int(target_b in torch.topk(lb, k=k3, dim=1).indices[0].tolist())
+            top5_correct += int(target_b in torch.topk(lb, k=k5, dim=1).indices[0].tolist())
+            graphs_in_batch += 1
+
+        if graphs_in_batch == 0:
+            continue
+
+        loss = batch_loss_sum / graphs_in_batch
+        num_graphs_total += graphs_in_batch
+        total_loss += batch_loss_sum.item()
+
+        if use_amp and scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
             loss.backward()
             optimizer.step()
         
