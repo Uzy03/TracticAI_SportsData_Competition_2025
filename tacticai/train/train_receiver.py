@@ -305,7 +305,7 @@ def train_epoch(
     top3_correct = 0
     top5_correct = 0
     
-    scaler = torch.amp.GradScaler(device_type="cuda") if use_amp else None
+    scaler = torch.amp.GradScaler(device="cuda") if use_amp else None
     
     progress_bar = tqdm(dataloader, desc="Training")
     for batch_idx, (data, targets) in enumerate(progress_bar):
@@ -333,13 +333,13 @@ def train_epoch(
             outputs = outputs.float()
             
             # Process per graph: extract local logits and apply softmax
-            batch_size = data["batch"].max().item() + 1
-            graph_outputs = []
-            graph_targets = []
-            
-            for i in range(batch_size):
-                node_mask = data["batch"] == i
-                if node_mask.any():
+                batch_size = data["batch"].max().item() + 1
+                graph_outputs = []
+                graph_targets = []
+                
+                for i in range(batch_size):
+                    node_mask = data["batch"] == i
+                    if node_mask.any():
                     # Get local logits for this graph
                     local_logits = outputs[node_mask]  # [N_per_graph]
                     
