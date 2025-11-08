@@ -367,12 +367,12 @@ def train_epoch(
         if outputs.dtype != torch.float32:
             outputs = outputs.float()
 
-                batch_size = data["batch"].max().item() + 1
-                graph_outputs = []
-                graph_targets = []
-                
-                for i in range(batch_size):
-                    node_mask = data["batch"] == i
+        batch_size = data["batch"].max().item() + 1
+        graph_outputs: list[torch.Tensor] = []
+        graph_targets: list[int] = []
+
+        for i in range(batch_size):
+            node_mask = data["batch"] == i
             if not node_mask.any():
                 continue
 
@@ -389,12 +389,12 @@ def train_epoch(
                 team_i = data["team"][node_mask]
                 ball_i = data["ball"][node_mask]
                 cand_mask = (team_i == 0) & (ball_i == 0)
-                else:
+            else:
                 cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
             cand_mask = cand_mask.view(-1)
 
-            local_logits = mask_logits(local_logits, cand_mask)
-            cand_logits = local_logits[cand_mask]
+            masked_logits = mask_logits(local_logits.unsqueeze(0), cand_mask.unsqueeze(0)).squeeze(0)
+            cand_logits = masked_logits[cand_mask]
             if cand_logits.numel() == 0:
                 continue
 

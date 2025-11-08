@@ -30,29 +30,29 @@ def mask_logits(logits: torch.Tensor, cand_mask: torch.Tensor) -> torch.Tensor:
 
 
 class NodeScoreHead(nn.Module):
-    """Per-node scoring head without aggregation."""
+    """Minimal per-node scoring head (逐点ロジット)."""
 
-    def __init__(self, input_dim: int, hidden: int = 128, **kwargs: int):
+    def __init__(self, input_dim: int, **_: int):
         super().__init__()
-        hidden_dim = kwargs.get("hidden_dim", hidden)
-        self.mlp = nn.Sequential(
-            nn.LayerNorm(input_dim),
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-        )
+        self.linear = nn.Linear(input_dim, 1)
 
-    def forward(self, H: torch.Tensor, cand_mask: torch.Tensor) -> torch.Tensor:
-        if cand_mask is None:
-            raise ValueError("cand_mask is required for NodeScoreHead.")
-        if cand_mask.dim() == 1:
-            raise ValueError("cand_mask must be 2-D [B, N].")
-        if H.dim() == 2:
-            B, N = cand_mask.shape
-            H = H.view(B, N, -1)
-        logits = self.mlp(H).squeeze(-1)  # [B, N]
-        logits = logits.float()
-        logits = logits.masked_fill(~cand_mask.bool(), -1e9)
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Project node embeddings to logits.
+
+        Args:
+            hidden: Node embeddings ``[B, N, d]`` or ``[N, d]``.
+
+        Returns:
+            Per-node logits ``[B, N]`` (or ``[N]`` for 2-D input).
+        """
+        original_2d = hidden.dim() == 2
+        if original_2d:
+            hidden = hidden.unsqueeze(0)
+
+        logits = self.linear(hidden).squeeze(-1)
+
+        if original_2d:
+            logits = logits.squeeze(0)
         return logits
 
 
