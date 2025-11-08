@@ -594,7 +594,10 @@ def validate_epoch(
                         cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
                     
                     # Apply cand_mask using mask_logits (FP32 safe)
-                    local_logits = mask_logits(local_logits, cand_mask)
+                    local_logits = mask_logits(
+                        local_logits.unsqueeze(0),
+                        cand_mask.unsqueeze(0),
+                    ).squeeze(0)
                     
                     # Get candidate logits (for loss/metrics)
                     cand_logits = local_logits[cand_mask]  # [num_candidates]
