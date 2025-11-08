@@ -32,13 +32,14 @@ def mask_logits(logits: torch.Tensor, cand_mask: torch.Tensor) -> torch.Tensor:
 class NodeScoreHead(nn.Module):
     """Per-node scoring head without aggregation."""
 
-    def __init__(self, in_dim: int, hidden: int = 128, **_: int):
+    def __init__(self, input_dim: int, hidden: int = 128, **kwargs: int):
         super().__init__()
+        hidden_dim = kwargs.get("hidden_dim", hidden)
         self.mlp = nn.Sequential(
-            nn.LayerNorm(in_dim),
-            nn.Linear(in_dim, hidden),
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden, 1),
+            nn.Linear(hidden_dim, 1),
         )
 
     def forward(self, H: torch.Tensor, cand_mask: torch.Tensor) -> torch.Tensor:
