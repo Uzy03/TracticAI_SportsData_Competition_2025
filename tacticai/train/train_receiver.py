@@ -58,6 +58,86 @@ def load_config(config_path: str) -> Dict[str, Any]:
     return config
 
 
+def _reshape_to_batch(
+    tensor: torch.Tensor,
+    batch_size: int,
+    num_nodes_per_graph: int,
+) -> torch.Tensor:
+    """Reshape flat per-node tensor to [B, N] layout."""
+    if tensor.dim() == 1:
+        return tensor.reshape(batch_size, num_nodes_per_graph)
+    if tensor.dim() == 2 and tensor.size(0) == batch_size:
+        return tensor
+    return tensor.reshape(batch_size, num_nodes_per_graph)
+
+
+def build_candidate_mask(
+    team: Optional[torch.Tensor],
+    ball: Optional[torch.Tensor],
+    mask: Optional[torch.Tensor],
+    x: Optional[torch.Tensor],
+    batch_size: int,
+    num_nodes_per_graph: int,
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    """Construct candidate mask following TacticAI spec."""
+    if team is None or ball is None:
+        return None
+
+    team_batched = _reshape_to_batch(team, batch_size, num_nodes_per_graph).to(device=device)
+    ball_batched = _reshape_to_batch(ball, batch_size, num_nodes_per_graph).to(device=device)
+    mask_batched = (
+        _reshape_to_batch(mask, batch_size, num_nodes_per_graph).to(device=device)
+        if mask is not None
+        else None
+    )
+
+    x_batched = None
+    if x is not None:
+        x_batched = x.reshape(batch_size, num_nodes_per_graph, -1).to(device=device)
+
+    cand_mask = torch.zeros(batch_size, num_nodes_per_graph, dtype=torch.bool, device=device)
+
+    for b in range(batch_size):
+        team_row = team_batched[b]
+        ball_row = ball_batched[b]
+
+        valid_row = torch.ones(num_nodes_per_graph, dtype=torch.bool, device=device)
+        if mask_batched is not None:
+            valid_row &= mask_batched[b].to(dtype=torch.bool)
+        if x_batched is not None and x_batched.size(-1) >= 2:
+            pos_row = x_batched[b, :, :2]
+            valid_row &= torch.isfinite(pos_row).all(dim=-1)
+
+        kicker_candidates = torch.where(ball_row > 0.5)[0]
+        if kicker_candidates.numel() > 0:
+            kicker_idx = int(kicker_candidates[0].item())
+        else:
+            kicker_idx = int(torch.argmax(ball_row).item())
+
+        kicker_idx = max(0, min(kicker_idx, num_nodes_per_graph - 1))
+
+        team_row_int = team_row.to(dtype=torch.long)
+        kicker_team_val = int(team_row_int[kicker_idx].item()) if num_nodes_per_graph > 0 else 0
+        team_mask_row = (team_row_int == kicker_team_val)
+
+        candidate_row = (team_mask_row & valid_row).to(dtype=torch.bool)
+        if num_nodes_per_graph > 0:
+            candidate_row[kicker_idx] = False
+
+        if candidate_row.sum().item() == 0:
+            fallback_row = valid_row.clone()
+            if num_nodes_per_graph > 0:
+                fallback_row[kicker_idx] = False
+            if fallback_row.sum().item() == 0:
+                fallback_row = valid_row
+            candidate_row = fallback_row.to(dtype=torch.bool)
+
+        cand_mask[b] = candidate_row
+
+    return cand_mask
+
+
 class ReceiverModel(nn.Module):
     """Complete receiver prediction model with D2 equivariance."""
     
@@ -166,30 +246,15 @@ class ReceiverModel(nn.Module):
             mask_expanded = mask_batched.unsqueeze(-1).expand_as(H)  # [B, N_per_graph, D]
             H = H * mask_expanded.float()
         
-        # Compute cand_mask BEFORE head (for debug output)
-        if team is not None and ball is not None and mask is not None:
-            # Reshape team, ball, mask to [B, N_per_graph]
-            team_batched = team.view(B, num_nodes_per_graph) if team.dim() == 1 else team
-            ball_batched = ball.view(B, num_nodes_per_graph) if ball.dim() == 1 else ball
-            mask_batched = mask.view(B, num_nodes_per_graph) if mask.dim() == 1 else mask
-            if team_batched.dim() == 1:
-                team_batched = team_batched.unsqueeze(0).expand(B, -1)
-            if ball_batched.dim() == 1:
-                ball_batched = ball_batched.unsqueeze(0).expand(B, -1)
-            if mask_batched.dim() == 1:
-                mask_batched = mask_batched.unsqueeze(0).expand(B, -1)
-            # cand_mask: attacking team (team=0) and not ball owner (ball=0) and valid (mask=1)
-            cand_mask = (team_batched == 0) & (ball_batched == 0) & (mask_batched == 1)
-        elif team is not None and ball is not None:
-            team_batched = team.view(B, num_nodes_per_graph) if team.dim() == 1 else team
-            ball_batched = ball.view(B, num_nodes_per_graph) if ball.dim() == 1 else ball
-            if team_batched.dim() == 1:
-                team_batched = team_batched.unsqueeze(0).expand(B, -1)
-            if ball_batched.dim() == 1:
-                ball_batched = ball_batched.unsqueeze(0).expand(B, -1)
-            cand_mask = (team_batched == 0) & (ball_batched == 0)
-        else:
-            cand_mask = None
+        cand_mask = build_candidate_mask(
+            team=team,
+            ball=ball,
+            mask=mask,
+            x=x,
+            batch_size=B,
+            num_nodes_per_graph=num_nodes_per_graph,
+            device=x.device,
+        )
         
         # Get logits for all nodes (TacticAI spec: [B, N] format)
         # TacticAI spec: Each node outputs 1 scalar logit (no node-mean/sum aggregation)
@@ -356,32 +421,20 @@ def train_epoch(
         nodes_per_graph = outputs.numel() // max(1, batch_size)
         outputs = outputs.view(batch_size, nodes_per_graph)
 
-        cand_masks = []
-        for i in range(batch_size):
-            node_mask = data["batch"] == i
-            if not node_mask.any():
-                cand_mask = torch.zeros(nodes_per_graph, dtype=torch.bool, device=outputs.device)
-            else:
-                if "team" in data and "ball" in data and "mask" in data:
-                    team_i = data["team"][node_mask]
-                    ball_i = data["ball"][node_mask]
-                    mask_i = data["mask"][node_mask]
-                    cand_mask = (team_i == 0) & (ball_i == 0) & (mask_i == 1)
-                elif "team" in data and "ball" in data:
-                    team_i = data["team"][node_mask]
-                    ball_i = data["ball"][node_mask]
-                    cand_mask = (team_i == 0) & (ball_i == 0)
-                else:
-                    cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
-                cand_mask = cand_mask.view(-1)
-                if cand_mask.numel() != nodes_per_graph:
-                    full_mask = torch.zeros(nodes_per_graph, dtype=torch.bool, device=outputs.device)
-                    length = min(cand_mask.numel(), nodes_per_graph)
-                    full_mask[:length] = cand_mask[:length]
-                    cand_mask = full_mask
-            cand_masks.append(cand_mask)
+        cand_masks = build_candidate_mask(
+            team=data.get("team"),
+            ball=data.get("ball"),
+            mask=data.get("mask"),
+            x=data.get("x"),
+            batch_size=batch_size,
+            num_nodes_per_graph=nodes_per_graph,
+            device=outputs.device,
+        )
+        if cand_masks is None:
+            cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
+        else:
+            cand_masks = cand_masks.to(dtype=torch.bool)
 
-        cand_masks = torch.stack(cand_masks)
         masked_outputs = mask_logits(outputs, cand_masks)
 
         if not hasattr(train_epoch, "_printed_debug"):
@@ -556,85 +609,82 @@ def validate_epoch(
             nodes_per_graph = outputs.numel() // max(1, batch_size)
             outputs = outputs.view(batch_size, nodes_per_graph)
 
-            cand_masks = []
-            for i in range(batch_size):
-                node_mask = data["batch"] == i
-                if not node_mask.any():
-                    cand_mask = torch.zeros(nodes_per_graph, dtype=torch.bool, device=outputs.device)
-                else:
-                    if "team" in data and "ball" in data and "mask" in data:
-                        team_i = data["team"][node_mask]
-                        ball_i = data["ball"][node_mask]
-                        mask_i = data["mask"][node_mask]
-                        cand_mask = (team_i == 0) & (ball_i == 0) & (mask_i == 1)
-                    elif "team" in data and "ball" in data:
-                        team_i = data["team"][node_mask]
-                        ball_i = data["ball"][node_mask]
-                        cand_mask = (team_i == 0) & (ball_i == 0)
-                    else:
-                        cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
-                    cand_mask = cand_mask.view(-1)
-                    if cand_mask.numel() != nodes_per_graph:
-                        cand_mask = cand_mask[:nodes_per_graph]
-                cand_masks.append(cand_mask)
-
-            cand_masks = torch.stack(cand_masks)
+            cand_masks = build_candidate_mask(
+                team=data.get("team"),
+                ball=data.get("ball"),
+                mask=data.get("mask"),
+                x=data.get("x"),
+                batch_size=batch_size,
+                num_nodes_per_graph=nodes_per_graph,
+                device=outputs.device,
+            )
+            if cand_masks is None:
+                cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
+            else:
+                cand_masks = cand_masks.to(dtype=torch.bool)
             masked_outputs = mask_logits(outputs, cand_masks)
 
-            graph_outputs = []
-            graph_targets = []
-            
-            for i in range(batch_size):
-                if i >= targets.size(0):
-                    break
-                cand_mask = cand_masks[i]
-                cand_logits = masked_outputs[i][cand_mask]
-                if cand_logits.numel() == 0:
-                    continue
+            # === build per-graph outputs/targets safely (validation) ===
+            target = targets
+            cand_mask = cand_masks
+            B, Nclass = outputs.shape
+            assert cand_mask.shape == (B, Nclass), f"cand_mask shape mismatch: {cand_mask.shape} vs {(B, Nclass)}"
+            assert target.shape[0] == B, f"target shape mismatch: {target.shape} vs ({B},)"
 
-                receiver_node_idx = targets[i].item()
-                if receiver_node_idx >= nodes_per_graph:
-                    excluded_invalid += 1
-                    continue
+            graph_outputs: list[torch.Tensor] = []
+            graph_targets: list[torch.Tensor] = []
 
-                if not cand_mask[receiver_node_idx]:
-                    excluded_ball_owner += 1
-                    continue
+            for b in range(B):
+                cm = cand_mask[b]
+                Ncand = int(cm.sum().item())
+                logits_b = outputs[b][cm] if Ncand > 0 else outputs[b]
+                target_global = int(target[b].item())
 
-                cand_indices = torch.where(cand_mask)[0]
-                receiver_cand_idx = (cand_indices == receiver_node_idx).nonzero(as_tuple=True)[0]
-                if receiver_cand_idx.numel() == 0:
-                    excluded_invalid += 1
-                    continue
+                cand_indices = torch.arange(outputs.size(1), device=outputs.device)[cm]
+                if (cand_indices == target_global).any():
+                    cand_target_idx = int((cand_indices == target_global).nonzero(as_tuple=True)[0].item())
+                else:
+                    cand_target_idx = 0
+                    print(f"[WARN] target {target_global} not in candidates for graph {b} (val)")
 
-                receiver_cand_idx = receiver_cand_idx.item()
-                graph_outputs.append(cand_logits.detach().clone())
-                graph_targets.append(receiver_cand_idx)
-                cand_counts.append(int(cand_mask.sum().item()))
+                graph_outputs.append(logits_b.unsqueeze(0))
+                graph_targets.append(torch.tensor([cand_target_idx], device=outputs.device))
+                cand_counts.append(Ncand)
+            # === end build ===
             
             # Compute loss per graph (TacticAI spec: softmax over candidates)
             batch_loss_sum = 0.0
             graphs_in_batch = 0
             for logits_b, target_b in zip(graph_outputs, graph_targets):
-                # logits_b: candidate logits [num_candidates] (already masked)
-                # CRITICAL: If only 1 candidate, we can't compute meaningful loss
-                # Skip single-candidate graphs as they don't provide learning signal
-                if logits_b.numel() <= 1:
+                if logits_b.numel() == 0:
                     continue
-                    
-                # Apply softmax and compute CrossEntropyLoss
-                lb = logits_b.unsqueeze(0)  # [1, num_candidates]
-                target_t = torch.tensor([target_b], dtype=torch.long, device=lb.device)
+
+                if logits_b.ndim == 1:
+                    lb = logits_b.unsqueeze(0)
+                elif logits_b.ndim == 2:
+                    lb = logits_b
+                else:
+                    raise ValueError(f"Unexpected logits ndim (val): {logits_b.ndim}")
+
+                target_scalar = target_b.view(-1)[0]
+                target_tensor = target_scalar.to(device=lb.device, dtype=torch.long)
+                target_t = target_tensor.unsqueeze(0)
+
                 graph_loss = criterion(lb, target_t)
                 batch_loss_sum += graph_loss
-                # metrics
+
                 pred_top1 = torch.argmax(lb, dim=1)
-                acc_correct += int(pred_top1.item() == target_b)
-                top1_correct += int(pred_top1.item() == target_b)
+                target_idx = int(target_tensor.item())
+                acc_correct += int(pred_top1.item() == target_idx)
+                top1_correct += int(pred_top1.item() == target_idx)
+
                 k3 = min(3, lb.size(1))
                 k5 = min(5, lb.size(1))
-                top3_correct += int(target_b in torch.topk(lb, k=k3, dim=1).indices[0].tolist())
-                top5_correct += int(target_b in torch.topk(lb, k=k5, dim=1).indices[0].tolist())
+                top3_indices = torch.topk(lb, k=k3, dim=1).indices[0].tolist()
+                top5_indices = torch.topk(lb, k=k5, dim=1).indices[0].tolist()
+                top3_correct += int(target_idx in top3_indices)
+                top5_correct += int(target_idx in top5_indices)
+
                 graphs_in_batch += 1
             if graphs_in_batch > 0:
                 batch_loss_val = batch_loss_sum.item()
