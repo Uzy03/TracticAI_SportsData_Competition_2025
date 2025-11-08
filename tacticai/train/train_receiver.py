@@ -25,6 +25,22 @@ from tacticai.modules import (
 )
 from tacticai.modules.transforms import RandomFlipTransform
 
+try:
+    from torch.cuda.amp import GradScaler as _CudaGradScaler, autocast as _cuda_autocast
+
+    def AMP_CTX():
+        return _cuda_autocast()
+
+    def make_scaler(use_amp: bool):
+        return _CudaGradScaler() if use_amp else None
+
+except Exception:  # pragma: no cover - fallback path
+    def AMP_CTX():
+        return torch.amp.autocast("cuda")
+
+    def make_scaler(use_amp: bool):
+        return torch.amp.GradScaler("cuda") if use_amp else None
+
 
 def load_config(config_path: str) -> Dict[str, Any]:
     """Load configuration from YAML file.
@@ -67,6 +83,7 @@ class ReceiverModel(nn.Module):
             hidden_dim=model_config["hidden_dim"],
             dropout=model_config["dropout"],
         )
+        self._cand_checks_done = False
     
     def forward(
         self, 
@@ -178,6 +195,16 @@ class ReceiverModel(nn.Module):
         # Pass cand_mask for debug output (only first batch)
         logits = self.head(H, cand_mask=cand_mask)  # [B, N_per_graph]
         
+        if cand_mask is not None:
+            cand_mask = cand_mask.bool()
+            if not getattr(self, "_cand_checks_done", False):
+                assert cand_mask.dtype == torch.bool and cand_mask.dim() == 2, "cand_mask must be bool [B, N]"
+                num_cands = cand_mask.sum(dim=1)
+                assert torch.all(num_cands > 0), "graph with zero candidates detected"
+                cand_H = H[cand_mask]
+                assert torch.isfinite(cand_H).all(), "candidate embeddings contain non-finite values"
+                assert cand_H.std() > 0, "candidate embeddings collapsed (std=0)"
+                self._cand_checks_done = True
         # TacticAI spec: cand_mask = (team_flag==ATTACK) & (is_kicker==0) & (valid_mask==1)
         # Apply cand_mask LAST (after logits creation) before softmax
         # Note: Masking will be done in training loop with FP32 for stability
@@ -305,7 +332,7 @@ def train_epoch(
     top3_correct = 0
     top5_correct = 0
     
-    scaler = torch.amp.GradScaler("cuda") if use_amp else None
+    scaler = make_scaler(use_amp)
     
     progress_bar = tqdm(dataloader, desc="Training")
     for batch_idx, (data, targets) in enumerate(progress_bar):
@@ -316,7 +343,7 @@ def train_epoch(
         optimizer.zero_grad()
         
         if use_amp and scaler is not None:
-            with torch.amp.autocast(device_type="cuda"):
+            with AMP_CTX():
                 outputs = model(
                     data["x"],
                     data["edge_index"],
@@ -340,12 +367,12 @@ def train_epoch(
         if outputs.dtype != torch.float32:
             outputs = outputs.float()
 
-        batch_size = data["batch"].max().item() + 1
-        graph_outputs = []
-        graph_targets = []
-
-        for i in range(batch_size):
-            node_mask = data["batch"] == i
+                batch_size = data["batch"].max().item() + 1
+                graph_outputs = []
+                graph_targets = []
+                
+                for i in range(batch_size):
+                    node_mask = data["batch"] == i
             if not node_mask.any():
                 continue
 
@@ -360,7 +387,7 @@ def train_epoch(
                 team_i = data["team"][node_mask]
                 ball_i = data["ball"][node_mask]
                 cand_mask = (team_i == 0) & (ball_i == 0)
-            else:
+                else:
                 cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
 
             local_logits = mask_logits(local_logits, cand_mask)
@@ -406,8 +433,8 @@ def train_epoch(
             graphs_in_batch += 1
 
         if graphs_in_batch == 0:
-            continue
-
+                    continue
+            
         loss = batch_loss_sum / graphs_in_batch
         num_graphs_total += graphs_in_batch
         total_loss += batch_loss_sum.item()
@@ -691,6 +718,9 @@ def main():
     
     logger.info(f"Training receiver prediction model on {device}")
     logger.info(f"Configuration: {config}")
+    resolved_config_path = Path(args.config).resolve()
+    logger.info(f"Resolved config path: {resolved_config_path}")
+    assert config["d2"]["group_pool"] is False, "STOP: group_pool must be False but True was loaded."
     
     # Create datasets
     if args.debug_overfit:

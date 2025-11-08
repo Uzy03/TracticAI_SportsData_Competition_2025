@@ -6,6 +6,9 @@ This module implements task-specific heads for:
 - Tactic Generation: Conditional generation head
 """
 
+
+# NOTE: Only import torch / nn once this module is loaded. Some environments may lack
+# cuda.amp; fallback logic lives in train script.
 from typing import Optional, Union
 import torch
 import torch.nn as nn
@@ -15,89 +18,45 @@ from .gatv2 import GATv2Network
 
 
 def mask_logits(logits: torch.Tensor, cand_mask: torch.Tensor) -> torch.Tensor:
-    """Apply candidate mask to logits with dtype-safe negative value.
-    
-    Args:
-        logits: Logits tensor [B, N] or [N]
-        cand_mask: Boolean mask [B, N] or [N] where True=candidate
-        
-    Returns:
-        Masked logits with non-candidates set to a safe negative value
-    """
-    # FP16/bf16対応: dtypeに応じた安全な負の値を使用
+    """Apply candidate mask to logits with dtype-safe negative value."""
+    if cand_mask.dim() == 1:
+        cand_mask = cand_mask.unsqueeze(0)
+    cand_mask = cand_mask.bool()
     if logits.dtype in (torch.float16, torch.bfloat16):
-        # FP16の最小値は約-65504だが、数値安定性のため-1e4を使用
         neg = torch.tensor(-1e4, device=logits.device, dtype=logits.dtype)
     else:
         neg = torch.tensor(-1e9, device=logits.device, dtype=logits.dtype)
-    return logits.masked_fill(~cand_mask.bool(), neg)
+    return logits.masked_fill(~cand_mask, neg)
 
 
-class ReceiverHead(nn.Module):
-    """Minimal point-wise receiver scoring head.
+class NodeScoreHead(nn.Module):
+    """Per-node scoring head without aggregation."""
 
-    TacticAI spec: Applies Linear(d→1) point-wise to each node.
-    NO node aggregation (mean/sum/max) is allowed.
-    """
-
-    def __init__(self, input_dim: int, **_: int):
+    def __init__(self, in_dim: int, hidden: int = 128, **_: int):
         super().__init__()
-        # TacticAI spec: Linear(d→1) for point-wise projection
-        # Standard initialization (no zero init to avoid collapse)
-        self.proj = nn.Linear(input_dim, 1)
-        self._debug_count = 0  # Track debug prints (only first batch)
+        self.mlp = nn.Sequential(
+            nn.LayerNorm(in_dim),
+            nn.Linear(in_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
 
-    def forward(self, hidden: torch.Tensor, cand_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Project node embeddings to scalar logits (point-wise, no aggregation).
-
-        Args:
-            hidden: Node embeddings ``[B, N, d]`` or ``[N, d]``.
-            cand_mask: Candidate mask ``[B, N]`` or ``[N]`` (optional, for debug only).
-
-        Returns:
-            Per-node logits ``[B, N]`` (or ``[N]`` for 2-D input).
-        """
-        original_2d = hidden.dim() == 2
-        if original_2d:
-            hidden = hidden.unsqueeze(0)  # [1, N, d]
-            if cand_mask is not None and cand_mask.dim() == 1:
-                cand_mask = cand_mask.unsqueeze(0)
-
-        # TacticAI spec: Point-wise projection (NO node aggregation)
-        # H: [B, N, d] -> proj(H): [B, N, 1] -> squeeze(-1): [B, N]
-        logits = self.proj(hidden).squeeze(-1)  # [B, N]
-
-        # Debug: Print only for first batch of first epoch
-        if self._debug_count < 1 and cand_mask is not None:
-            B, N = hidden.shape[:2]
-            # Pre-head H node-std (mean across graphs)
-            h_node_std = hidden.detach().std(dim=1).mean().item()
-            print(f"DBG pre-head H node-std (mean across graphs): {h_node_std:.6f}")
-            
-            # Raw logits std per graph
-            raw_logits_std_per_graph = logits.detach().std(dim=1).tolist()
-            print(f"DBG raw logits std per graph: {raw_logits_std_per_graph}")
-            
-            # Cand logits std per graph (after mask)
-            if cand_mask.dim() == 1:
-                cand_mask_debug = cand_mask.unsqueeze(0)
-            else:
-                cand_mask_debug = cand_mask
-            masked = mask_logits(logits.detach(), cand_mask_debug)
-            cand_only = [masked[b][cand_mask_debug[b].bool()] for b in range(masked.size(0))]
-            cand_logits_std_per_graph = [float(x.std()) if x.numel() > 1 else -1.0 for x in cand_only]
-            print(f"DBG cand logits std per graph: {cand_logits_std_per_graph}")
-            
-            # Cand feature overall std per graph
-            cand_feat = [hidden[b][cand_mask_debug[b].bool()] for b in range(hidden.size(0))]
-            cand_feat_std_per_graph = [float(x.std()) if x.numel() > 0 else -1.0 for x in cand_feat]
-            print(f"DBG cand feature overall std per graph: {cand_feat_std_per_graph}")
-            
-            self._debug_count += 1
-
-        if original_2d:
-            logits = logits.squeeze(0)
+    def forward(self, H: torch.Tensor, cand_mask: torch.Tensor) -> torch.Tensor:
+        if cand_mask is None:
+            raise ValueError("cand_mask is required for NodeScoreHead.")
+        if cand_mask.dim() == 1:
+            raise ValueError("cand_mask must be 2-D [B, N].")
+        if H.dim() == 2:
+            B, N = cand_mask.shape
+            H = H.view(B, N, -1)
+        logits = self.mlp(H).squeeze(-1)  # [B, N]
+        logits = logits.float()
+        logits = logits.masked_fill(~cand_mask.bool(), -1e9)
         return logits
+
+
+# Backwards compatibility: some modules still import ReceiverHead
+ReceiverHead = NodeScoreHead
 
 
 class ShotHeadConditional(nn.Module):

@@ -20,7 +20,7 @@ scheduler:
   type: "cosine"
   T_max: 50
   eta_min: 0.000001
-  warmup_epochs: 0  # Disable warmup for faster learning
+  warmup_epochs: 5  # Warmup epochs for stability
 
 # Training configuration
 train:
@@ -41,7 +41,7 @@ loss:
   # L = -Σ y_i * log(p_i) where p_i = softmax(logits_i)
   # With label smoothing: y_i = (1 - α) * y_i + α / num_classes
   type: "cross_entropy"
-  label_smoothing: 0.0  # TacticAI spec: no label smoothing for receiver prediction
+  label_smoothing: 0.1  # Introduce mild label smoothing for stability
   weight: 1.0  # Loss weight
   
   # Focal loss parameters (alternative to cross-entropy)
@@ -60,7 +60,7 @@ loss:
 
 # D2 equivariance configuration
 d2:
-  group_pool: true  # TacticAI spec: 4-view average (H̄ = (H + H^H + H^V + H^{HV}) / 4)
+  group_pool: false  # Disable group pooling; ReceiverModel handles D2 internally
   transforms:
     hflip: true
     vflip: true
