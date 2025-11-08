@@ -352,7 +352,7 @@ def train_epoch(
 
         outputs = outputs.float()
 
-                batch_size = data["batch"].max().item() + 1
+        batch_size = data["batch"].max().item() + 1
         nodes_per_graph = outputs.numel() // max(1, batch_size)
         outputs = outputs.view(batch_size, nodes_per_graph)
 
@@ -403,13 +403,13 @@ def train_epoch(
 
                 graph_outputs = []
                 graph_targets = []
-                
                 for i in range(batch_size):
-            if i >= targets.size(0):
-                break
-            cand_mask = cand_masks[i]
-            cand_logits = masked_outputs[i][cand_mask]
-            if cand_logits.numel() == 0:
+                    if i >= targets.size(0):
+                        break
+                    cand_mask = cand_masks[i]
+                    cand_logits = masked_outputs[i][cand_mask]
+                    if cand_logits.numel() == 0:
+                        continue
                 continue
 
             receiver_node_idx = targets[i].item()
