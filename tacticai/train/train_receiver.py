@@ -26,20 +26,22 @@ from tacticai.modules import (
 from tacticai.modules.transforms import RandomFlipTransform
 
 try:
-    from torch.cuda.amp import GradScaler as _CudaGradScaler, autocast as _cuda_autocast
+    from torch.amp import GradScaler as _GradScaler, autocast as _autocast
 
     def AMP_CTX():
-        return _cuda_autocast()
+        return _autocast("cuda")
 
     def make_scaler(use_amp: bool):
-        return _CudaGradScaler() if use_amp else None
+        return _GradScaler("cuda") if use_amp else None
 
 except Exception:  # pragma: no cover - fallback path
+    from torch.cuda.amp import GradScaler as _GradScaler, autocast as _autocast  # type: ignore
+
     def AMP_CTX():
-        return torch.amp.autocast("cuda")
+        return _autocast()
 
     def make_scaler(use_amp: bool):
-        return torch.amp.GradScaler("cuda") if use_amp else None
+        return _GradScaler() if use_amp else None
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -303,40 +305,24 @@ def train_epoch(
     metrics: Dict[str, Any],
     use_amp: bool = False,
 ) -> Dict[str, float]:
-    """Train model for one epoch.
-    
-    Args:
-        model: Model to train
-        dataloader: Training data loader
-        optimizer: Optimizer
-        criterion: Loss function
-        device: Device to train on
-        metrics: Metric functions
-        use_amp: Whether to use automatic mixed precision
-        
-    Returns:
-        Dictionary of training metrics
-    """
+    """Train model for one epoch."""
     model.train()
     
     total_loss = 0.0
     num_graphs_total = 0
-    # metrics accumulators
     acc_correct = 0
-    # diagnostics
     excluded_not_attacking = 0
     excluded_ball_owner = 0
     excluded_invalid = 0
-    cand_counts = []
+    cand_counts: list[int] = []
     top1_correct = 0
     top3_correct = 0
     top5_correct = 0
-    
+
     scaler = make_scaler(use_amp)
     
     progress_bar = tqdm(dataloader, desc="Training")
     for batch_idx, (data, targets) in enumerate(progress_bar):
-        # Move data to device
         data = {k: v.to(device) for k, v in data.items()}
         targets = targets.to(device)
         
@@ -364,43 +350,70 @@ def train_epoch(
                 ball=data.get("ball"),
             )
 
-        if outputs.dtype != torch.float32:
-            outputs = outputs.float()
+        outputs = outputs.float()
 
-        batch_size = data["batch"].max().item() + 1
-        graph_outputs: list[torch.Tensor] = []
-        graph_targets: list[int] = []
+                batch_size = data["batch"].max().item() + 1
+        nodes_per_graph = outputs.numel() // max(1, batch_size)
+        outputs = outputs.view(batch_size, nodes_per_graph)
 
+        cand_masks = []
         for i in range(batch_size):
             node_mask = data["batch"] == i
             if not node_mask.any():
-                continue
-
-            local_logits = outputs[node_mask]
-            if local_logits.dim() > 1:
-                local_logits = local_logits.view(-1)
-
-            if "team" in data and "ball" in data and "mask" in data:
-                team_i = data["team"][node_mask]
-                ball_i = data["ball"][node_mask]
-                mask_i = data["mask"][node_mask]
-                cand_mask = (team_i == 0) & (ball_i == 0) & (mask_i == 1)
-            elif "team" in data and "ball" in data:
-                team_i = data["team"][node_mask]
-                ball_i = data["ball"][node_mask]
-                cand_mask = (team_i == 0) & (ball_i == 0)
+                cand_mask = torch.zeros(nodes_per_graph, dtype=torch.bool, device=outputs.device)
             else:
-                cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
-            cand_mask = cand_mask.view(-1)
+                if "team" in data and "ball" in data and "mask" in data:
+                    team_i = data["team"][node_mask]
+                    ball_i = data["ball"][node_mask]
+                    mask_i = data["mask"][node_mask]
+                    cand_mask = (team_i == 0) & (ball_i == 0) & (mask_i == 1)
+                elif "team" in data and "ball" in data:
+                    team_i = data["team"][node_mask]
+                    ball_i = data["ball"][node_mask]
+                    cand_mask = (team_i == 0) & (ball_i == 0)
+                else:
+                    cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
+                cand_mask = cand_mask.view(-1)
+                if cand_mask.numel() != nodes_per_graph:
+                    full_mask = torch.zeros(nodes_per_graph, dtype=torch.bool, device=outputs.device)
+                    length = min(cand_mask.numel(), nodes_per_graph)
+                    full_mask[:length] = cand_mask[:length]
+                    cand_mask = full_mask
+            cand_masks.append(cand_mask)
 
-            masked_logits = mask_logits(local_logits.unsqueeze(0), cand_mask.unsqueeze(0)).squeeze(0)
-            cand_logits = masked_logits[cand_mask]
+        cand_masks = torch.stack(cand_masks)
+        masked_outputs = mask_logits(outputs, cand_masks)
+
+        if not hasattr(train_epoch, "_printed_debug"):
+            train_epoch._printed_debug = True
+            try:
+                print("DBG outputs shape:", tuple(outputs.shape))
+                assert cand_masks.dtype == torch.bool and cand_masks.ndim == 2, "cand_mask must be bool [B, N]"
+                num_cands = cand_masks.sum(dim=1)
+                print("DBG num_cands per graph (first 8):", num_cands[:8].tolist())
+                with torch.no_grad():
+                    masked32 = masked_outputs.float()
+                    per_graph_std = []
+                    for b in range(min(masked32.size(0), 8)):
+                        vals = masked32[b][cand_masks[b]]
+                        per_graph_std.append(float(vals.std().item()) if vals.numel() > 1 else None)
+                    print("DBG cand_logits std per graph (first 8):", per_graph_std)
+            except Exception as exc:  # pragma: no cover - debug only
+                print("DBG ERROR:", repr(exc))
+
+                graph_outputs = []
+                graph_targets = []
+                
+                for i in range(batch_size):
+            if i >= targets.size(0):
+                break
+            cand_mask = cand_masks[i]
+            cand_logits = masked_outputs[i][cand_mask]
             if cand_logits.numel() == 0:
                 continue
 
             receiver_node_idx = targets[i].item()
-            num_nodes_in_graph = node_mask.sum().item()
-            if receiver_node_idx >= num_nodes_in_graph:
+            if receiver_node_idx >= nodes_per_graph:
                 excluded_invalid += 1
                 continue
 
@@ -450,22 +463,23 @@ def train_epoch(
             loss.backward()
             optimizer.step()
         
-        # Update progress bar
         progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
     
-    # Compute metrics (手計算)
     denom = max(1, num_graphs_total)
     epoch_metrics = {
-        "loss": total_loss / denom,  # Average loss per graph (not per batch)
+        "loss": total_loss / denom,
         "accuracy": acc_correct / denom,
         "top1": top1_correct / denom,
         "top3": top3_correct / denom,
         "top5": top5_correct / denom,
     }
-    if hasattr(torch.utils, 'tensorboard'):
+    if hasattr(torch.utils, "tensorboard"):
         pass
-    # simple stdout diagnostics via logger in caller
-    print(f"[Train] excluded_not_attacking={excluded_not_attacking} excluded_ball_owner={excluded_ball_owner} excluded_invalid={excluded_invalid} avg_cand={sum(cand_counts)/len(cand_counts) if cand_counts else 0:.2f}")
+    print(
+        f"[Train] excluded_not_attacking={excluded_not_attacking} "
+        f"excluded_ball_owner={excluded_ball_owner} excluded_invalid={excluded_invalid} "
+        f"avg_cand={sum(cand_counts)/len(cand_counts) if cand_counts else 0:.2f}"
+    )
     
     return epoch_metrics
 
@@ -521,66 +535,19 @@ def validate_epoch(
                 ball=data.get("ball"),
             )
             
-            # Convert to FP32 for mask and loss computation (same as training)
-            outputs = outputs.float()
-            
-            # Debug: Log detailed statistics for first batch of first epoch
-            if logger and batch_idx == 0 and num_graphs_total == 0:
-                batch_size = data["batch"].max().item() + 1
-                if batch_size > 0:
-                    first_graph_mask = data["batch"] == 0
-                    if first_graph_mask.any():
-                        first_graph_outputs = outputs[first_graph_mask]
-                        # Raw logits std (before cand_mask filtering)
-                        raw_logits_std = first_graph_outputs.std().item()
-                        
-                        # Get cand_mask for first graph
-                        if "team" in data and "ball" in data and "mask" in data:
-                            team_first = data["team"][first_graph_mask]
-                            ball_first = data["ball"][first_graph_mask]
-                            mask_first = data["mask"][first_graph_mask]
-                            cand_mask_first = (team_first == 0) & (ball_first == 0) & (mask_first == 1)
-                            cand_logits_first = first_graph_outputs[cand_mask_first]
-                            cand_logits_std = cand_logits_first.std().item() if cand_logits_first.numel() > 1 else 0.0
-                            cand_unique_count = cand_logits_first.unique().numel()
-                            
-                            # Cand node input features std (if available)
-                            if "x" in data:
-                                x_first = data["x"][first_graph_mask]
-                                cand_x_first = x_first[cand_mask_first]
-                                cand_x_std = cand_x_first.std(dim=0).mean().item() if cand_x_first.numel() > 0 else 0.0
-                            else:
-                                cand_x_std = 0.0
-                        else:
-                            cand_logits_std = raw_logits_std
-                            cand_unique_count = first_graph_outputs.unique().numel()
-                            cand_x_std = 0.0
-                        
-                        logger.info(f"Val debug (first batch): raw_logits_std={raw_logits_std:.6f}, "
-                                   f"cand_logits_std={cand_logits_std:.6f}, "
-                                   f"cand_unique_count={cand_unique_count}, "
-                                   f"cand_x_std={cand_x_std:.6f}, "
-                                   f"logits_mean={first_graph_outputs.mean().item():.6f}, "
-                                   f"logits_min={first_graph_outputs.min().item():.6f}, "
-                                   f"logits_max={first_graph_outputs.max().item():.6f}")
-                        if cand_logits_std < 1e-6:
-                            logger.warning(f"Val debug: cand_logits_std is too small ({cand_logits_std:.6f}), possible collapse!")
-                        if cand_x_std < 1e-6:
-                            logger.warning(f"Val debug: cand_x_std is too small ({cand_x_std:.6f}), check preprocessing!")
-            
-            # TacticAI spec: outputs is [N_total] with cand_mask applied (-1e9 for non-candidates)
-            # Process per graph: extract local logits and apply softmax
+            if outputs.dtype != torch.float32:
+                outputs = outputs.float()
+
             batch_size = data["batch"].max().item() + 1
-            graph_outputs = []
-            graph_targets = []
-            
+            nodes_per_graph = outputs.numel() // max(1, batch_size)
+            outputs = outputs.view(batch_size, nodes_per_graph)
+
+            cand_masks = []
             for i in range(batch_size):
                 node_mask = data["batch"] == i
-                if node_mask.any():
-                    # Get local logits for this graph
-                    local_logits = outputs[node_mask]  # [N_per_graph]
-                    
-                    # Get cand_mask for this graph (TacticAI spec)
+                if not node_mask.any():
+                    cand_mask = torch.zeros(nodes_per_graph, dtype=torch.bool, device=outputs.device)
+                else:
                     if "team" in data and "ball" in data and "mask" in data:
                         team_i = data["team"][node_mask]
                         ball_i = data["ball"][node_mask]
@@ -592,39 +559,44 @@ def validate_epoch(
                         cand_mask = (team_i == 0) & (ball_i == 0)
                     else:
                         cand_mask = torch.ones(node_mask.sum(), dtype=torch.bool, device=outputs.device)
-                    
-                    # Apply cand_mask using mask_logits (FP32 safe)
-                    local_logits = mask_logits(
-                        local_logits.unsqueeze(0),
-                        cand_mask.unsqueeze(0),
-                    ).squeeze(0)
-                    
-                    # Get candidate logits (for loss/metrics)
-                    cand_logits = local_logits[cand_mask]  # [num_candidates]
-                    
-                    if cand_logits.numel() > 0:
-                        receiver_node_idx = targets[i].item()  # Graph-local index (0-21)
-                        # receiver_node_idx is already the local index within the graph
-                        # Check if receiver is within the graph bounds
-                        num_nodes_in_graph = node_mask.sum().item()
-                        if receiver_node_idx < num_nodes_in_graph:
-                            # receiver_node_idx is the local index within this graph
-                            if cand_mask[receiver_node_idx]:
-                                # Receiver is in candidates: map to candidate index
-                                cand_indices = torch.where(cand_mask)[0]  # Local indices that are candidates
-                                receiver_cand_idx = (cand_indices == receiver_node_idx).nonzero(as_tuple=True)[0]
-                                if receiver_cand_idx.numel() > 0:
-                                    receiver_cand_idx = receiver_cand_idx.item()
-                                    # CRITICAL: Clone the tensor to avoid sharing memory
-                                    graph_outputs.append(cand_logits.detach().clone())
-                                    graph_targets.append(receiver_cand_idx)
-                                    cand_counts.append(int(cand_mask.sum().item()))
-                                else:
-                                    excluded_invalid += 1
-                            else:
-                                excluded_ball_owner += 1
-                        else:
-                            excluded_invalid += 1
+                    cand_mask = cand_mask.view(-1)
+                    if cand_mask.numel() != nodes_per_graph:
+                        cand_mask = cand_mask[:nodes_per_graph]
+                cand_masks.append(cand_mask)
+
+            cand_masks = torch.stack(cand_masks)
+            masked_outputs = mask_logits(outputs, cand_masks)
+
+            graph_outputs = []
+            graph_targets = []
+            
+            for i in range(batch_size):
+                if i >= targets.size(0):
+                    break
+                cand_mask = cand_masks[i]
+                cand_logits = masked_outputs[i][cand_mask]
+                if cand_logits.numel() == 0:
+                    continue
+
+                receiver_node_idx = targets[i].item()
+                if receiver_node_idx >= nodes_per_graph:
+                    excluded_invalid += 1
+                    continue
+
+                if not cand_mask[receiver_node_idx]:
+                    excluded_ball_owner += 1
+                    continue
+
+                cand_indices = torch.where(cand_mask)[0]
+                receiver_cand_idx = (cand_indices == receiver_node_idx).nonzero(as_tuple=True)[0]
+                if receiver_cand_idx.numel() == 0:
+                    excluded_invalid += 1
+                    continue
+
+                receiver_cand_idx = receiver_cand_idx.item()
+                graph_outputs.append(cand_logits.detach().clone())
+                graph_targets.append(receiver_cand_idx)
+                cand_counts.append(int(cand_mask.sum().item()))
             
             # Compute loss per graph (TacticAI spec: softmax over candidates)
             batch_loss_sum = 0.0
