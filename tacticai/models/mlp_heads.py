@@ -36,15 +36,21 @@ class NodeScoreHead(nn.Module):
         super().__init__()
         self.linear = nn.Linear(input_dim, 1)
 
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        cand_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Project node embeddings to logits.
 
         Args:
             hidden: Node embeddings ``[B, N, d]`` or ``[N, d]``.
+            cand_mask: Unused placeholder for backward compatibility.
 
         Returns:
             Per-node logits ``[B, N]`` (or ``[N]`` for 2-D input).
         """
+        del cand_mask  # not needed for this minimal head
         original_2d = hidden.dim() == 2
         if original_2d:
             hidden = hidden.unsqueeze(0)
