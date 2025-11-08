@@ -414,18 +414,20 @@ def train_epoch(
 
         for b in range(B):
             cm = cand_mask[b]
-            if cm.sum().item() == 0:
-                selected_logits = outputs[b]
-                selected_target = target[b]
-            else:
-                selected_logits = outputs[b][cm]
-                selected_target = target[b]
+            Ncand = int(cm.sum().item())
+            logits_b = outputs[b][cm] if Ncand > 0 else outputs[b]
+            target_global = int(target[b].item())
 
-            if selected_logits.ndim == 1:
-                selected_logits = selected_logits.unsqueeze(0)
-            graph_outputs.append(selected_logits)
-            graph_targets.append(selected_target.unsqueeze(0))
-            cand_counts.append(int(cm.sum().item()))
+            cand_indices = torch.arange(outputs.size(1), device=outputs.device)[cm]
+            if (cand_indices == target_global).any():
+                cand_target_idx = int((cand_indices == target_global).nonzero(as_tuple=True)[0].item())
+            else:
+                cand_target_idx = 0
+                print(f"[WARN] target {target_global} not in candidates for graph {b}")
+
+            graph_outputs.append(logits_b.unsqueeze(0))
+            graph_targets.append(torch.tensor([cand_target_idx], device=outputs.device))
+            cand_counts.append(Ncand)
         # === end build ===
 
         batch_loss_sum = 0.0
