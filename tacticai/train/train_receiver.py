@@ -400,56 +400,68 @@ def train_epoch(
                     print("DBG cand_logits std per graph (first 8):", per_graph_std)
             except Exception as exc:  # pragma: no cover - debug only
                 print("DBG ERROR:", repr(exc))
-
-                graph_outputs = []
-                graph_targets = []
-                for i in range(batch_size):
-                    if i >= targets.size(0):
-                        break
-                    cand_mask = cand_masks[i]
-                    cand_logits = masked_outputs[i][cand_mask]
-                    if cand_logits.numel() == 0:
-                        continue
                 continue
 
-            receiver_node_idx = targets[i].item()
-            if receiver_node_idx >= nodes_per_graph:
-                excluded_invalid += 1
-                continue
+        # === build per-graph outputs/targets safely ===
+        target = targets
+        cand_mask = cand_masks
+        B, Nclass = outputs.shape
+        assert cand_mask.shape == (B, Nclass), f"cand_mask shape mismatch: {cand_mask.shape} vs {(B, Nclass)}"
+        assert target.shape[0] == B, f"target shape mismatch: {target.shape} vs ({B},)"
 
-            if not cand_mask[receiver_node_idx]:
-                excluded_ball_owner += 1
-                continue
+        graph_outputs: list[torch.Tensor] = []
+        graph_targets: list[torch.Tensor] = []
 
-            cand_indices = torch.where(cand_mask)[0]
-            receiver_cand_idx = (cand_indices == receiver_node_idx).nonzero(as_tuple=True)[0]
-            if receiver_cand_idx.numel() == 0:
-                excluded_invalid += 1
-                continue
+        for b in range(B):
+            cm = cand_mask[b]
+            if cm.sum().item() == 0:
+                selected_logits = outputs[b]
+                selected_target = target[b]
+            else:
+                selected_logits = outputs[b][cm]
+                selected_target = target[b]
 
-            receiver_cand_idx = receiver_cand_idx.item()
-            graph_outputs.append(cand_logits.clone())
-            graph_targets.append(receiver_cand_idx)
-            cand_counts.append(int(cand_mask.sum().item()))
+            if selected_logits.ndim == 1:
+                selected_logits = selected_logits.unsqueeze(0)
+            graph_outputs.append(selected_logits)
+            graph_targets.append(selected_target.unsqueeze(0))
+            cand_counts.append(int(cm.sum().item()))
+        # === end build ===
 
         batch_loss_sum = 0.0
         graphs_in_batch = 0
         for logits_b, target_b in zip(graph_outputs, graph_targets):
-            lb = logits_b.unsqueeze(0)
-            target_t = torch.tensor([target_b], dtype=torch.long, device=lb.device)
+            if logits_b.numel() == 0:
+                continue
+            if logits_b.ndim == 1:
+                lb = logits_b.unsqueeze(0)
+            elif logits_b.ndim == 2:
+                lb = logits_b
+            else:
+                raise ValueError(f"Unexpected logits ndim: {logits_b.ndim}")
+
+            target_scalar = target_b.view(-1)[0]
+            target_tensor = target_scalar.to(device=lb.device, dtype=torch.long)
+            target_t = target_tensor.unsqueeze(0)
+
             graph_loss = criterion(lb, target_t)
             batch_loss_sum += graph_loss
+
             pred_top1 = torch.argmax(lb, dim=1)
-            acc_correct += int(pred_top1.item() == target_b)
-            top1_correct += int(pred_top1.item() == target_b)
+            target_idx = int(target_tensor.item())
+            acc_correct += int(pred_top1.item() == target_idx)
+            top1_correct += int(pred_top1.item() == target_idx)
+
             k3 = min(3, lb.size(1))
             k5 = min(5, lb.size(1))
-            top3_correct += int(target_b in torch.topk(lb, k=k3, dim=1).indices[0].tolist())
-            top5_correct += int(target_b in torch.topk(lb, k=k5, dim=1).indices[0].tolist())
+            top3_indices = torch.topk(lb, k=k3, dim=1).indices[0].tolist()
+            top5_indices = torch.topk(lb, k=k5, dim=1).indices[0].tolist()
+            top3_correct += int(target_idx in top3_indices)
+            top5_correct += int(target_idx in top5_indices)
             graphs_in_batch += 1
 
         if graphs_in_batch == 0:
-                    continue
+            continue
             
         loss = batch_loss_sum / graphs_in_batch
         num_graphs_total += graphs_in_batch
