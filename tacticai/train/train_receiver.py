@@ -4,6 +4,7 @@ This script trains a GATv2 model to predict pass receivers in football matches.
 """
 
 import argparse
+import logging
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -25,6 +26,9 @@ from tacticai.modules import (
     CosineAnnealingScheduler, EarlyStopping, save_training_history,
 )
 from tacticai.modules.transforms import RandomFlipTransform
+
+
+AUDIT_LOGGER = logging.getLogger(__name__)
 
 try:
     from torch.amp import GradScaler as _GradScaler, autocast as _autocast
@@ -376,6 +380,10 @@ def train_epoch(
     
     stats = defaultdict(float)
     stats["excluded_invalid"] = 0.0
+    stats["invalid_team_mismatch"] = 0.0
+    stats["invalid_target_not_in_cand"] = 0.0
+    stats["invalid_team_mismatch"] = 0.0
+    stats["invalid_target_not_in_cand"] = 0.0
     
     total_loss = 0.0
     num_graphs_total = 0
@@ -474,7 +482,22 @@ def train_epoch(
                 tgt_in_cand = bool(cm_g[tgt].item()) if tgt < cm_g.size(0) else False
                 tt = int(team_labels[g, tgt].item())
                 kt = int(kicker_team[g].item())
-                if tt != kt or not tgt_in_cand:
+                if tt != kt:
+                    stats["invalid_team_mismatch"] += 1
+                    if (int(stats["invalid_team_mismatch"]) % 50) == 1:
+                        AUDIT_LOGGER.warning(
+                            f"[AUDIT] team_mismatch: g={g}, tgt={tgt}, kicker_team={kt}, "
+                            f"target_team={tt}, cand_true_sum={int(cand_masks[g].sum().item())}"
+                        )
+                    stats["excluded_invalid"] += 1
+                    continue
+                if not tgt_in_cand:
+                    stats["invalid_target_not_in_cand"] += 1
+                    if (int(stats["invalid_target_not_in_cand"]) % 50) == 1:
+                        AUDIT_LOGGER.warning(
+                            f"[AUDIT] target_not_in_cand: g={g}, tgt={tgt}, kicker_team={kt}, "
+                            f"cand_true_sum={int(cand_masks[g].sum().item())}"
+                        )
                     stats["excluded_invalid"] += 1
                     continue
                 valid_indices.append(g)
@@ -606,6 +629,8 @@ def train_epoch(
         "top3": top3_correct / denom,
         "top5": top5_correct / denom,
         "excluded_invalid": float(stats["excluded_invalid"]),
+        "invalid_team_mismatch": float(stats["invalid_team_mismatch"]),
+        "invalid_target_not_in_cand": float(stats["invalid_target_not_in_cand"]),
     }
     if hasattr(torch.utils, "tensorboard"):
         pass
@@ -754,6 +779,9 @@ def validate_epoch(
             assert cand_mask.shape == (B, Nclass), f"cand_mask shape mismatch: {cand_mask.shape} vs {(B, Nclass)}"
             assert target.shape[0] == B, f"target shape mismatch: {target.shape} vs ({B},)"
 
+            stats["invalid_team_mismatch"] = stats.get("invalid_team_mismatch", 0.0)
+            stats["invalid_target_not_in_cand"] = stats.get("invalid_target_not_in_cand", 0.0)
+
             graph_outputs: list[torch.Tensor] = []
             graph_targets: list[torch.Tensor] = []
 
@@ -772,8 +800,30 @@ def validate_epoch(
                     kicker_team_repr = "NA"
                     if team_labels is not None and 0 <= target_global < team_labels.size(1):
                         target_team_repr = int(team_labels[b, target_global].item())
+                        tt = target_team_repr
+                    else:
+                        tt = None
                     if kicker_team is not None and b < kicker_team.size(0):
                         kicker_team_repr = int(kicker_team[b].item())
+                        kt = kicker_team_repr
+                    else:
+                        kt = None
+
+                    if tt is not None and kt is not None and tt != kt:
+                        stats["invalid_team_mismatch"] += 1
+                        if logger is not None and (int(stats["invalid_team_mismatch"]) % 50) == 1:
+                            AUDIT_LOGGER.warning(
+                                f"[AUDIT] team_mismatch: g={b}, tgt={target_global}, kicker_team={kt}, "
+                                f"target_team={tt}, cand_true_sum={int(cm.sum().item())} (val)"
+                            )
+                    else:
+                        stats["invalid_target_not_in_cand"] += 1
+                        if logger is not None and (int(stats["invalid_target_not_in_cand"]) % 50) == 1:
+                            AUDIT_LOGGER.warning(
+                                f"[AUDIT] target_not_in_cand: g={b}, tgt={target_global}, kicker_team={kt}, "
+                                f"cand_true_sum={int(cm.sum().item())} (val)"
+                            )
+
                     print(
                         f"[WARN] target {target_global} not in candidates for graph {b} (val) "
                         f"(target_team={target_team_repr}, kicker_team={kicker_team_repr}, "
@@ -855,6 +905,8 @@ def validate_epoch(
         "top3": top3_correct / denom,
         "top5": top5_correct / denom,
         "excluded_invalid": float(stats["excluded_invalid"]),
+        "invalid_team_mismatch": float(stats["invalid_team_mismatch"]),
+        "invalid_target_not_in_cand": float(stats["invalid_target_not_in_cand"]),
     }
     print(
         f"[Val] excluded_not_attacking={excluded_not_attacking} "
@@ -1021,6 +1073,17 @@ def main():
             f"Top-3: {val_metrics['top3']:.4f}, "
             f"Top-5: {val_metrics['top5']:.4f} "
             f"(excluded_invalid={int(val_metrics.get('excluded_invalid', 0))})"
+        )
+
+        logger.info(
+            "[Audit summary] train: invalid_team_mismatch=%d, invalid_target_not_in_cand=%d",
+            int(train_metrics.get("invalid_team_mismatch", 0)),
+            int(train_metrics.get("invalid_target_not_in_cand", 0)),
+        )
+        logger.info(
+            "[Audit summary] val: invalid_team_mismatch=%d, invalid_target_not_in_cand=%d",
+            int(val_metrics.get("invalid_team_mismatch", 0)),
+            int(val_metrics.get("invalid_target_not_in_cand", 0)),
         )
         
         logger.info(f"Learning rate: {current_lr:.6f}")
