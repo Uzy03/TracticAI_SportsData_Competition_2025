@@ -7,6 +7,7 @@ import argparse
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
+from collections import defaultdict
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -373,6 +374,9 @@ def train_epoch(
     """Train model for one epoch."""
     model.train()
     
+    stats = defaultdict(float)
+    stats["excluded_invalid"] = 0.0
+    
     total_loss = 0.0
     num_graphs_total = 0
     acc_correct = 0
@@ -435,6 +439,58 @@ def train_epoch(
         else:
             cand_masks = cand_masks.to(dtype=torch.bool)
 
+        team_labels: Optional[torch.Tensor] = None
+        ball_batched: Optional[torch.Tensor] = None
+        kicker_team: Optional[torch.Tensor] = None
+
+        team_tensor = data.get("team")
+        ball_tensor = data.get("ball")
+        if team_tensor is not None and ball_tensor is not None:
+            team_labels = _reshape_to_batch(team_tensor, batch_size, nodes_per_graph).to(
+                device=outputs.device, dtype=torch.long
+            )
+            ball_batched = _reshape_to_batch(ball_tensor, batch_size, nodes_per_graph).to(device=outputs.device)
+
+            has_ball_mask = ball_batched > 0.5
+            default_kicker_idx = torch.argmax(ball_batched, dim=1)
+            first_ball_idx = torch.argmax(has_ball_mask.float(), dim=1)
+            kicker_idx = torch.where(
+                has_ball_mask.any(dim=1),
+                first_ball_idx,
+                default_kicker_idx,
+            )
+            if nodes_per_graph > 0:
+                kicker_idx = kicker_idx.clamp_(0, nodes_per_graph - 1)
+            kicker_team = team_labels.gather(1, kicker_idx.unsqueeze(1)).squeeze(1)
+
+            B_filter = targets.shape[0]
+            valid_indices: list[int] = []
+            for g in range(B_filter):
+                tgt = int(targets[g].item())
+                if tgt < 0 or tgt >= team_labels.size(1):
+                    stats["excluded_invalid"] += 1
+                    continue
+                cm_g = cand_masks[g]
+                tgt_in_cand = bool(cm_g[tgt].item()) if tgt < cm_g.size(0) else False
+                tt = int(team_labels[g, tgt].item())
+                kt = int(kicker_team[g].item())
+                if tt != kt or not tgt_in_cand:
+                    stats["excluded_invalid"] += 1
+                    continue
+                valid_indices.append(g)
+
+            if not valid_indices:
+                continue
+
+            valid_idx_tensor = torch.tensor(valid_indices, device=targets.device, dtype=torch.long)
+            outputs = outputs.index_select(0, valid_idx_tensor)
+            targets = targets.index_select(0, valid_idx_tensor)
+            cand_masks = cand_masks.index_select(0, valid_idx_tensor)
+            team_labels = team_labels.index_select(0, valid_idx_tensor)
+            kicker_team = kicker_team.index_select(0, valid_idx_tensor)
+            if ball_batched is not None:
+                ball_batched = ball_batched.index_select(0, valid_idx_tensor)
+
         masked_outputs = mask_logits(outputs, cand_masks)
 
         if not hasattr(train_epoch, "_printed_debug"):
@@ -462,13 +518,6 @@ def train_epoch(
         assert cand_mask.shape == (B, Nclass), f"cand_mask shape mismatch: {cand_mask.shape} vs {(B, Nclass)}"
         assert target.shape[0] == B, f"target shape mismatch: {target.shape} vs ({B},)"
 
-        team_tensor = data.get("team")
-        ball_tensor = data.get("ball")
-        team_batched = ball_batched = None
-        if team_tensor is not None and ball_tensor is not None:
-            team_batched = _reshape_to_batch(team_tensor, B, Nclass).to(device=outputs.device, dtype=torch.long)
-            ball_batched = _reshape_to_batch(ball_tensor, B, Nclass).to(device=outputs.device)
-
         graph_outputs: list[torch.Tensor] = []
         graph_targets: list[torch.Tensor] = []
 
@@ -485,17 +534,10 @@ def train_epoch(
                 cand_target_idx = 0
                 target_team_repr = "NA"
                 kicker_team_repr = "NA"
-                if team_batched is not None and 0 <= target_global < team_batched.size(1):
-                    target_team_repr = int(team_batched[b, target_global].item())
-                if team_batched is not None and ball_batched is not None:
-                    ball_row = ball_batched[b]
-                    kicker_candidates = torch.where(ball_row > 0.5)[0]
-                    if kicker_candidates.numel() > 0:
-                        kicker_idx = int(kicker_candidates[0].item())
-                    else:
-                        kicker_idx = int(torch.argmax(ball_row).item())
-                    kicker_idx = max(0, min(kicker_idx, Nclass - 1))
-                    kicker_team_repr = int(team_batched[b, kicker_idx].item())
+                if team_labels is not None and 0 <= target_global < team_labels.size(1):
+                    target_team_repr = int(team_labels[b, target_global].item())
+                if kicker_team is not None and b < kicker_team.size(0):
+                    kicker_team_repr = int(kicker_team[b].item())
                 print(
                     f"[WARN] target {target_global} not in candidates for graph {b} "
                     f"(target_team={target_team_repr}, kicker_team={kicker_team_repr}, "
@@ -563,12 +605,14 @@ def train_epoch(
         "top1": top1_correct / denom,
         "top3": top3_correct / denom,
         "top5": top5_correct / denom,
+        "excluded_invalid": float(stats["excluded_invalid"]),
     }
     if hasattr(torch.utils, "tensorboard"):
         pass
     print(
         f"[Train] excluded_not_attacking={excluded_not_attacking} "
         f"excluded_ball_owner={excluded_ball_owner} excluded_invalid={excluded_invalid} "
+        f"excluded_invalid_filter={int(stats['excluded_invalid'])} "
         f"avg_cand={sum(cand_counts)/len(cand_counts) if cand_counts else 0:.2f}"
     )
     
@@ -596,6 +640,9 @@ def validate_epoch(
         Dictionary of validation metrics
     """
     model.eval()
+    
+    stats = defaultdict(float)
+    stats["excluded_invalid"] = 0.0
     
     total_loss = 0.0
     num_graphs_total = 0
@@ -646,6 +693,58 @@ def validate_epoch(
                 cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
             else:
                 cand_masks = cand_masks.to(dtype=torch.bool)
+            team_labels: Optional[torch.Tensor] = None
+            ball_batched: Optional[torch.Tensor] = None
+            kicker_team: Optional[torch.Tensor] = None
+
+            team_tensor = data.get("team")
+            ball_tensor = data.get("ball")
+            if team_tensor is not None and ball_tensor is not None:
+                team_labels = _reshape_to_batch(team_tensor, batch_size, nodes_per_graph).to(
+                    device=outputs.device, dtype=torch.long
+                )
+                ball_batched = _reshape_to_batch(ball_tensor, batch_size, nodes_per_graph).to(device=outputs.device)
+
+                has_ball_mask = ball_batched > 0.5
+                default_kicker_idx = torch.argmax(ball_batched, dim=1)
+                first_ball_idx = torch.argmax(has_ball_mask.float(), dim=1)
+                kicker_idx = torch.where(
+                    has_ball_mask.any(dim=1),
+                    first_ball_idx,
+                    default_kicker_idx,
+                )
+                if nodes_per_graph > 0:
+                    kicker_idx = kicker_idx.clamp_(0, nodes_per_graph - 1)
+                kicker_team = team_labels.gather(1, kicker_idx.unsqueeze(1)).squeeze(1)
+
+                B_filter = targets.shape[0]
+                valid_indices: list[int] = []
+                for g in range(B_filter):
+                    tgt = int(targets[g].item())
+                    if tgt < 0 or tgt >= team_labels.size(1):
+                        stats["excluded_invalid"] += 1
+                        continue
+                    cm_g = cand_masks[g]
+                    tgt_in_cand = bool(cm_g[tgt].item()) if tgt < cm_g.size(0) else False
+                    tt = int(team_labels[g, tgt].item())
+                    kt = int(kicker_team[g].item())
+                    if tt != kt or not tgt_in_cand:
+                        stats["excluded_invalid"] += 1
+                        continue
+                    valid_indices.append(g)
+
+                if not valid_indices:
+                    continue
+
+                valid_idx_tensor = torch.tensor(valid_indices, device=targets.device, dtype=torch.long)
+                outputs = outputs.index_select(0, valid_idx_tensor)
+                targets = targets.index_select(0, valid_idx_tensor)
+                cand_masks = cand_masks.index_select(0, valid_idx_tensor)
+                team_labels = team_labels.index_select(0, valid_idx_tensor)
+                kicker_team = kicker_team.index_select(0, valid_idx_tensor)
+                if ball_batched is not None:
+                    ball_batched = ball_batched.index_select(0, valid_idx_tensor)
+
             masked_outputs = mask_logits(outputs, cand_masks)
 
             # === build per-graph outputs/targets safely (validation) ===
@@ -654,13 +753,6 @@ def validate_epoch(
             B, Nclass = outputs.shape
             assert cand_mask.shape == (B, Nclass), f"cand_mask shape mismatch: {cand_mask.shape} vs {(B, Nclass)}"
             assert target.shape[0] == B, f"target shape mismatch: {target.shape} vs ({B},)"
-
-            team_tensor = data.get("team")
-            ball_tensor = data.get("ball")
-            team_batched = ball_batched = None
-            if team_tensor is not None and ball_tensor is not None:
-                team_batched = _reshape_to_batch(team_tensor, B, Nclass).to(device=outputs.device, dtype=torch.long)
-                ball_batched = _reshape_to_batch(ball_tensor, B, Nclass).to(device=outputs.device)
 
             graph_outputs: list[torch.Tensor] = []
             graph_targets: list[torch.Tensor] = []
@@ -678,17 +770,10 @@ def validate_epoch(
                     cand_target_idx = 0
                     target_team_repr = "NA"
                     kicker_team_repr = "NA"
-                    if team_batched is not None and 0 <= target_global < team_batched.size(1):
-                        target_team_repr = int(team_batched[b, target_global].item())
-                    if team_batched is not None and ball_batched is not None:
-                        ball_row = ball_batched[b]
-                        kicker_candidates = torch.where(ball_row > 0.5)[0]
-                        if kicker_candidates.numel() > 0:
-                            kicker_idx = int(kicker_candidates[0].item())
-                        else:
-                            kicker_idx = int(torch.argmax(ball_row).item())
-                        kicker_idx = max(0, min(kicker_idx, Nclass - 1))
-                        kicker_team_repr = int(team_batched[b, kicker_idx].item())
+                    if team_labels is not None and 0 <= target_global < team_labels.size(1):
+                        target_team_repr = int(team_labels[b, target_global].item())
+                    if kicker_team is not None and b < kicker_team.size(0):
+                        kicker_team_repr = int(kicker_team[b].item())
                     print(
                         f"[WARN] target {target_global} not in candidates for graph {b} (val) "
                         f"(target_team={target_team_repr}, kicker_team={kicker_team_repr}, "
@@ -769,8 +854,15 @@ def validate_epoch(
         "top1": top1_correct / denom,
         "top3": top3_correct / denom,
         "top5": top5_correct / denom,
+        "excluded_invalid": float(stats["excluded_invalid"]),
     }
-    print(f"[Val] excluded_not_attacking={excluded_not_attacking} excluded_ball_owner={excluded_ball_owner} excluded_invalid={excluded_invalid} avg_cand={sum(cand_counts)/len(cand_counts) if cand_counts else 0:.2f} num_graphs={num_graphs_total}")
+    print(
+        f"[Val] excluded_not_attacking={excluded_not_attacking} "
+        f"excluded_ball_owner={excluded_ball_owner} excluded_invalid={excluded_invalid} "
+        f"excluded_invalid_filter={int(stats['excluded_invalid'])} "
+        f"avg_cand={sum(cand_counts)/len(cand_counts) if cand_counts else 0:.2f} "
+        f"num_graphs={num_graphs_total}"
+    )
     
     # Debug: Log detailed information to identify why Val Loss is fixed
     if logger:
@@ -913,17 +1005,23 @@ def main():
             current_lr = optimizer.param_groups[0]['lr']
         
         # Log metrics
-        logger.info(f"Train - Loss: {train_metrics['loss']:.4f}, "
-                   f"Acc: {train_metrics['accuracy']:.4f}, "
-                   f"Top-1: {train_metrics['top1']:.4f}, "
-                   f"Top-3: {train_metrics['top3']:.4f}, "
-                   f"Top-5: {train_metrics['top5']:.4f}")
+        logger.info(
+            f"Train - Loss: {train_metrics['loss']:.4f}, "
+            f"Acc: {train_metrics['accuracy']:.4f}, "
+            f"Top-1: {train_metrics['top1']:.4f}, "
+            f"Top-3: {train_metrics['top3']:.4f}, "
+            f"Top-5: {train_metrics['top5']:.4f} "
+            f"(excluded_invalid={int(train_metrics.get('excluded_invalid', 0))})"
+        )
         
-        logger.info(f"Val   - Loss: {val_metrics['loss']:.4f}, "
-                   f"Acc: {val_metrics['accuracy']:.4f}, "
-                   f"Top-1: {val_metrics['top1']:.4f}, "
-                   f"Top-3: {val_metrics['top3']:.4f}, "
-                   f"Top-5: {val_metrics['top5']:.4f}")
+        logger.info(
+            f"Val   - Loss: {val_metrics['loss']:.4f}, "
+            f"Acc: {val_metrics['accuracy']:.4f}, "
+            f"Top-1: {val_metrics['top1']:.4f}, "
+            f"Top-3: {val_metrics['top3']:.4f}, "
+            f"Top-5: {val_metrics['top5']:.4f} "
+            f"(excluded_invalid={int(val_metrics.get('excluded_invalid', 0))})"
+        )
         
         logger.info(f"Learning rate: {current_lr:.6f}")
         
