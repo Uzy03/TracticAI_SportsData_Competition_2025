@@ -530,10 +530,6 @@ def train_epoch(
                         )
                     if 0 <= tgt < cm_g.size(0):
                         cand_masks[g, tgt] = True
-                        cm_g = cand_masks[g]
-                    else:
-                        stats["excluded_invalid"] += 1
-                        continue
                 valid_indices.append(g)
 
             if not valid_indices:
@@ -780,6 +776,11 @@ def validate_epoch(
                     kicker_idx = kicker_idx.clamp_(0, nodes_per_graph - 1)
                 kicker_team = team_labels.gather(1, kicker_idx.unsqueeze(1)).squeeze(1)
 
+                same_team_mask = team_labels == kicker_team.unsqueeze(1)
+                cand_masks = cand_masks & same_team_mask
+                batch_indices = torch.arange(batch_size, device=outputs.device)
+                cand_masks[batch_indices, kicker_idx] = False
+
                 B_filter = targets.shape[0]
                 valid_indices: list[int] = []
                 for g in range(B_filter):
@@ -788,7 +789,10 @@ def validate_epoch(
                         stats["excluded_invalid"] += 1
                     continue
                     cm_g = cand_masks[g]
-                    tgt_in_cand = bool(cm_g[tgt].item()) if tgt < cm_g.size(0) else False
+                    if tgt >= cm_g.size(0):
+                        stats["excluded_invalid"] += 1
+                    continue
+                    tgt_in_cand = bool(cm_g[tgt].item())
                     tt = int(team_labels[g, tgt].item())
                     kt = int(kicker_team[g].item())
                     if tt != kt:
@@ -799,7 +803,7 @@ def validate_epoch(
                                 f"target_team={tt}, cand_true_sum={int(cand_masks[g].sum().item())} (val-filter)"
                             )
                         stats["excluded_invalid"] += 1
-                    continue
+                        continue
                     if not tgt_in_cand:
                         stats["invalid_target_not_in_cand"] += 1
                         if (int(stats["invalid_target_not_in_cand"]) % 50) == 1:
@@ -807,8 +811,11 @@ def validate_epoch(
                                 f"[AUDIT] target_not_in_cand: g={g}, tgt={tgt}, kicker_team={kt}, "
                                 f"cand_true_sum={int(cand_masks[g].sum().item())} (val-filter)"
                             )
-                        stats["excluded_invalid"] += 1
-                    continue
+                        if 0 <= tgt < cm_g.size(0):
+                            cand_masks[g, tgt] = True
+                        else:
+                            stats["excluded_invalid"] += 1
+                            continue
                     valid_indices.append(g)
 
                 if not valid_indices:

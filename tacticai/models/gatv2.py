@@ -717,7 +717,7 @@ class GATv2Layer4View(nn.Module):
 
         out = torch.zeros_like(h)
         for sample in range(num_samples):
-            att_sample = att[sample].exp()  # [E, heads]
+            att_sample = torch.exp(att[sample]).to(h.dtype)  # [E, heads]
             att_sum = torch.zeros(num_nodes, num_heads, device=h.device, dtype=h.dtype)
             att_sum.scatter_add_(0, dst.unsqueeze(-1).expand(-1, num_heads), att_sample)
             denom = att_sum[dst] + 1e-9
