@@ -10,6 +10,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+try:
+    from torch_scatter import scatter
+except ImportError as exc:  # pragma: no cover - torch_scatter optional dependency
+    scatter = None
 from ..modules.edge_features import compute_edge_features, EdgeFeatureEncoder
 from ..modules.view_ops import D2_VIEWS
 
@@ -497,40 +501,39 @@ class GATv2Layer4View(nn.Module):
         h2 = self.W2(x)  # [B*V, N_per_graph, heads * out_features]
         h2 = h2.view(B * V, N_per_graph, self.heads, self.out_features)  # [B*V, N_per_graph, heads, out_features]
         
-        # For batched processing, we need to expand h1 and h2 to [B*V, N_total, ...] to match edge_index
-        # Fully vectorized: create h1_full and h2_full using scatter_add or advanced indexing
-        h1_full = torch.zeros(B * V, N_total, self.heads, self.out_features, device=h1.device, dtype=h1.dtype)
-        h2_full = torch.zeros(B * V, N_total, self.heads, self.out_features, device=h2.device, dtype=h2.dtype)
-        # Create all indices at once (vectorized)
-        # For each batch b and view v, copy h[b*V+v, :] to h_full[b*V+v, b*N_per_graph:(b+1)*N_per_graph]
-        batch_indices = torch.arange(B, device=h1.device)  # [B]
-        view_indices = torch.arange(V, device=h1.device)  # [V]
-        # Create meshgrid: [B, V] for batch-view combinations
-        b_grid, v_grid = torch.meshgrid(batch_indices, view_indices, indexing='ij')  # [B, V] each
-        flat_b = b_grid.flatten()  # [B*V]
-        flat_v = v_grid.flatten()  # [B*V]
-        # Compute source and destination indices
-        src_idx = flat_b * V + flat_v  # [B*V] - index in h
-        # Destination node ranges
-        dst_node_start = flat_b * N_per_graph  # [B*V]
-        dst_node_end = (flat_b + 1) * N_per_graph  # [B*V]
-        # Fully vectorized copy using scatter or advanced indexing
-        # h is [B*V, N_per_graph, heads, out_features]
-        # h_full is [B*V, N_total, heads, out_features]
-        # For each row i in h_full, we need to copy h[src_idx[i]] to positions [dst_node_start[i]:dst_node_start[i]+N_per_graph]
-        # Use a loop for correctness (B*V is typically small: 4*32=128)
-        for i in range(B * V):
-            src_idx_val = src_idx[i].item()
-            dst_start = dst_node_start[i].item()
-            h1_full[i, dst_start:dst_start+N_per_graph] = h1[src_idx_val]
-            h2_full[i, dst_start:dst_start+N_per_graph] = h2[src_idx_val]
+        device = h1.device
+        num_samples = B * V
+
+        if scatter is None:
+            raise ImportError(
+                "torch_scatter is required for vectorized GAT aggregation. "
+                "Please install torch-scatter to use GATv2Network4View."
+            )
+
+        # Map local node indices to global (batched) indices once
+        graph_idx = torch.div(
+            torch.arange(num_samples, device=device), V, rounding_mode='floor'
+        )  # [B*V]
+        local_nodes = torch.arange(N_per_graph, device=device)
+        global_indices = graph_idx.unsqueeze(1) * N_per_graph + local_nodes.unsqueeze(0)  # [B*V, N_per_graph]
+
+        index_expanded = global_indices.unsqueeze(-1).unsqueeze(-1).expand(
+            num_samples, N_per_graph, self.heads, self.out_features
+        )
+
+        h1_full = torch.zeros(num_samples, N_total, self.heads, self.out_features, device=device, dtype=h1.dtype)
+        h2_full = torch.zeros(num_samples, N_total, self.heads, self.out_features, device=device, dtype=h2.dtype)
+        h1_full.scatter_(1, index_expanded, h1)
+        h2_full.scatter_(1, index_expanded, h2)
         
         # Self-loops are already included in edge_index (TacticAI spec: 22×22 complete graph)
         # Do not add self-loops again if they're already present
         # Note: edge_index should already contain self-loops from data preprocessing
         
         # Compute attention coefficients: TacticAI spec: e_ij = a^T LeakyReLU(W1*h_i + W2*h_j + U*edge_attr_ij)
-        att_scores = self._compute_attention_batched(h1_full, h2_full, edge_index, edge_attr, B, V)  # [E, heads]
+        att_scores = self._compute_attention_batched(
+            h1_full, h2_full, edge_index, edge_attr
+        )  # [B*V, E_total, heads]
         
         # Apply dropout
         if self.training and self.dropout > 0:
@@ -540,11 +543,7 @@ class GATv2Layer4View(nn.Module):
         out_full = self._aggregate(h1_full, edge_index, att_scores)  # [B*V, N_total, heads, out_features]
         
         # Extract per-graph outputs (fully vectorized)
-        # Create indices for all batch-view combinations
-        row_idx = torch.arange(B * V, device=out_full.device).unsqueeze(1).expand(-1, N_per_graph)  # [B*V, N_per_graph]
-        col_idx = (flat_b * N_per_graph).unsqueeze(1) + torch.arange(N_per_graph, device=out_full.device).unsqueeze(0)  # [B*V, N_per_graph]
-        # Extract using advanced indexing
-        out = out_full[row_idx, col_idx]  # [B*V, N_per_graph, heads, out_features]
+        out = out_full.gather(1, index_expanded)  # [B*V, N_per_graph, heads, out_features]
         
         # Concatenate or average heads
         if self.concat:
@@ -556,44 +555,34 @@ class GATv2Layer4View(nn.Module):
     
     def _compute_attention_batched(
         self, 
-        h1: torch.Tensor,  # [B*V, N_total, heads, out_features] - W1*h
-        h2: torch.Tensor,  # [B*V, N_total, heads, out_features] - W2*h
+        h1: torch.Tensor,  # [B*V, N_total, heads, out_features]
+        h2: torch.Tensor,  # [B*V, N_total, heads, out_features]
         edge_index: torch.Tensor,  # [2, E_total]
         edge_attr: Optional[torch.Tensor],
-        B: int,
-        V: int,
     ) -> torch.Tensor:
-        """Compute attention coefficients for batched graphs (TacticAI spec).
-        
-        TacticAI spec: e_ij = a^T LeakyReLU(W₁ h_i + W₂ h_j + U * edge_attr_ij)
-        """
+        """Compute attention coefficients for batched graphs (TacticAI spec)."""
         src, dst = edge_index[0], edge_index[1]
-        
-        # Process all views and batches in parallel
-        # Reshape h1 and h2 to [B*V*N_total, heads, out_features]
-        N_total = h1.size(1)
-        h1_flat = h1.view(B * V * N_total, self.heads, h1.size(3))  # [B*V*N_total, heads, out_features]
-        h2_flat = h2.view(B * V * N_total, self.heads, h2.size(3))  # [B*V*N_total, heads, out_features]
-        
-        # Get source and destination features
-        h1_src = h1_flat[src]  # [E, heads, out_features] - W1*h_i
-        h2_dst = h2_flat[dst]  # [E, heads, out_features] - W2*h_j
-        
-        # TacticAI spec: W₁ h_i + W₂ h_j
-        h_sum = h1_src + h2_dst  # [E, heads, out_features]
-        
-        # Include edge features if available (TacticAI spec: U * edge_attr_ij)
+        num_samples, _, heads, out_features = h1.shape
+
+        src_index = src.unsqueeze(0).expand(num_samples, -1)
+        dst_index = dst.unsqueeze(0).expand(num_samples, -1)
+
+        gather_src = src_index.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, heads, out_features)
+        gather_dst = dst_index.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, heads, out_features)
+
+        h1_src = h1.gather(1, gather_src)
+        h2_dst = h2.gather(1, gather_dst)
+
+        h_sum = h1_src + h2_dst
+
         if edge_attr is not None and self.U is not None:
-            # Apply U to edge features
-            edge_transformed = self.U(edge_attr)  # [E, heads * out_features]
-            edge_transformed = edge_transformed.view(edge_attr.size(0), self.heads, self.out_features)  # [E, heads, out_features]
-            # TacticAI spec: W₁ h_i + W₂ h_j + U * edge_attr_ij
-            h_sum = h_sum + edge_transformed  # [E, heads, out_features]
-        
-        # TacticAI spec: a^T LeakyReLU(W₁ h_i + W₂ h_j + U * edge_attr_ij)
-        att_input = F.leaky_relu(h_sum, negative_slope=self.negative_slope)  # [E, heads, out_features]
-        att_scores = (self.att * att_input).sum(dim=-1)  # [E, heads]
-        
+            edge_transformed = self.U(edge_attr)  # [E_total, heads*out_features]
+            edge_transformed = edge_transformed.view(1, edge_attr.size(0), heads, out_features)
+            h_sum = h_sum + edge_transformed
+
+        att_input = F.leaky_relu(h_sum, negative_slope=self.negative_slope)
+        att_scores = (self.att * att_input).sum(dim=-1)  # [B*V, E_total]
+
         return att_scores
     
     def _intra_view_gat(
@@ -734,38 +723,36 @@ class GATv2Layer4View(nn.Module):
         Returns:
             Aggregated features [B*V, N, heads, out_features]
         """
+        if scatter is None:
+            raise ImportError(
+                "torch_scatter is required for vectorized GAT aggregation. "
+                "Please install torch-scatter to use GATv2Network4View."
+            )
+
+        num_samples, num_nodes, num_heads, out_features = h.shape
         src, dst = edge_index[0], edge_index[1]
-        num_samples = h.size(0)  # B*V
-        num_nodes = h.size(1)  # N
-        num_heads = self.heads
-        out_features = h.size(3)
-        
-        # Normalize attention scores per destination node (like GATv2Layer)
-        # att_scores is [E, heads]
-        att_exp = att_scores.exp()  # [E, heads]
-        
-        # Initialize output
-        out = torch.zeros(num_samples, num_nodes, num_heads, out_features, device=h.device, dtype=h.dtype)
-        
-        # For each sample, aggregate separately (edge_index spans all graphs, need to filter per sample)
-        # But since edge_index is batched, we need to handle it correctly
-        # Actually, edge_index is for all graphs combined, so we need to process per sample
-        for sample in range(num_samples):
-            # Get attention weights for this sample (same for all samples since edge_index is batched)
-            # Normalize per destination node
-            att_exp_sum = torch.zeros(num_nodes, num_heads, device=att_scores.device, dtype=att_scores.dtype)
-            att_exp_sum.scatter_add_(0, dst.unsqueeze(-1).expand(-1, num_heads), att_exp)
-            att_weights = att_exp / (att_exp_sum[dst] + 1e-9)  # [E, heads]
-            
-            # Aggregate for each head
-            for head in range(num_heads):
-                src_features = h[sample, src, head, :]  # [E, out_features]
-                weighted = (src_features * att_weights[:, head:head + 1]).to(h.dtype)  # [E, out_features], ensure dtype match
-                
-                # Aggregate to destination nodes using scatter_add
-                # out[sample, :, head, :] is [N_total, out_features]
-                # dst is [E_total], weighted is [E_total, out_features]
-                out[sample, :, head, :].scatter_add_(0, dst.unsqueeze(-1).expand(-1, out_features), weighted)
+
+        src_index = src.unsqueeze(0).expand(num_samples, -1)  # [B*V, E]
+        dst_index = dst.unsqueeze(0).expand(num_samples, -1)  # [B*V, E]
+
+        gather_src = src_index.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, num_heads, out_features)
+        src_features = h.gather(1, gather_src)  # [B*V, E, heads, out_features]
+
+        att = att_scores.to(h.dtype)  # [B*V, E, heads]
+
+        index_expanded = dst_index.unsqueeze(-1).expand(-1, -1, num_heads)
+        att_max = scatter(att, index_expanded, dim=1, dim_size=num_nodes, reduce="max")
+        att = att - att_max.gather(1, index_expanded)
+
+        att_exp = torch.exp(att)
+        att_sum = scatter(att_exp, index_expanded, dim=1, dim_size=num_nodes, reduce="sum")
+        denom = att_sum.gather(1, index_expanded) + 1e-12
+        att_norm = att_exp / denom  # [B*V, E, heads]
+
+        weighted = src_features * att_norm.unsqueeze(-1)
+
+        scatter_index = index_expanded.unsqueeze(-1).expand(-1, -1, num_heads, out_features)
+        out = scatter(weighted, scatter_index, dim=1, dim_size=num_nodes, reduce="sum")
 
         return out
 

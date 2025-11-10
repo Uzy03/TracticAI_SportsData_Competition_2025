@@ -258,6 +258,32 @@ class CosineAnnealingScheduler:
         
         self.base_lr = optimizer.param_groups[0]['lr']
         self.current_epoch = 0
+        self.last_lr = self.base_lr
+
+    def _apply_lr(self, lr: float) -> None:
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+        self.last_lr = lr
+
+    def _compute_lr(self, epoch_idx: int) -> float:
+        if epoch_idx < self.warmup_epochs:
+            progress = (epoch_idx + 1) / max(1, self.warmup_epochs)
+            return self.warmup_start_lr + (self.base_lr - self.warmup_start_lr) * progress
+
+        epoch = epoch_idx - self.warmup_epochs
+        T = self.T_max - self.warmup_epochs
+        if T <= 0:
+            T = 1
+        return self.eta_min + (self.base_lr - self.eta_min) * (
+            1 + np.cos(np.pi * epoch / T)
+        ) / 2
+
+    def step_epoch(self, epoch_idx: int) -> float:
+        """Explicitly set learning rate for the given epoch index."""
+        lr = self._compute_lr(epoch_idx)
+        self._apply_lr(lr)
+        self.current_epoch = epoch_idx + 1
+        return lr
     
     def step(self) -> float:
         """Update learning rate.
@@ -265,23 +291,8 @@ class CosineAnnealingScheduler:
         Returns:
             Current learning rate
         """
-        if self.current_epoch < self.warmup_epochs:
-            # Warmup phase
-            lr = self.warmup_start_lr + (
-                self.base_lr - self.warmup_start_lr
-            ) * self.current_epoch / self.warmup_epochs
-        else:
-            # Cosine annealing phase
-            epoch = self.current_epoch - self.warmup_epochs
-            T = self.T_max - self.warmup_epochs
-            lr = self.eta_min + (self.base_lr - self.eta_min) * (
-                1 + np.cos(np.pi * epoch / T)
-            ) / 2
-        
-        # Update learning rate
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
-        
+        lr = self._compute_lr(self.current_epoch)
+        self._apply_lr(lr)
         self.current_epoch += 1
         return lr
     
@@ -302,6 +313,7 @@ class CosineAnnealingScheduler:
             'eta_min': self.eta_min,
             'warmup_epochs': self.warmup_epochs,
             'warmup_start_lr': self.warmup_start_lr,
+            'last_lr': self.last_lr,
         }
     
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
@@ -312,6 +324,7 @@ class CosineAnnealingScheduler:
         self.eta_min = state_dict['eta_min']
         self.warmup_epochs = state_dict['warmup_epochs']
         self.warmup_start_lr = state_dict['warmup_start_lr']
+        self.last_lr = state_dict.get('last_lr', self.base_lr)
 
 
 class EarlyStopping:

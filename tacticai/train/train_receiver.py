@@ -5,6 +5,7 @@ This script trains a GATv2 model to predict pass receivers in football matches.
 
 import argparse
 import logging
+import time
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -27,6 +28,8 @@ from tacticai.modules import (
 )
 from tacticai.modules.transforms import RandomFlipTransform
 
+
+EXPECTED_PREPROCESS_VERSION = "ck_improved_v1"
 
 AUDIT_LOGGER = logging.getLogger(__name__)
 
@@ -61,6 +64,22 @@ def load_config(config_path: str) -> Dict[str, Any]:
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
+
+
+def _assert_dataset_version(dataset: ReceiverDataset, split_name: str) -> None:
+    """Ensure dataset was generated with the expected preprocessing pipeline."""
+    versions = getattr(dataset, "preprocess_versions", set())
+    if not versions:
+        raise AssertionError(
+            f"{split_name} dataset is missing preprocess_version metadata. "
+            "Please regenerate the data with the latest preprocessing script."
+        )
+    if versions != {EXPECTED_PREPROCESS_VERSION}:
+        raise AssertionError(
+            f"{split_name} dataset preprocess_version mismatch: found {versions}, "
+            f"expected {{{EXPECTED_PREPROCESS_VERSION}}}. "
+            "Regenerate data via SoccerData/preprocess_ck_improved.py."
+        )
 
 
 def _reshape_to_batch(
@@ -374,6 +393,7 @@ def train_epoch(
     device: torch.device,
     metrics: Dict[str, Any],
     use_amp: bool = False,
+    profile: bool = False,
 ) -> Dict[str, float]:
     """Train model for one epoch."""
     model.train()
@@ -382,6 +402,9 @@ def train_epoch(
     stats["excluded_invalid"] = 0.0
     stats["invalid_team_mismatch"] = 0.0
     stats["invalid_target_not_in_cand"] = 0.0
+    profile_enabled = profile
+    profile_total = 0.0
+    profile_count = 0
     stats["invalid_team_mismatch"] = 0.0
     stats["invalid_target_not_in_cand"] = 0.0
     
@@ -400,6 +423,8 @@ def train_epoch(
     
     progress_bar = tqdm(dataloader, desc="Training")
     for batch_idx, (data, targets) in enumerate(progress_bar):
+        iter_start = time.perf_counter() if profile_enabled else None
+
         data = {k: v.to(device) for k, v in data.items()}
         targets = targets.to(device)
         
@@ -444,8 +469,7 @@ def train_epoch(
         )
         if cand_masks is None:
             cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
-        else:
-            cand_masks = cand_masks.to(dtype=torch.bool)
+        cand_masks = cand_masks.to(dtype=torch.bool)
 
         team_labels: Optional[torch.Tensor] = None
         ball_batched: Optional[torch.Tensor] = None
@@ -503,6 +527,7 @@ def train_epoch(
                 valid_indices.append(g)
 
             if not valid_indices:
+                # NOTE: Samples where target is not a valid attacking candidate are excluded from training.
                 continue
 
             valid_idx_tensor = torch.tensor(valid_indices, device=targets.device, dtype=torch.long)
@@ -577,12 +602,9 @@ def train_epoch(
         for logits_b, target_b in zip(graph_outputs, graph_targets):
             if logits_b.numel() == 0:
                 continue
-            if logits_b.ndim == 1:
-                lb = logits_b.unsqueeze(0)
-            elif logits_b.ndim == 2:
-                lb = logits_b
-            else:
+            if logits_b.ndim not in (1, 2):
                 raise ValueError(f"Unexpected logits ndim: {logits_b.ndim}")
+            lb = logits_b.unsqueeze(0) if logits_b.ndim == 1 else logits_b
 
             target_scalar = target_b.view(-1)[0]
             target_tensor = target_scalar.to(device=lb.device, dtype=torch.long)
@@ -605,7 +627,7 @@ def train_epoch(
             graphs_in_batch += 1
 
         if graphs_in_batch == 0:
-            continue
+                    continue
             
         loss = batch_loss_sum / graphs_in_batch
         num_graphs_total += graphs_in_batch
@@ -619,7 +641,14 @@ def train_epoch(
             loss.backward()
             optimizer.step()
         
-        progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
+        postfix = {"loss": f"{loss.item():.4f}"}
+        if profile_enabled and iter_start is not None:
+            iter_time = time.perf_counter() - iter_start
+            profile_total += iter_time
+            profile_count += 1
+            avg_ms = (profile_total / profile_count) * 1000.0
+            postfix["t_ms"] = f"{avg_ms:.1f}"
+        progress_bar.set_postfix(postfix)
     
     denom = max(1, num_graphs_total)
     epoch_metrics = {
@@ -716,8 +745,7 @@ def validate_epoch(
             )
             if cand_masks is None:
                 cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
-            else:
-                cand_masks = cand_masks.to(dtype=torch.bool)
+            cand_masks = cand_masks.to(dtype=torch.bool)
             team_labels: Optional[torch.Tensor] = None
             ball_batched: Optional[torch.Tensor] = None
             kicker_team: Optional[torch.Tensor] = None
@@ -748,14 +776,29 @@ def validate_epoch(
                     tgt = int(targets[g].item())
                     if tgt < 0 or tgt >= team_labels.size(1):
                         stats["excluded_invalid"] += 1
-                        continue
+                    continue
                     cm_g = cand_masks[g]
                     tgt_in_cand = bool(cm_g[tgt].item()) if tgt < cm_g.size(0) else False
                     tt = int(team_labels[g, tgt].item())
                     kt = int(kicker_team[g].item())
-                    if tt != kt or not tgt_in_cand:
+                    if tt != kt:
+                        stats["invalid_team_mismatch"] += 1
+                        if (int(stats["invalid_team_mismatch"]) % 50) == 1:
+                            AUDIT_LOGGER.warning(
+                                f"[AUDIT] team_mismatch: g={g}, tgt={tgt}, kicker_team={kt}, "
+                                f"target_team={tt}, cand_true_sum={int(cand_masks[g].sum().item())} (val-filter)"
+                            )
                         stats["excluded_invalid"] += 1
-                        continue
+                    continue
+                    if not tgt_in_cand:
+                        stats["invalid_target_not_in_cand"] += 1
+                        if (int(stats["invalid_target_not_in_cand"]) % 50) == 1:
+                            AUDIT_LOGGER.warning(
+                                f"[AUDIT] target_not_in_cand: g={g}, tgt={tgt}, kicker_team={kt}, "
+                                f"cand_true_sum={int(cand_masks[g].sum().item())} (val-filter)"
+                            )
+                        stats["excluded_invalid"] += 1
+                    continue
                     valid_indices.append(g)
 
                 if not valid_indices:
@@ -778,9 +821,6 @@ def validate_epoch(
             B, Nclass = outputs.shape
             assert cand_mask.shape == (B, Nclass), f"cand_mask shape mismatch: {cand_mask.shape} vs {(B, Nclass)}"
             assert target.shape[0] == B, f"target shape mismatch: {target.shape} vs ({B},)"
-
-            stats["invalid_team_mismatch"] = stats.get("invalid_team_mismatch", 0.0)
-            stats["invalid_target_not_in_cand"] = stats.get("invalid_target_not_in_cand", 0.0)
 
             graph_outputs: list[torch.Tensor] = []
             graph_targets: list[torch.Tensor] = []
@@ -841,13 +881,10 @@ def validate_epoch(
             for logits_b, target_b in zip(graph_outputs, graph_targets):
                 if logits_b.numel() == 0:
                     continue
-
-                if logits_b.ndim == 1:
-                    lb = logits_b.unsqueeze(0)
-                elif logits_b.ndim == 2:
-                    lb = logits_b
-                else:
+                    
+                if logits_b.ndim not in (1, 2):
                     raise ValueError(f"Unexpected logits ndim (val): {logits_b.ndim}")
+                lb = logits_b.unsqueeze(0) if logits_b.ndim == 1 else logits_b
 
                 target_scalar = target_b.view(-1)[0]
                 target_tensor = target_scalar.to(device=lb.device, dtype=torch.long)
@@ -932,6 +969,11 @@ def main():
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
     parser.add_argument("--debug_overfit", action="store_true", help="Debug overfit test")
     parser.add_argument("--resume", type=str, help="Path to checkpoint to resume from")
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Display moving-average batch time during training.",
+    )
     
     args = parser.parse_args()
     
@@ -970,6 +1012,8 @@ def main():
             config["data"]["val_path"],
             file_format=config["data"].get("format", "parquet")
         )
+        _assert_dataset_version(train_dataset, "train")
+        _assert_dataset_version(val_dataset, "val")
     
     # Create data loaders
     train_loader = create_dataloader(
@@ -1037,40 +1081,41 @@ def main():
     for epoch in range(start_epoch, config["train"]["epochs"]):
         logger.info(f"Epoch {epoch+1}/{config['train']['epochs']}")
         
+        if scheduler is not None and isinstance(scheduler, CosineAnnealingScheduler):
+            current_lr = scheduler.step_epoch(epoch - start_epoch)
+        else:
+            current_lr = optimizer.param_groups[0]['lr']
+        
         # Training
         train_metrics = train_epoch(
             model, train_loader, optimizer, criterion, device, metrics,
-            use_amp=config.get("train", {}).get("amp", False)
+            use_amp=config.get("train", {}).get("amp", False),
+            profile=args.profile,
         )
         
         # Validation
         val_metrics = validate_epoch(model, val_loader, criterion, device, metrics, logger)
         
         # Update learning rate
-        if scheduler is not None:
-            if isinstance(scheduler, CosineAnnealingScheduler):
-                current_lr = scheduler.step()
-            else:
-                scheduler.step()
-                current_lr = optimizer.param_groups[0]['lr']
-        else:
+        if scheduler is not None and not isinstance(scheduler, CosineAnnealingScheduler):
+            scheduler.step()
             current_lr = optimizer.param_groups[0]['lr']
         
         # Log metrics
         logger.info(
             f"Train - Loss: {train_metrics['loss']:.4f}, "
-            f"Acc: {train_metrics['accuracy']:.4f}, "
-            f"Top-1: {train_metrics['top1']:.4f}, "
-            f"Top-3: {train_metrics['top3']:.4f}, "
+                   f"Acc: {train_metrics['accuracy']:.4f}, "
+                   f"Top-1: {train_metrics['top1']:.4f}, "
+                   f"Top-3: {train_metrics['top3']:.4f}, "
             f"Top-5: {train_metrics['top5']:.4f} "
             f"(excluded_invalid={int(train_metrics.get('excluded_invalid', 0))})"
         )
         
         logger.info(
             f"Val   - Loss: {val_metrics['loss']:.4f}, "
-            f"Acc: {val_metrics['accuracy']:.4f}, "
-            f"Top-1: {val_metrics['top1']:.4f}, "
-            f"Top-3: {val_metrics['top3']:.4f}, "
+                   f"Acc: {val_metrics['accuracy']:.4f}, "
+                   f"Top-1: {val_metrics['top1']:.4f}, "
+                   f"Top-3: {val_metrics['top3']:.4f}, "
             f"Top-5: {val_metrics['top5']:.4f} "
             f"(excluded_invalid={int(val_metrics.get('excluded_invalid', 0))})"
         )

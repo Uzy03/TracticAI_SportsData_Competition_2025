@@ -48,6 +48,10 @@ pip install -e ".[dev]"
 # 独自データの前処理
 python scripts/preprocess.py --input data/raw --output data/processed
 
+# CK (Corner Kick) 受け手データを最新仕様で再生成
+rm -rf data/processed_ck
+python SoccerData/preprocess_ck_improved.py
+
 # テスト用ダミーデータの作成
 python scripts/preprocess.py --input data/raw --output data/processed --dummy
 ```

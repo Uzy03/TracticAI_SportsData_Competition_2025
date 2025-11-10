@@ -120,7 +120,11 @@ class ReceiverDataset(TacticAIDataset):
             schema = create_schema_mapping("receiver")
         
         self.file_format = file_format
+        self.preprocess_versions: set[str] = set()
         super().__init__(data_path, schema, transform, target_transform)
+        self.preprocess_version: Optional[str] = (
+            next(iter(self.preprocess_versions)) if len(self.preprocess_versions) == 1 else None
+        )
     
     def _load_data(self) -> List[Dict[str, Any]]:
         """Load receiver prediction data.
@@ -157,11 +161,20 @@ class ReceiverDataset(TacticAIDataset):
         elif self.file_format == "pickle":
             with open(file_path, 'rb') as f:
                 data = pickle.load(f)
-                # If it's already a list, return it; otherwise convert to list
-                if isinstance(data, list):
-                    return data
+                version = None
+                samples: List[Dict[str, Any]]
+                if isinstance(data, dict) and "samples" in data:
+                    version = data.get("preprocess_version")
+                    samples = data.get("samples", [])
+                elif isinstance(data, list):
+                    samples = data
                 else:
-                    return [data]
+                    samples = [data]
+                if version is not None:
+                    self.preprocess_versions.add(version)
+                # Drop invalid samples if present
+                samples = [s for s in samples if not isinstance(s, dict) or s.get("valid", True)]
+                return samples
         else:
             raise ValueError(f"Unsupported file format: {self.file_format}")
     

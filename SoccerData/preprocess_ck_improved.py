@@ -8,6 +8,8 @@ import pickle
 from tqdm import tqdm
 import json
 
+PREPROCESS_VERSION = "ck_improved_v1"
+
 
 def load_match_data(match_dir: Path):
     play_df = pd.read_csv(match_dir / "play.csv", encoding='utf-8')
@@ -449,10 +451,19 @@ def process_all_matches(data_dir, output_dir, task="receiver", split_ratio=(0.7,
         split_dir = output_dir / f"{task}_{split_name}"
         split_dir.mkdir(parents=True, exist_ok=True)
         
+        payload = {
+            "preprocess_version": PREPROCESS_VERSION,
+            "samples": samples,
+        }
         with open(split_dir / "data.pickle", 'wb') as f:
-            pickle.dump(samples, f)
+            pickle.dump(payload, f)
         
-        metadata = {'task': task, 'split': split_name, 'num_samples': len(samples)}
+        metadata = {
+            'task': task,
+            'split': split_name,
+            'num_samples': len(samples),
+            'preprocess_version': PREPROCESS_VERSION,
+        }
         with open(split_dir / "metadata.json", 'w') as f:
             json.dump(metadata, f, indent=2)
         
