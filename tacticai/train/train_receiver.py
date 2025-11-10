@@ -779,9 +779,13 @@ def validate_epoch(
                 outputs = outputs.index_select(0, valid_idx_tensor)
                 targets = targets.index_select(0, valid_idx_tensor)
                 cand_masks = cand_masks.index_select(0, valid_idx_tensor)
-                team_labels = team_labels.index_select(0, valid_idx_tensor)
-                kicker_team = kicker_team.index_select(0, valid_idx_tensor)
- 
+                team_labels = torch.stack(team_rows, dim=0).index_select(0, valid_idx_tensor)
+                kicker_team = torch.tensor(kicker_team_vals, device=outputs.device, dtype=team_labels.dtype).index_select(0, valid_idx_tensor)
+                batch_size = outputs.size(0)
+                nodes_per_graph = outputs.size(1)
+            else:
+                cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
+
             masked_outputs = mask_logits(outputs, cand_masks)
 
             # === build per-graph outputs/targets safely (validation) ===
