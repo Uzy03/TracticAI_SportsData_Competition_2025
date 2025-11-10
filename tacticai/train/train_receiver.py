@@ -495,6 +495,12 @@ def train_epoch(
                 kicker_idx = kicker_idx.clamp_(0, nodes_per_graph - 1)
             kicker_team = team_labels.gather(1, kicker_idx.unsqueeze(1)).squeeze(1)
 
+            # Enforce candidate mask alignment with kicker team and exclude kicker node
+            same_team_mask = team_labels == kicker_team.unsqueeze(1)
+            cand_masks = cand_masks & same_team_mask
+            batch_indices = torch.arange(batch_size, device=outputs.device)
+            cand_masks[batch_indices, kicker_idx] = False
+
             B_filter = targets.shape[0]
             valid_indices: list[int] = []
             for g in range(B_filter):
@@ -522,8 +528,12 @@ def train_epoch(
                             f"[AUDIT] target_not_in_cand: g={g}, tgt={tgt}, kicker_team={kt}, "
                             f"cand_true_sum={int(cand_masks[g].sum().item())}"
                         )
-                    stats["excluded_invalid"] += 1
-                    continue
+                    if 0 <= tgt < cm_g.size(0):
+                        cand_masks[g, tgt] = True
+                        cm_g = cand_masks[g]
+                    else:
+                        stats["excluded_invalid"] += 1
+                        continue
                 valid_indices.append(g)
 
             if not valid_indices:
@@ -1078,13 +1088,12 @@ def main():
         best_val_top3 = checkpoint.get("metrics", {}).get("top3", 0.0)
         logger.info(f"Resumed from epoch {start_epoch}")
     
-    for epoch in range(start_epoch, config["train"]["epochs"]):
+    # NOTE: debug: limit epochs to 1, restore Config["train"]["epochs"] when debugging finishes
+    for epoch in range(start_epoch, min(start_epoch + 1, config["train"]["epochs"])):
         logger.info(f"Epoch {epoch+1}/{config['train']['epochs']}")
         
-        if scheduler is not None and isinstance(scheduler, CosineAnnealingScheduler):
-            current_lr = scheduler.step_epoch(epoch - start_epoch)
-        else:
-            current_lr = optimizer.param_groups[0]['lr']
+        # Learning rate will be updated after train/val via scheduler step
+        current_lr = optimizer.param_groups[0]['lr']
         
         # Training
         train_metrics = train_epoch(
@@ -1097,8 +1106,13 @@ def main():
         val_metrics = validate_epoch(model, val_loader, criterion, device, metrics, logger)
         
         # Update learning rate
-        if scheduler is not None and not isinstance(scheduler, CosineAnnealingScheduler):
-            scheduler.step()
+        if scheduler is not None:
+            if isinstance(scheduler, CosineAnnealingScheduler):
+                current_lr = scheduler.step_epoch(epoch - start_epoch)
+            else:
+                scheduler.step()
+                current_lr = optimizer.param_groups[0]['lr']
+        else:
             current_lr = optimizer.param_groups[0]['lr']
         
         # Log metrics

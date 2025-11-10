@@ -10,10 +10,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-try:
-    from torch_scatter import scatter
-except ImportError as exc:  # pragma: no cover - torch_scatter optional dependency
-    scatter = None
 from ..modules.edge_features import compute_edge_features, EdgeFeatureEncoder
 from ..modules.view_ops import D2_VIEWS
 
@@ -504,27 +500,14 @@ class GATv2Layer4View(nn.Module):
         device = h1.device
         num_samples = B * V
 
-        if scatter is None:
-            raise ImportError(
-                "torch_scatter is required for vectorized GAT aggregation. "
-                "Please install torch-scatter to use GATv2Network4View."
-            )
-
-        # Map local node indices to global (batched) indices once
-        graph_idx = torch.div(
-            torch.arange(num_samples, device=device), V, rounding_mode='floor'
-        )  # [B*V]
-        local_nodes = torch.arange(N_per_graph, device=device)
-        global_indices = graph_idx.unsqueeze(1) * N_per_graph + local_nodes.unsqueeze(0)  # [B*V, N_per_graph]
-
-        index_expanded = global_indices.unsqueeze(-1).unsqueeze(-1).expand(
-            num_samples, N_per_graph, self.heads, self.out_features
-        )
-
         h1_full = torch.zeros(num_samples, N_total, self.heads, self.out_features, device=device, dtype=h1.dtype)
         h2_full = torch.zeros(num_samples, N_total, self.heads, self.out_features, device=device, dtype=h2.dtype)
-        h1_full.scatter_(1, index_expanded, h1)
-        h2_full.scatter_(1, index_expanded, h2)
+        for sample in range(num_samples):
+            graph_idx = sample // V
+            start = graph_idx * N_per_graph
+            end = start + N_per_graph
+            h1_full[sample, start:end] = h1[sample]
+            h2_full[sample, start:end] = h2[sample]
         
         # Self-loops are already included in edge_index (TacticAI spec: 22×22 complete graph)
         # Do not add self-loops again if they're already present
@@ -542,8 +525,13 @@ class GATv2Layer4View(nn.Module):
         # Apply attention and aggregate (use h1_full for aggregation)
         out_full = self._aggregate(h1_full, edge_index, att_scores)  # [B*V, N_total, heads, out_features]
         
-        # Extract per-graph outputs (fully vectorized)
-        out = out_full.gather(1, index_expanded)  # [B*V, N_per_graph, heads, out_features]
+        # Extract per-graph outputs (loop - small B*V)
+        out = torch.zeros(num_samples, N_per_graph, self.heads, self.out_features, device=device, dtype=h1.dtype)
+        for sample in range(num_samples):
+            graph_idx = sample // V
+            start = graph_idx * N_per_graph
+            end = start + N_per_graph
+            out[sample] = out_full[sample, start:end]
         
         # Concatenate or average heads
         if self.concat:
@@ -723,36 +711,22 @@ class GATv2Layer4View(nn.Module):
         Returns:
             Aggregated features [B*V, N, heads, out_features]
         """
-        if scatter is None:
-            raise ImportError(
-                "torch_scatter is required for vectorized GAT aggregation. "
-                "Please install torch-scatter to use GATv2Network4View."
-            )
-
         num_samples, num_nodes, num_heads, out_features = h.shape
         src, dst = edge_index[0], edge_index[1]
-
-        src_index = src.unsqueeze(0).expand(num_samples, -1)  # [B*V, E]
-        dst_index = dst.unsqueeze(0).expand(num_samples, -1)  # [B*V, E]
-
-        gather_src = src_index.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, num_heads, out_features)
-        src_features = h.gather(1, gather_src)  # [B*V, E, heads, out_features]
-
         att = att_scores.to(h.dtype)  # [B*V, E, heads]
 
-        index_expanded = dst_index.unsqueeze(-1).expand(-1, -1, num_heads)
-        att_max = scatter(att, index_expanded, dim=1, dim_size=num_nodes, reduce="max")
-        att = att - att_max.gather(1, index_expanded)
+        out = torch.zeros_like(h)
+        for sample in range(num_samples):
+            att_sample = att[sample].exp()  # [E, heads]
+            att_sum = torch.zeros(num_nodes, num_heads, device=h.device, dtype=h.dtype)
+            att_sum.scatter_add_(0, dst.unsqueeze(-1).expand(-1, num_heads), att_sample)
+            denom = att_sum[dst] + 1e-9
+            att_weights = att_sample / denom  # [E, heads]
 
-        att_exp = torch.exp(att)
-        att_sum = scatter(att_exp, index_expanded, dim=1, dim_size=num_nodes, reduce="sum")
-        denom = att_sum.gather(1, index_expanded) + 1e-12
-        att_norm = att_exp / denom  # [B*V, E, heads]
-
-        weighted = src_features * att_norm.unsqueeze(-1)
-
-        scatter_index = index_expanded.unsqueeze(-1).expand(-1, -1, num_heads, out_features)
-        out = scatter(weighted, scatter_index, dim=1, dim_size=num_nodes, reduce="sum")
+            for head in range(num_heads):
+                src_features = h[sample, src, head, :]
+                weighted = (src_features * att_weights[:, head:head + 1]).to(h.dtype)
+                out[sample, :, head, :].scatter_add_(0, dst.unsqueeze(-1).expand(-1, out_features), weighted)
 
         return out
 
