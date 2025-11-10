@@ -1,0 +1,6 @@
+{
+  "task": "receiver",
+  "split": "val",
+  "num_samples": 60,
+  "preprocess_version": "ck_improved_v1"
+}
