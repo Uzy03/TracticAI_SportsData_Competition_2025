@@ -462,6 +462,13 @@ def train_epoch(
         assert cand_mask.shape == (B, Nclass), f"cand_mask shape mismatch: {cand_mask.shape} vs {(B, Nclass)}"
         assert target.shape[0] == B, f"target shape mismatch: {target.shape} vs ({B},)"
 
+        team_tensor = data.get("team")
+        ball_tensor = data.get("ball")
+        team_batched = ball_batched = None
+        if team_tensor is not None and ball_tensor is not None:
+            team_batched = _reshape_to_batch(team_tensor, B, Nclass).to(device=outputs.device, dtype=torch.long)
+            ball_batched = _reshape_to_batch(ball_tensor, B, Nclass).to(device=outputs.device)
+
         graph_outputs: list[torch.Tensor] = []
         graph_targets: list[torch.Tensor] = []
 
@@ -476,7 +483,24 @@ def train_epoch(
                 cand_target_idx = int((cand_indices == target_global).nonzero(as_tuple=True)[0].item())
             else:
                 cand_target_idx = 0
-                print(f"[WARN] target {target_global} not in candidates for graph {b}")
+                target_team_repr = "NA"
+                kicker_team_repr = "NA"
+                if team_batched is not None and 0 <= target_global < team_batched.size(1):
+                    target_team_repr = int(team_batched[b, target_global].item())
+                if team_batched is not None and ball_batched is not None:
+                    ball_row = ball_batched[b]
+                    kicker_candidates = torch.where(ball_row > 0.5)[0]
+                    if kicker_candidates.numel() > 0:
+                        kicker_idx = int(kicker_candidates[0].item())
+                    else:
+                        kicker_idx = int(torch.argmax(ball_row).item())
+                    kicker_idx = max(0, min(kicker_idx, Nclass - 1))
+                    kicker_team_repr = int(team_batched[b, kicker_idx].item())
+                print(
+                    f"[WARN] target {target_global} not in candidates for graph {b} "
+                    f"(target_team={target_team_repr}, kicker_team={kicker_team_repr}, "
+                    f"cand_true_sum={int(cm.sum().item())})"
+                )
 
             graph_outputs.append(logits_b.unsqueeze(0))
             graph_targets.append(torch.tensor([cand_target_idx], device=outputs.device))
@@ -631,6 +655,13 @@ def validate_epoch(
             assert cand_mask.shape == (B, Nclass), f"cand_mask shape mismatch: {cand_mask.shape} vs {(B, Nclass)}"
             assert target.shape[0] == B, f"target shape mismatch: {target.shape} vs ({B},)"
 
+            team_tensor = data.get("team")
+            ball_tensor = data.get("ball")
+            team_batched = ball_batched = None
+            if team_tensor is not None and ball_tensor is not None:
+                team_batched = _reshape_to_batch(team_tensor, B, Nclass).to(device=outputs.device, dtype=torch.long)
+                ball_batched = _reshape_to_batch(ball_tensor, B, Nclass).to(device=outputs.device)
+
             graph_outputs: list[torch.Tensor] = []
             graph_targets: list[torch.Tensor] = []
 
@@ -645,7 +676,24 @@ def validate_epoch(
                     cand_target_idx = int((cand_indices == target_global).nonzero(as_tuple=True)[0].item())
                 else:
                     cand_target_idx = 0
-                    print(f"[WARN] target {target_global} not in candidates for graph {b} (val)")
+                    target_team_repr = "NA"
+                    kicker_team_repr = "NA"
+                    if team_batched is not None and 0 <= target_global < team_batched.size(1):
+                        target_team_repr = int(team_batched[b, target_global].item())
+                    if team_batched is not None and ball_batched is not None:
+                        ball_row = ball_batched[b]
+                        kicker_candidates = torch.where(ball_row > 0.5)[0]
+                        if kicker_candidates.numel() > 0:
+                            kicker_idx = int(kicker_candidates[0].item())
+                        else:
+                            kicker_idx = int(torch.argmax(ball_row).item())
+                        kicker_idx = max(0, min(kicker_idx, Nclass - 1))
+                        kicker_team_repr = int(team_batched[b, kicker_idx].item())
+                    print(
+                        f"[WARN] target {target_global} not in candidates for graph {b} (val) "
+                        f"(target_team={target_team_repr}, kicker_team={kicker_team_repr}, "
+                        f"cand_true_sum={int(cm.sum().item())})"
+                    )
 
                 graph_outputs.append(logits_b.unsqueeze(0))
                 graph_targets.append(torch.tensor([cand_target_idx], device=outputs.device))
