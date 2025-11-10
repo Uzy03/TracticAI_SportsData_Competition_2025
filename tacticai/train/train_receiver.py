@@ -8,7 +8,7 @@ import logging
 import time
 import yaml
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from collections import defaultdict
 import torch
 import torch.nn as nn
@@ -96,70 +96,40 @@ def _reshape_to_batch(
 
 
 def build_candidate_mask(
-    team: Optional[torch.Tensor],
-    ball: Optional[torch.Tensor],
-    mask: Optional[torch.Tensor],
-    x: Optional[torch.Tensor],
-    batch_size: int,
-    num_nodes_per_graph: int,
-    device: torch.device,
-) -> Optional[torch.Tensor]:
-    """Construct candidate mask following TacticAI spec."""
-    if team is None or ball is None:
-        return None
+    player_team: torch.Tensor,
+    kicker_team: int,
+    is_ball_owner: torch.Tensor,
+    valid_mask: torch.Tensor,
+    target_idx: int,
+) -> Tuple[Optional[torch.Tensor], Optional[str]]:
+    """Construct a per-graph candidate mask with guaranteed ground-truth inclusion.
 
-    team_batched = _reshape_to_batch(team, batch_size, num_nodes_per_graph).to(device=device)
-    ball_batched = _reshape_to_batch(ball, batch_size, num_nodes_per_graph).to(device=device)
-    mask_batched = (
-        _reshape_to_batch(mask, batch_size, num_nodes_per_graph).to(device=device)
-        if mask is not None
-        else None
-    )
+    Returns a tuple of (mask, status) where status is one of:
+        - None: mask ready, target already in mask
+        - "forced": target was missing but safely injected
+        - "target_out_of_range": target index invalid
+        - "empty": resulting candidate set is empty even after forcing target
+    """
+    device = player_team.device
+    player_team = player_team.to(device=device, dtype=torch.long)
+    is_ball_owner = is_ball_owner.to(device=device, dtype=torch.bool)
+    valid_mask = valid_mask.to(device=device, dtype=torch.bool)
 
-    x_batched = None
-    if x is not None:
-        x_batched = x.reshape(batch_size, num_nodes_per_graph, -1).to(device=device)
+    N = player_team.numel()
+    if target_idx < 0 or target_idx >= N:
+        return None, "target_out_of_range"
 
-    cand_mask = torch.zeros(batch_size, num_nodes_per_graph, dtype=torch.bool, device=device)
+    cand = (player_team == kicker_team)
+    cand = cand & (~is_ball_owner)
+    cand = cand & valid_mask
+    target_initial = bool(cand[target_idx].item())
+    cand[target_idx] = True
 
-    for b in range(batch_size):
-        team_row = team_batched[b]
-        ball_row = ball_batched[b]
+    if cand.sum().item() < 1:
+        return None, "empty"
 
-        valid_row = torch.ones(num_nodes_per_graph, dtype=torch.bool, device=device)
-        if mask_batched is not None:
-            valid_row &= mask_batched[b].to(dtype=torch.bool)
-        if x_batched is not None and x_batched.size(-1) >= 2:
-            pos_row = x_batched[b, :, :2]
-            valid_row &= torch.isfinite(pos_row).all(dim=-1)
-
-        kicker_candidates = torch.where(ball_row > 0.5)[0]
-        if kicker_candidates.numel() > 0:
-            kicker_idx = int(kicker_candidates[0].item())
-        else:
-            kicker_idx = int(torch.argmax(ball_row).item())
-
-        kicker_idx = max(0, min(kicker_idx, num_nodes_per_graph - 1))
-
-        team_row_int = team_row.to(dtype=torch.long)
-        kicker_team_val = int(team_row_int[kicker_idx].item()) if num_nodes_per_graph > 0 else 0
-        team_mask_row = (team_row_int == kicker_team_val)
-
-        candidate_row = (team_mask_row & valid_row).to(dtype=torch.bool)
-        if num_nodes_per_graph > 0:
-            candidate_row[kicker_idx] = False
-
-        if candidate_row.sum().item() == 0:
-            fallback_row = valid_row.clone()
-            if num_nodes_per_graph > 0:
-                fallback_row[kicker_idx] = False
-            if fallback_row.sum().item() == 0:
-                fallback_row = valid_row
-            candidate_row = fallback_row.to(dtype=torch.bool)
-
-        cand_mask[b] = candidate_row
-
-    return cand_mask
+    cand = cand.to(device=device, dtype=torch.bool)
+    return cand, (None if target_initial else "forced")
 
 
 class ReceiverModel(nn.Module):
@@ -270,20 +240,11 @@ class ReceiverModel(nn.Module):
             mask_expanded = mask_batched.unsqueeze(-1).expand_as(H)  # [B, N_per_graph, D]
             H = H * mask_expanded.float()
         
-        cand_mask = build_candidate_mask(
-            team=team,
-            ball=ball,
-            mask=mask,
-            x=x,
-            batch_size=B,
-            num_nodes_per_graph=num_nodes_per_graph,
-            device=x.device,
-        )
+        cand_mask = None  # Candidate masks are built downstream during training/validation
         
         # Get logits for all nodes (TacticAI spec: [B, N] format)
         # TacticAI spec: Each node outputs 1 scalar logit (no node-mean/sum aggregation)
         # ReceiverHead applies Linear(d→1) point-wise to each node
-        # Pass cand_mask for debug output (only first batch)
         logits = self.head(H, cand_mask=cand_mask)  # [B, N_per_graph]
         
         if cand_mask is not None:
@@ -402,11 +363,10 @@ def train_epoch(
     stats["excluded_invalid"] = 0.0
     stats["invalid_team_mismatch"] = 0.0
     stats["invalid_target_not_in_cand"] = 0.0
+    stats["excluded_invalid_filter"] = 0.0
     profile_enabled = profile
     profile_total = 0.0
     profile_count = 0
-    stats["invalid_team_mismatch"] = 0.0
-    stats["invalid_target_not_in_cand"] = 0.0
     
     total_loss = 0.0
     num_graphs_total = 0
@@ -458,92 +418,89 @@ def train_epoch(
         nodes_per_graph = outputs.numel() // max(1, batch_size)
         outputs = outputs.view(batch_size, nodes_per_graph)
 
-        cand_masks = build_candidate_mask(
-            team=data.get("team"),
-            ball=data.get("ball"),
-            mask=data.get("mask"),
-            x=data.get("x"),
-            batch_size=batch_size,
-            num_nodes_per_graph=nodes_per_graph,
-            device=outputs.device,
-        )
-        if cand_masks is None:
-            cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
-        cand_masks = cand_masks.to(dtype=torch.bool)
-
-        team_labels: Optional[torch.Tensor] = None
-        ball_batched: Optional[torch.Tensor] = None
-        kicker_team: Optional[torch.Tensor] = None
-
         team_tensor = data.get("team")
         ball_tensor = data.get("ball")
+        mask_tensor = data.get("mask")
+
+        team_labels = None
+        kicker_team = None
+
         if team_tensor is not None and ball_tensor is not None:
-            team_labels = _reshape_to_batch(team_tensor, batch_size, nodes_per_graph).to(
+            team_batched = _reshape_to_batch(team_tensor, batch_size, nodes_per_graph).to(
                 device=outputs.device, dtype=torch.long
             )
             ball_batched = _reshape_to_batch(ball_tensor, batch_size, nodes_per_graph).to(device=outputs.device)
-
-            has_ball_mask = ball_batched > 0.5
-            default_kicker_idx = torch.argmax(ball_batched, dim=1)
-            first_ball_idx = torch.argmax(has_ball_mask.float(), dim=1)
-            kicker_idx = torch.where(
-                has_ball_mask.any(dim=1),
-                first_ball_idx,
-                default_kicker_idx,
+            mask_batched = (
+                _reshape_to_batch(mask_tensor, batch_size, nodes_per_graph).to(device=outputs.device, dtype=torch.bool)
+                if mask_tensor is not None
+                else None
             )
-            if nodes_per_graph > 0:
-                kicker_idx = kicker_idx.clamp_(0, nodes_per_graph - 1)
-            kicker_team = team_labels.gather(1, kicker_idx.unsqueeze(1)).squeeze(1)
 
-            # Enforce candidate mask alignment with kicker team and exclude kicker node
-            same_team_mask = team_labels == kicker_team.unsqueeze(1)
-            cand_masks = cand_masks & same_team_mask
-            batch_indices = torch.arange(batch_size, device=outputs.device)
-            cand_masks[batch_indices, kicker_idx] = False
-
-            B_filter = targets.shape[0]
+            cand_masks_list: list[torch.Tensor] = []
+            team_rows: list[torch.Tensor] = []
+            kicker_team_vals: list[int] = []
             valid_indices: list[int] = []
-            for g in range(B_filter):
-                tgt = int(targets[g].item())
-                if tgt < 0 or tgt >= team_labels.size(1):
-                    stats["excluded_invalid"] += 1
-                    continue
-                cm_g = cand_masks[g]
-                tgt_in_cand = bool(cm_g[tgt].item()) if tgt < cm_g.size(0) else False
-                tt = int(team_labels[g, tgt].item())
-                kt = int(kicker_team[g].item())
-                if tt != kt:
-                    stats["invalid_team_mismatch"] += 1
-                    if (int(stats["invalid_team_mismatch"]) % 50) == 1:
-                        AUDIT_LOGGER.warning(
-                            f"[AUDIT] team_mismatch: g={g}, tgt={tgt}, kicker_team={kt}, "
-                            f"target_team={tt}, cand_true_sum={int(cand_masks[g].sum().item())}"
-                        )
-                    stats["excluded_invalid"] += 1
-                    continue
-                if not tgt_in_cand:
-                    stats["invalid_target_not_in_cand"] += 1
-                    if (int(stats["invalid_target_not_in_cand"]) % 50) == 1:
-                        AUDIT_LOGGER.warning(
-                            f"[AUDIT] target_not_in_cand: g={g}, tgt={tgt}, kicker_team={kt}, "
-                            f"cand_true_sum={int(cand_masks[g].sum().item())}"
-                        )
-                    if 0 <= tgt < cm_g.size(0):
-                        cand_masks[g, tgt] = True
-                valid_indices.append(g)
 
-            if not valid_indices:
-                # NOTE: Samples where target is not a valid attacking candidate are excluded from training.
+            for g in range(batch_size):
+                if g >= targets.size(0):
+                    stats["excluded_invalid_filter"] += 1
+                    continue
+
+                team_row = team_batched[g]
+                ball_row = ball_batched[g]
+                valid_row = (
+                    mask_batched[g]
+                    if mask_batched is not None
+                    else torch.ones(nodes_per_graph, dtype=torch.bool, device=outputs.device)
+                )
+                ball_owner_mask = (ball_row > 0.5).to(torch.bool)
+
+                kicker_candidates = torch.where(ball_row > 0.5)[0]
+                kicker_idx = (
+                    int(kicker_candidates[0].item())
+                    if kicker_candidates.numel() > 0
+                    else int(torch.argmax(ball_row).item())
+                )
+                if nodes_per_graph > 0:
+                    kicker_idx = max(0, min(kicker_idx, nodes_per_graph - 1))
+                kicker_team_val = int(team_row[kicker_idx].item())
+
+                target_idx = int(targets[g].item())
+                if 0 <= target_idx < team_row.size(0):
+                    if int(team_row[target_idx].item()) != kicker_team_val:
+                        stats["invalid_team_mismatch"] += 1
+
+                cand_mask_single, status = build_candidate_mask(
+                    player_team=team_row,
+                    kicker_team=kicker_team_val,
+                    is_ball_owner=ball_owner_mask,
+                    valid_mask=valid_row,
+                    target_idx=target_idx,
+                )
+                if cand_mask_single is None:
+                    if status in ("target_out_of_range", "empty"):
+                        stats["invalid_target_not_in_cand"] += 1
+                    stats["excluded_invalid_filter"] += 1
+                    continue
+
+                valid_indices.append(g)
+                cand_masks_list.append(cand_mask_single)
+                team_rows.append(team_row)
+                kicker_team_vals.append(kicker_team_val)
+
+            if not cand_masks_list:
                 continue
 
-            valid_idx_tensor = torch.tensor(valid_indices, device=targets.device, dtype=torch.long)
+            cand_masks = torch.stack(cand_masks_list, dim=0).to(dtype=torch.bool)
+            valid_idx_tensor = torch.tensor(valid_indices, device=outputs.device, dtype=torch.long)
             outputs = outputs.index_select(0, valid_idx_tensor)
             targets = targets.index_select(0, valid_idx_tensor)
-            cand_masks = cand_masks.index_select(0, valid_idx_tensor)
-            team_labels = team_labels.index_select(0, valid_idx_tensor)
-            kicker_team = kicker_team.index_select(0, valid_idx_tensor)
-            if ball_batched is not None:
-                ball_batched = ball_batched.index_select(0, valid_idx_tensor)
+            team_labels = torch.stack(team_rows, dim=0)
+            kicker_team = torch.tensor(kicker_team_vals, device=outputs.device, dtype=team_labels.dtype)
+            batch_size = outputs.size(0)
+            nodes_per_graph = outputs.size(1)
+        else:
+            cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
 
         masked_outputs = mask_logits(outputs, cand_masks)
 
@@ -666,13 +623,14 @@ def train_epoch(
         "excluded_invalid": float(stats["excluded_invalid"]),
         "invalid_team_mismatch": float(stats["invalid_team_mismatch"]),
         "invalid_target_not_in_cand": float(stats["invalid_target_not_in_cand"]),
+        "excluded_invalid_filter": float(stats["excluded_invalid_filter"]),
     }
     if hasattr(torch.utils, "tensorboard"):
         pass
     print(
         f"[Train] excluded_not_attacking={excluded_not_attacking} "
         f"excluded_ball_owner={excluded_ball_owner} excluded_invalid={excluded_invalid} "
-        f"excluded_invalid_filter={int(stats['excluded_invalid'])} "
+        f"excluded_invalid_filter={int(stats['excluded_invalid_filter'])} "
         f"avg_cand={sum(cand_counts)/len(cand_counts) if cand_counts else 0:.2f}"
     )
     
@@ -703,6 +661,9 @@ def validate_epoch(
     
     stats = defaultdict(float)
     stats["excluded_invalid"] = 0.0
+    stats["invalid_team_mismatch"] = 0.0
+    stats["invalid_target_not_in_cand"] = 0.0
+    stats["excluded_invalid_filter"] = 0.0
     
     total_loss = 0.0
     num_graphs_total = 0
@@ -740,96 +701,87 @@ def validate_epoch(
             nodes_per_graph = outputs.numel() // max(1, batch_size)
             outputs = outputs.view(batch_size, nodes_per_graph)
 
-            cand_masks = build_candidate_mask(
-                team=data.get("team"),
-                ball=data.get("ball"),
-                mask=data.get("mask"),
-                x=data.get("x"),
-                batch_size=batch_size,
-                num_nodes_per_graph=nodes_per_graph,
-                device=outputs.device,
-            )
-            if cand_masks is None:
-                cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
-            cand_masks = cand_masks.to(dtype=torch.bool)
-            team_labels: Optional[torch.Tensor] = None
-            ball_batched: Optional[torch.Tensor] = None
-            kicker_team: Optional[torch.Tensor] = None
-
             team_tensor = data.get("team")
             ball_tensor = data.get("ball")
+            mask_tensor = data.get("mask")
+
+            team_labels = None
+            kicker_team = None
+
             if team_tensor is not None and ball_tensor is not None:
-                team_labels = _reshape_to_batch(team_tensor, batch_size, nodes_per_graph).to(
+                team_batched = _reshape_to_batch(team_tensor, batch_size, nodes_per_graph).to(
                     device=outputs.device, dtype=torch.long
                 )
                 ball_batched = _reshape_to_batch(ball_tensor, batch_size, nodes_per_graph).to(device=outputs.device)
-
-                has_ball_mask = ball_batched > 0.5
-                default_kicker_idx = torch.argmax(ball_batched, dim=1)
-                first_ball_idx = torch.argmax(has_ball_mask.float(), dim=1)
-                kicker_idx = torch.where(
-                    has_ball_mask.any(dim=1),
-                    first_ball_idx,
-                    default_kicker_idx,
+                mask_batched = (
+                    _reshape_to_batch(mask_tensor, batch_size, nodes_per_graph).to(device=outputs.device, dtype=torch.bool)
+                    if mask_tensor is not None
+                    else None
                 )
-                if nodes_per_graph > 0:
-                    kicker_idx = kicker_idx.clamp_(0, nodes_per_graph - 1)
-                kicker_team = team_labels.gather(1, kicker_idx.unsqueeze(1)).squeeze(1)
 
-                same_team_mask = team_labels == kicker_team.unsqueeze(1)
-                cand_masks = cand_masks & same_team_mask
-                batch_indices = torch.arange(batch_size, device=outputs.device)
-                cand_masks[batch_indices, kicker_idx] = False
-
-                B_filter = targets.shape[0]
+                cand_masks_list: list[torch.Tensor] = []
+                team_rows: list[torch.Tensor] = []
+                kicker_team_vals: list[int] = []
                 valid_indices: list[int] = []
-                for g in range(B_filter):
-                    tgt = int(targets[g].item())
-                    if tgt < 0 or tgt >= team_labels.size(1):
-                        stats["excluded_invalid"] += 1
-                    continue
-                    cm_g = cand_masks[g]
-                    if tgt >= cm_g.size(0):
-                        stats["excluded_invalid"] += 1
-                    continue
-                    tgt_in_cand = bool(cm_g[tgt].item())
-                    tt = int(team_labels[g, tgt].item())
-                    kt = int(kicker_team[g].item())
-                    if tt != kt:
-                        stats["invalid_team_mismatch"] += 1
-                        if (int(stats["invalid_team_mismatch"]) % 50) == 1:
-                            AUDIT_LOGGER.warning(
-                                f"[AUDIT] team_mismatch: g={g}, tgt={tgt}, kicker_team={kt}, "
-                                f"target_team={tt}, cand_true_sum={int(cand_masks[g].sum().item())} (val-filter)"
-                            )
-                        stats["excluded_invalid"] += 1
+
+                for g in range(batch_size):
+                    if g >= targets.size(0):
+                        stats["excluded_invalid_filter"] += 1
                         continue
-                    if not tgt_in_cand:
-                        stats["invalid_target_not_in_cand"] += 1
-                        if (int(stats["invalid_target_not_in_cand"]) % 50) == 1:
-                            AUDIT_LOGGER.warning(
-                                f"[AUDIT] target_not_in_cand: g={g}, tgt={tgt}, kicker_team={kt}, "
-                                f"cand_true_sum={int(cand_masks[g].sum().item())} (val-filter)"
-                            )
-                        if 0 <= tgt < cm_g.size(0):
-                            cand_masks[g, tgt] = True
-                        else:
-                            stats["excluded_invalid"] += 1
-                            continue
-                    valid_indices.append(g)
 
-                if not valid_indices:
+                    team_row = team_batched[g]
+                    ball_row = ball_batched[g]
+                    valid_row = (
+                        mask_batched[g]
+                        if mask_batched is not None
+                        else torch.ones(nodes_per_graph, dtype=torch.bool, device=outputs.device)
+                    )
+                    ball_owner_mask = (ball_row > 0.5).to(torch.bool)
+
+                    kicker_candidates = torch.where(ball_row > 0.5)[0]
+                    kicker_idx = (
+                        int(kicker_candidates[0].item())
+                        if kicker_candidates.numel() > 0
+                        else int(torch.argmax(ball_row).item())
+                    )
+                    if nodes_per_graph > 0:
+                        kicker_idx = max(0, min(kicker_idx, nodes_per_graph - 1))
+                    kicker_team_val = int(team_row[kicker_idx].item())
+
+                    target_idx = int(targets[g].item())
+                    if 0 <= target_idx < team_row.size(0):
+                        if int(team_row[target_idx].item()) != kicker_team_val:
+                            stats["invalid_team_mismatch"] += 1
+
+                    cand_mask_single, status = build_candidate_mask(
+                        player_team=team_row,
+                        kicker_team=kicker_team_val,
+                        is_ball_owner=ball_owner_mask,
+                        valid_mask=valid_row,
+                        target_idx=target_idx,
+                    )
+                    if cand_mask_single is None:
+                        if status in ("target_out_of_range", "empty"):
+                            stats["invalid_target_not_in_cand"] += 1
+                        stats["excluded_invalid_filter"] += 1
+                        continue
+
+                    valid_indices.append(g)
+                    cand_masks_list.append(cand_mask_single)
+                    team_rows.append(team_row)
+                    kicker_team_vals.append(kicker_team_val)
+
+                if not cand_masks_list:
                     continue
 
+                cand_masks = torch.stack(cand_masks_list, dim=0).to(dtype=torch.bool)
                 valid_idx_tensor = torch.tensor(valid_indices, device=targets.device, dtype=torch.long)
                 outputs = outputs.index_select(0, valid_idx_tensor)
                 targets = targets.index_select(0, valid_idx_tensor)
                 cand_masks = cand_masks.index_select(0, valid_idx_tensor)
                 team_labels = team_labels.index_select(0, valid_idx_tensor)
                 kicker_team = kicker_team.index_select(0, valid_idx_tensor)
-                if ball_batched is not None:
-                    ball_batched = ball_batched.index_select(0, valid_idx_tensor)
-
+ 
             masked_outputs = mask_logits(outputs, cand_masks)
 
             # === build per-graph outputs/targets safely (validation) ===
@@ -961,11 +913,12 @@ def validate_epoch(
         "excluded_invalid": float(stats["excluded_invalid"]),
         "invalid_team_mismatch": float(stats["invalid_team_mismatch"]),
         "invalid_target_not_in_cand": float(stats["invalid_target_not_in_cand"]),
+        "excluded_invalid_filter": float(stats["excluded_invalid_filter"]),
     }
     print(
         f"[Val] excluded_not_attacking={excluded_not_attacking} "
         f"excluded_ball_owner={excluded_ball_owner} excluded_invalid={excluded_invalid} "
-        f"excluded_invalid_filter={int(stats['excluded_invalid'])} "
+        f"excluded_invalid_filter={int(stats['excluded_invalid_filter'])} "
         f"avg_cand={sum(cand_counts)/len(cand_counts) if cand_counts else 0:.2f} "
         f"num_graphs={num_graphs_total}"
     )
@@ -1142,14 +1095,16 @@ def main():
         )
 
         logger.info(
-            "[Audit summary] train: invalid_team_mismatch=%d, invalid_target_not_in_cand=%d",
+            "[Audit summary] train: invalid_team_mismatch=%d, invalid_target_not_in_cand=%d, excluded_invalid_filter=%d",
             int(train_metrics.get("invalid_team_mismatch", 0)),
             int(train_metrics.get("invalid_target_not_in_cand", 0)),
+            int(train_metrics.get("excluded_invalid_filter", 0)),
         )
         logger.info(
-            "[Audit summary] val: invalid_team_mismatch=%d, invalid_target_not_in_cand=%d",
+            "[Audit summary] val: invalid_team_mismatch=%d, invalid_target_not_in_cand=%d, excluded_invalid_filter=%d",
             int(val_metrics.get("invalid_team_mismatch", 0)),
             int(val_metrics.get("invalid_target_not_in_cand", 0)),
+            int(val_metrics.get("excluded_invalid_filter", 0)),
         )
         
         logger.info(f"Learning rate: {current_lr:.6f}")
