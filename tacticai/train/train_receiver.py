@@ -708,6 +708,17 @@ def validate_epoch(
             team_labels = None
             kicker_team = None
 
+            def _cnt(x):
+                try:
+                    return int(x.sum().item())
+                except Exception:
+                    try:
+                        return int(x)
+                    except Exception:
+                        return 0
+
+            min_cands = config.get("eval", {}).get("min_cands_eval", 1)
+
             if team_tensor is not None and ball_tensor is not None:
                 team_batched = _reshape_to_batch(team_tensor, batch_size, nodes_per_graph).to(
                     device=outputs.device, dtype=torch.long
@@ -727,7 +738,7 @@ def validate_epoch(
                 for g in range(batch_size):
                     if g >= targets.size(0):
                         stats["excluded_invalid_filter"] += 1
-                    continue
+                        continue
 
                     team_row = team_batched[g]
                     ball_row = ball_batched[g]
@@ -764,7 +775,11 @@ def validate_epoch(
                         if status in ("target_out_of_range", "empty"):
                             stats["invalid_target_not_in_cand"] += 1
                         stats["excluded_invalid_filter"] += 1
-                    continue
+                        continue
+
+                    if cand_mask_single.sum().item() < min_cands:
+                        stats["excluded_invalid_filter"] += 1
+                        continue
 
                     valid_indices.append(g)
                     cand_masks_list.append(cand_mask_single)
@@ -772,6 +787,10 @@ def validate_epoch(
                     kicker_team_vals.append(kicker_team_val)
 
                 if not cand_masks_list:
+                    logger.info(
+                        "[VAL-FILTER] batch=%d total=%d kept=0 (all filtered)",
+                        batch_idx, batch_size,
+                    )
                     continue
 
                 cand_masks = torch.stack(cand_masks_list, dim=0).to(dtype=torch.bool)
@@ -781,6 +800,10 @@ def validate_epoch(
                 cand_masks = cand_masks.index_select(0, valid_idx_tensor)
                 team_labels = torch.stack(team_rows, dim=0).index_select(0, valid_idx_tensor)
                 kicker_team = torch.tensor(kicker_team_vals, device=outputs.device, dtype=team_labels.dtype).index_select(0, valid_idx_tensor)
+                logger.info(
+                    "[VAL-FILTER] batch=%d total=%d kept=%d",
+                    batch_idx, batch_size, cand_masks.size(0)
+                )
                 batch_size = outputs.size(0)
                 nodes_per_graph = outputs.size(1)
             else:
@@ -1086,7 +1109,8 @@ def main():
                    f"Top-1: {train_metrics['top1']:.4f}, "
                    f"Top-3: {train_metrics['top3']:.4f}, "
             f"Top-5: {train_metrics['top5']:.4f} "
-            f"(excluded_invalid={int(train_metrics.get('excluded_invalid', 0))})"
+            f"(excluded_invalid={int(train_metrics.get('excluded_invalid', 0))}, "
+            f"excluded_invalid_filter={int(train_metrics.get('excluded_invalid_filter', 0))})"
         )
         
         logger.info(
@@ -1095,7 +1119,8 @@ def main():
                    f"Top-1: {val_metrics['top1']:.4f}, "
                    f"Top-3: {val_metrics['top3']:.4f}, "
             f"Top-5: {val_metrics['top5']:.4f} "
-            f"(excluded_invalid={int(val_metrics.get('excluded_invalid', 0))})"
+            f"(excluded_invalid={int(val_metrics.get('excluded_invalid', 0))}, "
+            f"excluded_invalid_filter={int(val_metrics.get('excluded_invalid_filter', 0))})"
         )
 
         logger.info(
