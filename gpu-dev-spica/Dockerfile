@@ -8,11 +8,16 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common \
     gnupg \
+    lsb-release \
     git curl ca-certificates build-essential \
     openssh-client vim less tzdata locales && \
-    add-apt-repository -y ppa:deadsnakes/ppa && \
-    apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 python3.10-venv python3.10-dev python3.10-distutils python3.10-full && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update
+
+RUN apt-get install -y --no-install-recommends \
+    python3.10 python3.10-venv python3.10-dev python3.10-distutils && \
     rm -rf /var/lib/apt/lists/*
 
 # ロケール設定
