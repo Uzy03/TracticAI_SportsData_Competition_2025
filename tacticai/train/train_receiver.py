@@ -644,6 +644,7 @@ def validate_epoch(
     device: torch.device,
     metrics: Dict[str, Any],
     logger: Optional[Any] = None,
+    min_cands_eval: int = 1,
 ) -> Dict[str, float]:
     """Validate model for one epoch.
     
@@ -717,7 +718,7 @@ def validate_epoch(
                     except Exception:
                         return 0
 
-            min_cands = config.get("eval", {}).get("min_cands_eval", 1)
+            min_cands = max(1, int(min_cands_eval))
 
             if team_tensor is not None and ball_tensor is not None:
                 team_batched = _reshape_to_batch(team_tensor, batch_size, nodes_per_graph).to(
@@ -738,7 +739,7 @@ def validate_epoch(
                 for g in range(batch_size):
                     if g >= targets.size(0):
                         stats["excluded_invalid_filter"] += 1
-                        continue
+                    continue
 
                     team_row = team_batched[g]
                     ball_row = ball_batched[g]
@@ -775,11 +776,11 @@ def validate_epoch(
                         if status in ("target_out_of_range", "empty"):
                             stats["invalid_target_not_in_cand"] += 1
                         stats["excluded_invalid_filter"] += 1
-                        continue
+                    continue
 
                     if cand_mask_single.sum().item() < min_cands:
                         stats["excluded_invalid_filter"] += 1
-                        continue
+                    continue
 
                     valid_indices.append(g)
                     cand_masks_list.append(cand_mask_single)
@@ -787,10 +788,11 @@ def validate_epoch(
                     kicker_team_vals.append(kicker_team_val)
 
                 if not cand_masks_list:
-                    logger.info(
-                        "[VAL-FILTER] batch=%d total=%d kept=0 (all filtered)",
-                        batch_idx, batch_size,
-                    )
+                    if logger is not None:
+                        logger.info(
+                            "[VAL-FILTER] batch=%d total=%d kept=0 (all filtered)",
+                            batch_idx, batch_size,
+                        )
                     continue
 
                 cand_masks = torch.stack(cand_masks_list, dim=0).to(dtype=torch.bool)
@@ -800,14 +802,15 @@ def validate_epoch(
                 cand_masks = cand_masks.index_select(0, valid_idx_tensor)
                 team_labels = torch.stack(team_rows, dim=0).index_select(0, valid_idx_tensor)
                 kicker_team = torch.tensor(kicker_team_vals, device=outputs.device, dtype=team_labels.dtype).index_select(0, valid_idx_tensor)
-                logger.info(
-                    "[VAL-FILTER] batch=%d total=%d kept=%d",
-                    batch_idx, batch_size, cand_masks.size(0)
-                )
+                if logger is not None:
+                    logger.info(
+                        "[VAL-FILTER] batch=%d total=%d kept=%d",
+                        batch_idx, batch_size, cand_masks.size(0)
+                    )
                 batch_size = outputs.size(0)
                 nodes_per_graph = outputs.size(1)
-            else:
-                cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
+        else:
+            cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
 
             masked_outputs = mask_logits(outputs, cand_masks)
 
@@ -1090,7 +1093,15 @@ def main():
         )
         
         # Validation
-        val_metrics = validate_epoch(model, val_loader, criterion, device, metrics, logger)
+        val_metrics = validate_epoch(
+            model,
+            val_loader,
+            criterion,
+            device,
+            metrics,
+            logger,
+            min_cands_eval=config.get("eval", {}).get("min_cands_eval", 1),
+        )
         
         # Update learning rate
         if scheduler is not None:
