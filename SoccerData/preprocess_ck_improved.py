@@ -21,6 +21,7 @@ AUDIT_COUNTERS = {
     "target_not_in_cand": 0,
     "cand_count_outlier": 0,
     "no_receiver": 0,
+    "kicker_mismatch": 0,
     "kept": 0,
 }
 
@@ -311,6 +312,11 @@ def create_samples_from_match(match_dir):
         ck_player_name = row.get('選手名', '')
         ck_team_id = row.get('チームID', None)
         attack_no = row.get('攻撃履歴No', None)
+
+        ck_player_id = get_player_id_by_name(ck_player_name, players_df) if ck_player_name else None
+        kicker_node_index = None
+        if ck_player_id is not None:
+            kicker_node_index = get_player_index_by_id(tracking_df, frame, ck_player_id, players_df)
         
         # === CHECK: Exclude CK if first touch is by opponent ===
         # Check if the next action after CK is by the opponent team
@@ -373,7 +379,12 @@ def create_samples_from_match(match_dir):
         # Compute kicker index/team from frame
         team_ids = frame_data['team_ids']  # 0 for HA=1, 1 for HA=2
         has_ball = frame_data['has_ball']
-        kicker_idx = int(np.argmax(has_ball)) if has_ball.sum() > 0 else 0
+        ball_owner_idx = int(np.argmax(has_ball)) if has_ball.sum() > 0 else None
+
+        # Preferred kicker index: metadata match; fallback to ball owner
+        kicker_idx = kicker_node_index if kicker_node_index is not None else (ball_owner_idx if ball_owner_idx is not None else 0)
+        if kicker_idx >= len(team_ids):
+            kicker_idx = len(team_ids) - 1
 
         # Determine attacking team by CK kicker's HA (ホームアウェイF)
         attacking_ha = None
@@ -387,11 +398,33 @@ def create_samples_from_match(match_dir):
         # Build team_flag: 0 for attacking team, 1 for defending team
         if attacking_ha in (1, 2):
             attacking_team_id = attacking_ha - 1  # 0 or 1
-            team_flag = np.where(team_ids == attacking_team_id, 0, 1)
+        elif kicker_node_index is not None and 0 <= kicker_node_index < len(team_ids):
+            attacking_team_id = int(team_ids[kicker_node_index])
+        elif ball_owner_idx is not None and 0 <= ball_owner_idx < len(team_ids):
+            attacking_team_id = int(team_ids[ball_owner_idx])
         else:
             attacking_team_id = int(team_ids[kicker_idx])
-            team_flag = np.where(team_ids == attacking_team_id, 0, 1)
 
+        team_flag = np.where(team_ids == attacking_team_id, 0, 1)
+
+        if team_ids[kicker_idx] != attacking_team_id:
+            matching = np.where(team_ids == attacking_team_id)[0]
+            if matching.size == 0:
+                AUDIT_COUNTERS.setdefault("kicker_mismatch", 0)
+                AUDIT_COUNTERS["kicker_mismatch"] += 1
+                dropped_audits.append(
+                    _make_audit_entry(
+                        match_dir.name,
+                        frame,
+                        kicker_idx,
+                        receiver_node_index,
+                        team_ids,
+                        dropped_reason="kicker_mismatch",
+                    )
+                )
+                continue
+            kicker_idx = int(matching[0])
+ 
         # === Add relative features to increase feature variance ===
         # Get kicker position (ball owner or CK player)
         positions = frame_data['positions']  # [22, 2] in meters
@@ -456,11 +489,9 @@ def create_samples_from_match(match_dir):
             continue
 
         node_indices = np.arange(len(team_ids))
-        cand_mask_bool = (
-            (team_ids == attacking_team_id)
-            & (node_indices != kicker_idx)
-            & (mask == 1)
-        )
+        cand_mask_bool = (team_ids == attacking_team_id) & (mask == 1)
+        cand_mask_bool[kicker_idx] = False
+        cand_mask_bool[receiver_node_index] = True
 
         candidate_ids = np.where(cand_mask_bool)[0]
         candidate_count = int(candidate_ids.size)
@@ -599,13 +630,14 @@ def process_all_matches(data_dir, output_dir, task="receiver", split_ratio=(0.7,
     print(f"Created {len(all_pairs)} samples (failed: {failed_frames} frames)")
     print(
         "[AUDIT] totals: total_ck={total} kept={kept} team_mismatch={tm} target_not_in_cand={tnc} "
-        "cand_count_outlier={cco} no_receiver={nr}".format(
+        "cand_count_outlier={cco} no_receiver={nr} kicker_mismatch={km}".format(
             total=AUDIT_COUNTERS["total_ck"],
             kept=AUDIT_COUNTERS["kept"],
             tm=AUDIT_COUNTERS["team_mismatch"],
             tnc=AUDIT_COUNTERS["target_not_in_cand"],
             cco=AUDIT_COUNTERS["cand_count_outlier"],
             nr=AUDIT_COUNTERS["no_receiver"],
+            km=AUDIT_COUNTERS["kicker_mismatch"],
         )
     )
     
