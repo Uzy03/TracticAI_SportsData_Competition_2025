@@ -421,6 +421,7 @@ def train_epoch(
         team_tensor = data.get("team")
         ball_tensor = data.get("ball")
         mask_tensor = data.get("mask")
+        cand_tensor = data.get("cand_mask")
 
         team_labels = None
         kicker_team = None
@@ -433,6 +434,11 @@ def train_epoch(
             mask_batched = (
                 _reshape_to_batch(mask_tensor, batch_size, nodes_per_graph).to(device=outputs.device, dtype=torch.bool)
                 if mask_tensor is not None
+                else None
+            )
+            cand_batched = (
+                _reshape_to_batch(cand_tensor, batch_size, nodes_per_graph).to(device=outputs.device, dtype=torch.bool)
+                if cand_tensor is not None
                 else None
             )
 
@@ -470,13 +476,25 @@ def train_epoch(
                     if int(team_row[target_idx].item()) != kicker_team_val:
                         stats["invalid_team_mismatch"] += 1
 
-                cand_mask_single, status = build_candidate_mask(
-                    player_team=team_row,
-                    kicker_team=kicker_team_val,
-                    is_ball_owner=ball_owner_mask,
-                    valid_mask=valid_row,
-                    target_idx=target_idx,
-                )
+                cand_mask_single: Optional[torch.Tensor] = None
+                status = "dataset" if cand_batched is not None else "rebuilt"
+                if cand_batched is not None:
+                    cand_mask_candidate = cand_batched[g].to(device=outputs.device, dtype=torch.bool)
+                    if cand_mask_candidate.sum().item() == 0:
+                        status = "empty"
+                    else:
+                        cand_mask_single = cand_mask_candidate.clone()
+                        if 0 <= target_idx < cand_mask_single.size(0) and not cand_mask_single[target_idx]:
+                            cand_mask_single[target_idx] = True
+                            stats["invalid_target_not_in_cand"] += 1
+                if cand_mask_single is None:
+                    cand_mask_single, status = build_candidate_mask(
+                        player_team=team_row,
+                        kicker_team=kicker_team_val,
+                        is_ball_owner=ball_owner_mask,
+                        valid_mask=valid_row,
+                        target_idx=target_idx,
+                    )
                 if cand_mask_single is None:
                     if status in ("target_out_of_range", "empty"):
                         stats["invalid_target_not_in_cand"] += 1
@@ -705,6 +723,7 @@ def validate_epoch(
             team_tensor = data.get("team")
             ball_tensor = data.get("ball")
             mask_tensor = data.get("mask")
+            cand_tensor = data.get("cand_mask")
 
             team_labels = None
             kicker_team = None
@@ -730,6 +749,11 @@ def validate_epoch(
                     if mask_tensor is not None
                     else None
                 )
+                cand_batched = (
+                    _reshape_to_batch(cand_tensor, batch_size, nodes_per_graph).to(device=outputs.device, dtype=torch.bool)
+                    if cand_tensor is not None
+                    else None
+                )
 
                 cand_masks_list: list[torch.Tensor] = []
                 team_rows: list[torch.Tensor] = []
@@ -739,7 +763,7 @@ def validate_epoch(
                 for g in range(batch_size):
                     if g >= targets.size(0):
                         stats["excluded_invalid_filter"] += 1
-                    continue
+                        continue
 
                     team_row = team_batched[g]
                     ball_row = ball_batched[g]
@@ -765,22 +789,36 @@ def validate_epoch(
                         if int(team_row[target_idx].item()) != kicker_team_val:
                             stats["invalid_team_mismatch"] += 1
 
-                    cand_mask_single, status = build_candidate_mask(
-                        player_team=team_row,
-                        kicker_team=kicker_team_val,
-                        is_ball_owner=ball_owner_mask,
-                        valid_mask=valid_row,
-                        target_idx=target_idx,
-                    )
+                    cand_mask_single: Optional[torch.Tensor] = None
+                    status = "dataset" if cand_batched is not None else "rebuilt"
+                    if cand_batched is not None:
+                        cand_mask_candidate = cand_batched[g].to(device=outputs.device, dtype=torch.bool)
+                        if cand_mask_candidate.sum().item() > 0:
+                            cand_mask_single = cand_mask_candidate.clone()
+                            if 0 <= target_idx < cand_mask_single.size(0) and not cand_mask_single[target_idx]:
+                                cand_mask_single[target_idx] = True
+                                stats["invalid_target_not_in_cand"] += 1
+                        else:
+                            status = "empty"
+
+                    if cand_mask_single is None:
+                        cand_mask_single, status = build_candidate_mask(
+                            player_team=team_row,
+                            kicker_team=kicker_team_val,
+                            is_ball_owner=ball_owner_mask,
+                            valid_mask=valid_row,
+                            target_idx=target_idx,
+                        )
+
                     if cand_mask_single is None:
                         if status in ("target_out_of_range", "empty"):
                             stats["invalid_target_not_in_cand"] += 1
                         stats["excluded_invalid_filter"] += 1
-                    continue
+                        continue
 
                     if cand_mask_single.sum().item() < min_cands:
                         stats["excluded_invalid_filter"] += 1
-                    continue
+                        continue
 
                     valid_indices.append(g)
                     cand_masks_list.append(cand_mask_single)
@@ -800,17 +838,19 @@ def validate_epoch(
                 outputs = outputs.index_select(0, valid_idx_tensor)
                 targets = targets.index_select(0, valid_idx_tensor)
                 cand_masks = cand_masks.index_select(0, valid_idx_tensor)
-                team_labels = torch.stack(team_rows, dim=0).index_select(0, valid_idx_tensor)
-                kicker_team = torch.tensor(kicker_team_vals, device=outputs.device, dtype=team_labels.dtype).index_select(0, valid_idx_tensor)
-                if logger is not None:
+                team_labels = torch.stack(team_rows, dim=0)
+                kicker_team = torch.tensor(kicker_team_vals, device=outputs.device, dtype=team_labels.dtype)
+
+                if logger is not None and cand_masks.numel() > 0:
                     logger.info(
-                        "[VAL-FILTER] batch=%d total=%d kept=%d",
-                        batch_idx, batch_size, cand_masks.size(0)
+                        "[VAL-FILTER] batch=%d total=%d kept=%d avg_cand=%.2f",
+                        batch_idx,
+                        batch_size,
+                        cand_masks.size(0),
+                        cand_masks.sum(dim=1).float().mean().item(),
                     )
-                batch_size = outputs.size(0)
-                nodes_per_graph = outputs.size(1)
-        else:
-            cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
+            else:
+                cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
 
             masked_outputs = mask_logits(outputs, cand_masks)
 
