@@ -7,8 +7,18 @@ from typing import Dict, List, Tuple, Optional
 import pickle
 from tqdm import tqdm
 import json
+import logging
 
-PREPROCESS_VERSION = "ck_improved_v1"
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
+
+AUDIT_COUNTERS = {
+    "mismatch_skipped": 0,
+    "total_ck": 0,
+}
+
+PREPROCESS_VERSION = "ck_improved_v2"
 
 
 def load_match_data(match_dir: Path):
@@ -223,6 +233,7 @@ def get_player_index_by_id(tracking_df, frame, player_id, players_df):
 
 def create_samples_from_match(match_dir):
     """Create training samples from CK actions in a match."""
+    global AUDIT_COUNTERS
     play_df, tracking_df, players_df, profile_df = load_match_data(match_dir)
     samples = []
     
@@ -230,6 +241,7 @@ def create_samples_from_match(match_dir):
     ck_actions = play_df[play_df['アクション名'] == 'CK'].copy()
     
     for idx, row in ck_actions.iterrows():
+        AUDIT_COUNTERS["total_ck"] += 1
         frame = row['フレーム番号']
         if pd.isna(frame):
             continue
@@ -307,6 +319,11 @@ def create_samples_from_match(match_dir):
                         shot_occurred = 1
                         break
         
+        # Compute kicker index/team from frame
+        team_ids = frame_data['team_ids']  # 0 for HA=1, 1 for HA=2
+        has_ball = frame_data['has_ball']
+        kicker_idx = int(np.argmax(has_ball)) if has_ball.sum() > 0 else 0
+
         # Determine attacking team by CK kicker's HA (ホームアウェイF)
         attacking_ha = None
         if ck_player_name:
@@ -317,18 +334,16 @@ def create_samples_from_match(match_dir):
                 except Exception:
                     attacking_ha = None
         # Build team_flag: 0 for attacking team, 1 for defending team
-        team_ids = frame_data['team_ids']  # 0 for HA=1, 1 for HA=2
         if attacking_ha in (1, 2):
             attacking_team_id = attacking_ha - 1  # 0 or 1
             team_flag = np.where(team_ids == attacking_team_id, 0, 1)
         else:
-            # Fallback: keep HA-based ids (may hurt label alignment)
-            team_flag = team_ids.copy()
+            attacking_team_id = int(team_ids[kicker_idx])
+            team_flag = np.where(team_ids == attacking_team_id, 0, 1)
 
         # === Add relative features to increase feature variance ===
         # Get kicker position (ball owner or CK player)
         positions = frame_data['positions']  # [22, 2] in meters
-        kicker_idx = int(np.argmax(frame_data['has_ball']))
         kicker_pos = positions[kicker_idx] if frame_data['mask'][kicker_idx] == 1 else np.array([0.0, 0.0])
         
         # Goal center position (assume attacking towards positive x, goal at x=52.5)
@@ -366,6 +381,19 @@ def create_samples_from_match(match_dir):
         dist_to_goal_norm[mask == 0] = 0.0
         angle_to_goal[mask == 0] = 0.0
         
+        # Audit receiver team vs attacker team
+        target_team = attacking_team_id
+        if receiver_node_index is not None and 0 <= receiver_node_index < len(team_ids):
+            receiver_team_raw = int(team_ids[receiver_node_index])
+            if receiver_team_raw != attacking_team_id:
+                AUDIT_COUNTERS["mismatch_skipped"] += 1
+                logger.warning(
+                    "[AUDIT] mismatch: match=%s, frame=%s, kicker_team=%s, "
+                    "target_team=%s, receiver_idx=%s", 
+                    match_dir.name, frame, attacking_team_id, receiver_team_raw, receiver_node_index
+                )
+                continue
+
         # Create sample with relative features
         sample = {
             'x': frame_data['x'],
@@ -426,6 +454,9 @@ def process_all_matches(data_dir, output_dir, task="receiver", split_ratio=(0.7,
             continue
     
     print(f"Created {len(all_samples)} samples (failed: {failed_frames} frames)")
+    print(
+        f"[AUDIT] CK total={AUDIT_COUNTERS['total_ck']} mismatched_skipped={AUDIT_COUNTERS['mismatch_skipped']}"
+    )
     
     if len(all_samples) == 0:
         print("No samples created")

@@ -29,7 +29,7 @@ from tacticai.modules import (
 from tacticai.modules.transforms import RandomFlipTransform
 
 
-EXPECTED_PREPROCESS_VERSION = "ck_improved_v1"
+EXPECTED_PREPROCESS_VERSION = "ck_improved_v2"
 
 AUDIT_LOGGER = logging.getLogger(__name__)
 
@@ -727,7 +727,7 @@ def validate_epoch(
                 for g in range(batch_size):
                     if g >= targets.size(0):
                         stats["excluded_invalid_filter"] += 1
-                        continue
+                    continue
 
                     team_row = team_batched[g]
                     ball_row = ball_batched[g]
@@ -764,7 +764,7 @@ def validate_epoch(
                         if status in ("target_out_of_range", "empty"):
                             stats["invalid_target_not_in_cand"] += 1
                         stats["excluded_invalid_filter"] += 1
-                        continue
+                    continue
 
                     valid_indices.append(g)
                     cand_masks_list.append(cand_mask_single)
