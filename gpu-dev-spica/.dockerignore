@@ -1,0 +1,49 @@
+# 大量データを除外してコンテナサイズを削減
+
+# 未加工・前処理済みデータ
+SoccerData/
+data/raw/
+data/processed/
+data/processed_ck/
+
+# チェックポイント・ログ・ラン結果
+checkpoints/
+runs/
+logs/
+*.log
+
+# 仮想環境
+.venv/
+venv/
+env/
+
+# IDE設定
+.vscode/
+.idea/
+*.swp
+
+# Git関連
+.git/
+.gitignore
+
+# Pythonキャッシュ
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ビルド成果物
+build/
+dist/
+*.egg-info/
+
+# OSファイル
+.DS_Store
+Thumbs.db
+
+# Docker関連ファイル自体は除外しない
+!Dockerfile
+!docker-compose.yml
+
+
