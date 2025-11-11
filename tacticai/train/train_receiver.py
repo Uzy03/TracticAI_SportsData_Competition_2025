@@ -1006,11 +1006,13 @@ def main():
     else:
         train_dataset = ReceiverDataset(
             config["data"]["train_path"],
-            file_format=config["data"].get("format", "parquet")
+            file_format=config["data"].get("format", "parquet"),
+            phase="train",
         )
         val_dataset = ReceiverDataset(
             config["data"]["val_path"],
-            file_format=config["data"].get("format", "parquet")
+            file_format=config["data"].get("format", "parquet"),
+            phase="val",
         )
         _assert_dataset_version(train_dataset, "train")
         _assert_dataset_version(val_dataset, "val")

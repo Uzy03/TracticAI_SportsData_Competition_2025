@@ -214,7 +214,8 @@ def main():
     test_path = args.test_path or config["data"]["test_path"]
     test_dataset = ReceiverDataset(
         test_path,
-        file_format=config["data"].get("format", "parquet")
+        file_format=config["data"].get("format", "parquet"),
+        phase="test",
     )
     
     # Create test data loader

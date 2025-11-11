@@ -28,6 +28,7 @@ class TacticAIDataset(Dataset, ABC):
         schema: DataSchema,
         transform: Optional[Any] = None,
         target_transform: Optional[Any] = None,
+        phase: str = "train",
     ):
         """Initialize TacticAI dataset.
         
@@ -106,6 +107,7 @@ class ReceiverDataset(TacticAIDataset):
         transform: Optional[Any] = None,
         target_transform: Optional[Any] = None,
         file_format: str = "parquet",
+        phase: str = "train",
     ):
         """Initialize receiver dataset.
         
@@ -120,11 +122,125 @@ class ReceiverDataset(TacticAIDataset):
             schema = create_schema_mapping("receiver")
         
         self.file_format = file_format
+        phase_alias = {
+            "train": "train",
+            "training": "train",
+            "val": "val",
+            "valid": "val",
+            "validation": "val",
+            "eval": "val",
+            "test": "test",
+            "testing": "test",
+            "infer": "test",
+            "inference": "test",
+        }
+        phase_key = phase.lower() if isinstance(phase, str) else "train"
+        self.phase = phase_alias.get(phase_key, "train")
         self.preprocess_versions: set[str] = set()
         super().__init__(data_path, schema, transform, target_transform)
         self.preprocess_version: Optional[str] = (
             next(iter(self.preprocess_versions)) if len(self.preprocess_versions) == 1 else None
         )
+
+    def _prepare_sample(self, sample: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize candidate information per sample and enforce target inclusion."""
+        if not isinstance(sample, dict):
+            return sample
+
+        sample = dict(sample)
+        team = sample.get("team")
+        ball = sample.get("ball")
+        mask = sample.get("mask")
+
+        if team is None or ball is None:
+            sample["valid"] = False
+            return sample
+
+        team_arr = np.asarray(team, dtype=np.int64)
+        ball_arr = np.asarray(ball, dtype=np.float32)
+        if team_arr.ndim != 1:
+            team_arr = team_arr.reshape(-1)
+        if ball_arr.ndim != 1:
+            ball_arr = ball_arr.reshape(-1)
+
+        num_nodes = team_arr.shape[0]
+        if ball_arr.shape[0] != num_nodes:
+            sample["valid"] = False
+            return sample
+
+        if mask is None:
+            mask_arr = np.ones(num_nodes, dtype=bool)
+        else:
+            mask_arr = np.asarray(mask)
+            if mask_arr.ndim != 1:
+                mask_arr = mask_arr.reshape(-1)
+            mask_arr = mask_arr.astype(bool)
+            if mask_arr.shape[0] != num_nodes:
+                sample["valid"] = False
+                return sample
+
+        kicker_idx = None
+        if ball_arr.sum() > 0:
+            kicker_idx = int(np.argmax(ball_arr))
+        elif "kicker_idx" in sample and sample["kicker_idx"] is not None:
+            kicker_idx = int(sample["kicker_idx"])
+        else:
+            valid_nodes = np.where(mask_arr)[0]
+            if valid_nodes.size > 0:
+                kicker_idx = int(valid_nodes[0])
+        if kicker_idx is None:
+            sample["valid"] = False
+            return sample
+        kicker_idx = max(0, min(kicker_idx, num_nodes - 1))
+        kicker_team = int(team_arr[kicker_idx])
+
+        target_idx_raw = sample.get("receiver_node_index")
+        if isinstance(target_idx_raw, float) and np.isnan(target_idx_raw):
+            target_idx_raw = None
+        if target_idx_raw is None:
+            fallback_id = sample.get("receiver_id")
+            if isinstance(fallback_id, (int, np.integer)) and 0 <= fallback_id < num_nodes:
+                target_idx_raw = int(fallback_id)
+        try:
+            target_idx = int(target_idx_raw) if target_idx_raw is not None else None
+        except (TypeError, ValueError):
+            target_idx = None
+
+        if target_idx is None or target_idx < 0 or target_idx >= num_nodes:
+            sample["valid"] = False
+            return sample
+
+        phase_with_team_constraint = self.phase in {"train", "val"}
+        candidates: List[int] = []
+        for idx in range(num_nodes):
+            if not mask_arr[idx]:
+                continue
+            if ball_arr[idx] > 0.5:
+                continue
+            if phase_with_team_constraint and team_arr[idx] != kicker_team:
+                continue
+            candidates.append(idx)
+
+        if target_idx not in candidates:
+            candidates.append(target_idx)
+
+        if len(candidates) == 0:
+            sample["valid"] = False
+            return sample
+
+        cand_mask = np.zeros(num_nodes, dtype=bool)
+        cand_mask[candidates] = True
+
+        sample["team"] = team_arr
+        sample["ball"] = ball_arr
+        sample["mask"] = mask_arr.astype(np.float32)
+        sample["candidate_ids"] = [int(i) for i in candidates]
+        sample["cand_mask"] = cand_mask
+        sample["kicker_idx"] = int(kicker_idx)
+        sample["kicker_team"] = int(kicker_team)
+        sample["target_idx"] = int(target_idx)
+        sample["valid"] = True
+        return sample
     
     def _load_data(self) -> List[Dict[str, Any]]:
         """Load receiver prediction data.
@@ -172,9 +288,15 @@ class ReceiverDataset(TacticAIDataset):
                     samples = [data]
                 if version is not None:
                     self.preprocess_versions.add(version)
-                # Drop invalid samples if present
-                samples = [s for s in samples if not isinstance(s, dict) or s.get("valid", True)]
-                return samples
+                processed_samples: List[Dict[str, Any]] = []
+                for sample in samples:
+                    if isinstance(sample, dict):
+                        sample = self._prepare_sample(sample)
+                        if sample.get("valid", True):
+                            processed_samples.append(sample)
+                    else:
+                        processed_samples.append(sample)
+                return processed_samples
         else:
             raise ValueError(f"Unsupported file format: {self.file_format}")
     
@@ -219,6 +341,9 @@ class ReceiverDataset(TacticAIDataset):
             if "ball" in sample:
                 ball = np.array(sample["ball"])
                 input_data["ball"] = torch.tensor(ball, dtype=torch.float32)
+            if "cand_mask" in sample:
+                cand_mask = np.array(sample["cand_mask"])
+                input_data["cand_mask"] = torch.tensor(cand_mask, dtype=torch.bool)
         
         # Apply transforms
         input_data, target = self._apply_transforms(input_data, target)
@@ -530,7 +655,7 @@ def collate_fn(batch: List[Tuple[Dict[str, torch.Tensor], torch.Tensor]]) -> Tup
     
     # Optional per-node fields: mask, team, ball
     # Concatenate if present in all items
-    opt_keys = ["mask", "team", "ball"]
+    opt_keys = ["mask", "team", "ball", "cand_mask"]
     for k in opt_keys:
         if all(k in data for data in input_data_list):
             batched_input[k] = torch.cat([data[k] for data in input_data_list], dim=0)

@@ -614,7 +614,7 @@ def main():
         api.load_receiver_model(args.checkpoint, use_4view=True)
         
         # Create data loader
-        dataset = ReceiverDataset(args.data_path)
+        dataset = ReceiverDataset(args.data_path, phase="test")
         data_loader = create_dataloader(dataset, batch_size=32, shuffle=False)
         
         # Perform inference

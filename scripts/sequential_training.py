@@ -191,11 +191,13 @@ class SequentialTrainer:
         # Create datasets
         train_dataset = ReceiverDataset(
             phase_config["data"]["train_path"],
-            file_format=phase_config["data"]["format"]
+            file_format=phase_config["data"]["format"],
+            phase="train",
         )
         val_dataset = ReceiverDataset(
             phase_config["data"]["val_path"],
-            file_format=phase_config["data"]["format"]
+            file_format=phase_config["data"]["format"],
+            phase="val",
         )
         
         # Create data loaders
