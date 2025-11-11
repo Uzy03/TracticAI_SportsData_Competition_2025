@@ -6,9 +6,13 @@ FROM nvidia/cuda:11.6.2-cudnn8-devel-ubuntu20.04
 # 基本ツールと Python
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
     python3 python3-venv python3-pip python3-dev \
     git curl ca-certificates build-essential \
     openssh-client vim less tzdata locales && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 python3.10-venv python3.10-dev python3.10-distutils && \
     rm -rf /var/lib/apt/lists/*
 
 # ロケール設定
@@ -23,8 +27,8 @@ RUN useradd -m -u ${UID} -s /bin/bash ${USERNAME} && \
 WORKDIR /workspace
 USER ${USERNAME}
 
-# Python 仮想環境 + よく使うライブラリ
-RUN python3 -m venv ~/.venv && \
+# Python 仮想環境 + よく使うライブラリ（Python 3.10）
+RUN python3.10 -m venv ~/.venv && \
     ~/.venv/bin/pip install --upgrade pip wheel setuptools && \
     ~/.venv/bin/pip install \
       ipython jupyter jupyterlab \
