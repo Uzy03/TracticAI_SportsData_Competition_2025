@@ -3,20 +3,70 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 import pickle
 from tqdm import tqdm
 import json
 import logging
+import argparse
+import shutil
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
 
 AUDIT_COUNTERS = {
-    "mismatch_skipped": 0,
     "total_ck": 0,
+    "team_mismatch": 0,
+    "target_not_in_cand": 0,
+    "cand_count_outlier": 0,
+    "no_receiver": 0,
+    "kept": 0,
 }
+
+AUDIT_RECORDS: Dict[str, List[Dict[str, Any]]] = {
+    "train": [],
+    "val": [],
+    "test": [],
+}
+
+AUDIT_DROPPED: List[Dict[str, Any]] = []
+
+
+def _make_audit_entry(
+    match_id: str,
+    frame: int,
+    kicker_idx: Optional[int],
+    receiver_idx: Optional[int],
+    team_ids: np.ndarray,
+    candidate_count: Optional[int] = None,
+    dropped_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    kicker_team = None
+    if kicker_idx is not None and 0 <= kicker_idx < len(team_ids):
+        kicker_team = int(team_ids[kicker_idx])
+
+    target_team = None
+    if receiver_idx is not None and 0 <= receiver_idx < len(team_ids):
+        target_team = int(team_ids[receiver_idx])
+
+    entry: Dict[str, Any] = {
+        "match_id": match_id,
+        "frame": int(frame) if frame is not None else None,
+        "kicker_idx": int(kicker_idx) if kicker_idx is not None else None,
+        "target_idx": int(receiver_idx) if receiver_idx is not None else None,
+        "kicker_team": kicker_team,
+        "target_team": target_team,
+        "candidate_count": int(candidate_count) if candidate_count is not None else None,
+        "dropped_reason": dropped_reason,
+    }
+
+    for key, value in list(entry.items()):
+        if isinstance(value, np.generic):
+            entry[key] = value.item()
+
+    return entry
+
 
 PREPROCESS_VERSION = "ck_improved_v2"
 
@@ -235,7 +285,8 @@ def create_samples_from_match(match_dir):
     """Create training samples from CK actions in a match."""
     global AUDIT_COUNTERS
     play_df, tracking_df, players_df, profile_df = load_match_data(match_dir)
-    samples = []
+    paired_samples: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+    dropped_audits: List[Dict[str, Optional[int]]] = []
     
     # Extract CK (Corner Kick) actions
     ck_actions = play_df[play_df['アクション名'] == 'CK'].copy()
@@ -381,19 +432,87 @@ def create_samples_from_match(match_dir):
         dist_to_goal_norm[mask == 0] = 0.0
         angle_to_goal[mask == 0] = 0.0
         
-        # Audit receiver team vs attacker team
-        target_team = attacking_team_id
-        if receiver_node_index is not None and 0 <= receiver_node_index < len(team_ids):
-            receiver_team_raw = int(team_ids[receiver_node_index])
-            if receiver_team_raw != attacking_team_id:
-                AUDIT_COUNTERS["mismatch_skipped"] += 1
-                logger.warning(
-                    "[AUDIT] mismatch: match=%s, frame=%s, kicker_team=%s, "
-                    "target_team=%s, receiver_idx=%s", 
-                    match_dir.name, frame, attacking_team_id, receiver_team_raw, receiver_node_index
-                )
-                continue
+        # Guard: receiver index must exist
+        if receiver_node_index is None:
+            AUDIT_COUNTERS["no_receiver"] += 1
+            dropped_audits.append(
+                _make_audit_entry(match_dir.name, frame, kicker_idx, receiver_node_index, team_ids, dropped_reason="missing_receiver")
+            )
+            continue
 
+        receiver_team_raw = int(team_ids[receiver_node_index])
+        if receiver_team_raw != attacking_team_id:
+            AUDIT_COUNTERS["team_mismatch"] += 1
+            dropped_audits.append(
+                _make_audit_entry(
+                    match_dir.name,
+                    frame,
+                    kicker_idx,
+                    receiver_node_index,
+                    team_ids,
+                    dropped_reason="team_mismatch",
+                )
+            )
+            continue
+
+        node_indices = np.arange(len(team_ids))
+        cand_mask_bool = (
+            (team_ids == attacking_team_id)
+            & (node_indices != kicker_idx)
+            & (mask == 1)
+        )
+
+        candidate_ids = np.where(cand_mask_bool)[0]
+        candidate_count = int(candidate_ids.size)
+
+        if candidate_count == 0:
+            AUDIT_COUNTERS["cand_count_outlier"] += 1
+            dropped_audits.append(
+                _make_audit_entry(
+                    match_dir.name,
+                    frame,
+                    kicker_idx,
+                    receiver_node_index,
+                    team_ids,
+                    candidate_count=0,
+                    dropped_reason="cand_count_zero",
+                )
+            )
+            continue
+
+        if receiver_node_index not in candidate_ids:
+            AUDIT_COUNTERS["target_not_in_cand"] += 1
+            dropped_audits.append(
+                _make_audit_entry(
+                    match_dir.name,
+                    frame,
+                    kicker_idx,
+                    receiver_node_index,
+                    team_ids,
+                    candidate_count=candidate_count,
+                    dropped_reason="target_not_in_cand",
+                )
+            )
+            continue
+
+        if candidate_count < 3 or candidate_count > 18:
+            AUDIT_COUNTERS["cand_count_outlier"] += 1
+            dropped_audits.append(
+                _make_audit_entry(
+                    match_dir.name,
+                    frame,
+                    kicker_idx,
+                    receiver_node_index,
+                    team_ids,
+                    candidate_count=candidate_count,
+                    dropped_reason="cand_count_outlier",
+                )
+            )
+            continue
+
+        # Ensure target is marked in candidate mask (should already be true)
+        cand_mask_bool[receiver_node_index] = True
+ 
         # Create sample with relative features
         sample = {
             'x': frame_data['x'],
@@ -421,16 +540,39 @@ def create_samples_from_match(match_dir):
             'frame': frame,
             'ck_player': ck_player_name,
             'attack_no': int(attack_no) if attack_no is not None and not pd.isna(attack_no) else None,
-            'mask': mask,  # Add mask
+            'mask': mask.astype(np.float32),
+            'cand_mask': cand_mask_bool.astype(bool),
+            'candidate_ids': candidate_ids.tolist(),
+            'kicker_idx': int(kicker_idx),
+            'kicker_team': int(attacking_team_id),
+            'target_idx': int(receiver_node_index),
         }
-        
-        samples.append(sample)
+
+        audit_entry = _make_audit_entry(
+            match_dir.name,
+            frame,
+            kicker_idx,
+            receiver_node_index,
+            team_ids,
+            candidate_count=candidate_count,
+            dropped_reason=None,
+        )
+
+        AUDIT_COUNTERS["kept"] += 1
+        paired_samples.append((sample, audit_entry))
     
-    return samples
+    return paired_samples, dropped_audits
 
 
-def process_all_matches(data_dir, output_dir, task="receiver", split_ratio=(0.7, 0.15, 0.15)):
+def process_all_matches(data_dir, output_dir, task="receiver", split_ratio=(0.7, 0.15, 0.15), force: bool = False):
     """Process all matches in SoccerData directory."""
+    # Reset audit state
+    for key in AUDIT_COUNTERS:
+        AUDIT_COUNTERS[key] = 0
+    for key in AUDIT_RECORDS:
+        AUDIT_RECORDS[key].clear()
+    AUDIT_DROPPED.clear()
+
     match_dirs = []
     for year_dir in ['2023_data', '2024_data']:
         year_path = data_dir / year_dir
@@ -441,50 +583,68 @@ def process_all_matches(data_dir, output_dir, task="receiver", split_ratio=(0.7,
     
     print(f"Found {len(match_dirs)} matches to process")
     
-    all_samples = []
+    all_pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
     failed_frames = 0
     
     for match_dir in tqdm(match_dirs, desc="Processing matches"):
         try:
-            samples = create_samples_from_match(match_dir)
-            all_samples.extend(samples)
+            pairs, dropped_audits = create_samples_from_match(match_dir)
+            all_pairs.extend(pairs)
+            AUDIT_DROPPED.extend(dropped_audits)
         except Exception as e:
             failed_frames += 1
             print(f"Error processing {match_dir}: {e}")
             continue
     
-    print(f"Created {len(all_samples)} samples (failed: {failed_frames} frames)")
+    print(f"Created {len(all_pairs)} samples (failed: {failed_frames} frames)")
     print(
-        f"[AUDIT] CK total={AUDIT_COUNTERS['total_ck']} mismatched_skipped={AUDIT_COUNTERS['mismatch_skipped']}"
+        "[AUDIT] totals: total_ck={total} kept={kept} team_mismatch={tm} target_not_in_cand={tnc} "
+        "cand_count_outlier={cco} no_receiver={nr}".format(
+            total=AUDIT_COUNTERS["total_ck"],
+            kept=AUDIT_COUNTERS["kept"],
+            tm=AUDIT_COUNTERS["team_mismatch"],
+            tnc=AUDIT_COUNTERS["target_not_in_cand"],
+            cco=AUDIT_COUNTERS["cand_count_outlier"],
+            nr=AUDIT_COUNTERS["no_receiver"],
+        )
     )
     
-    if len(all_samples) == 0:
+    if len(all_pairs) == 0:
         print("No samples created")
         return
     
     # Split and save
     np.random.seed(42)
-    np.random.shuffle(all_samples)
+    np.random.shuffle(all_pairs)
     
-    n_total = len(all_samples)
+    n_total = len(all_pairs)
     n_train = int(n_total * split_ratio[0])
     n_val = int(n_total * split_ratio[1])
     
     splits = {
-        'train': all_samples[:n_train],
-        'val': all_samples[n_train:n_train+n_val],
-        'test': all_samples[n_train+n_val:],
+        'train': all_pairs[:n_train],
+        'val': all_pairs[n_train:n_train+n_val],
+        'test': all_pairs[n_train+n_val:],
     }
     
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    for split_name, samples in splits.items():
+    for split_name, pair_list in splits.items():
         split_dir = output_dir / f"{task}_{split_name}"
+        if force and split_dir.exists():
+            shutil.rmtree(split_dir)
         split_dir.mkdir(parents=True, exist_ok=True)
+        samples_only = [sample for sample, _ in pair_list]
+        audits_only = []
+        for _, audit in pair_list:
+            audit_entry = dict(audit)
+            audit_entry["split"] = split_name
+            audits_only.append(audit_entry)
+        AUDIT_RECORDS[split_name].extend(audits_only)
         
         payload = {
             "preprocess_version": PREPROCESS_VERSION,
-            "samples": samples,
+            "samples": samples_only,
         }
         with open(split_dir / "data.pickle", 'wb') as f:
             pickle.dump(payload, f)
@@ -492,20 +652,46 @@ def process_all_matches(data_dir, output_dir, task="receiver", split_ratio=(0.7,
         metadata = {
             'task': task,
             'split': split_name,
-            'num_samples': len(samples),
+            'num_samples': len(samples_only),
             'preprocess_version': PREPROCESS_VERSION,
         }
         with open(split_dir / "metadata.json", 'w') as f:
             json.dump(metadata, f, indent=2)
         
-        print(f"Saved {len(samples)} {split_name} samples to {split_dir}")
+        print(f"Saved {len(samples_only)} {split_name} samples to {split_dir}")
+
+    # Write audit logs
+    def _write_jsonl(path: Path, entries: List[Dict[str, Optional[int]]]) -> None:
+        if not entries:
+            return
+        with open(path, 'w', encoding='utf-8') as f:
+            for item in entries:
+                json.dump(item, f, ensure_ascii=False)
+                f.write("\n")
+
+    for split_name, entries in AUDIT_RECORDS.items():
+        _write_jsonl(output_dir / f"audit_{split_name}.jsonl", entries)
+
+    if AUDIT_DROPPED:
+        _write_jsonl(output_dir / "audit_dropped.jsonl", AUDIT_DROPPED)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Preprocess CK data for receiver task")
+    parser.add_argument("--data_dir", type=Path, default=Path("SoccerData"))
+    parser.add_argument("--save_dir", type=Path, default=Path("data/processed_ck"))
+    parser.add_argument("--task", type=str, default="receiver")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing processed data")
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
+    args = parse_args()
     process_all_matches(
-        data_dir=Path("SoccerData"),
-        output_dir=Path("data/processed_ck"),
-        task="receiver",
+        data_dir=args.data_dir,
+        output_dir=args.save_dir,
+        task=args.task,
         split_ratio=(0.7, 0.15, 0.15),
+        force=args.force,
     )
 

@@ -520,6 +520,8 @@ def train_epoch(
         else:
             cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
 
+        assert cand_masks.sum(dim=1).min().item() > 0, "Train cand_mask contains empty candidate set"
+
         masked_outputs = mask_logits(outputs, cand_masks)
 
         if not hasattr(train_epoch, "_printed_debug"):
@@ -852,6 +854,8 @@ def validate_epoch(
             else:
                 cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
 
+            assert cand_masks.sum(dim=1).min().item() > 0, "Validation cand_mask contains empty candidate set"
+
             masked_outputs = mask_logits(outputs, cand_masks)
 
             # === build per-graph outputs/targets safely (validation) ===
@@ -1177,13 +1181,14 @@ def main():
         )
 
         logger.info(
-            "[Audit summary] train: invalid_team_mismatch=%d, invalid_target_not_in_cand=%d, excluded_invalid_filter=%d",
+            "[TRAIN-AUDIT] team_mismatch=%d, target_not_in_cand=%d, excluded_invalid_filter=%d",
             int(train_metrics.get("invalid_team_mismatch", 0)),
             int(train_metrics.get("invalid_target_not_in_cand", 0)),
             int(train_metrics.get("excluded_invalid_filter", 0)),
         )
+
         logger.info(
-            "[Audit summary] val: invalid_team_mismatch=%d, invalid_target_not_in_cand=%d, excluded_invalid_filter=%d",
+            "[VAL-AUDIT] team_mismatch=%d, target_not_in_cand=%d, excluded_invalid_filter=%d",
             int(val_metrics.get("invalid_team_mismatch", 0)),
             int(val_metrics.get("invalid_target_not_in_cand", 0)),
             int(val_metrics.get("excluded_invalid_filter", 0)),
