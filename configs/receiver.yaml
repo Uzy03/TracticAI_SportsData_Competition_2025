@@ -24,7 +24,7 @@ scheduler:
 
 # Training configuration
 train:
-  batch_size: 32  # Increased for better GPU utilization
+  batch_size: 16  # Reduced for memory efficiency (was 32)
   epochs: 50  # ~18秒/エポック × 50 = ~15分（余裕を持たせて50エポック）
   amp: true  # Automatic mixed precision
 
@@ -78,8 +78,8 @@ eval:
 # System configuration
 device: "auto"  # auto, cpu, cuda, mps
 seed: 42
-num_workers: 12  # Increased for faster data loading (adjust based on CPU cores)
-prefetch_factor: 4  # Number of batches prefetched per worker
+num_workers: 4  # Reduced for memory efficiency (was 12)
+prefetch_factor: 2  # Reduced for memory efficiency (was 4)
 persistent_workers: true  # Keep workers alive between epochs (reduces overhead)
 log_level: "INFO"
 log_dir: "runs"

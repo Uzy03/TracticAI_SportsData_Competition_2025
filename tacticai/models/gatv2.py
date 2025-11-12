@@ -500,44 +500,142 @@ class GATv2Layer4View(nn.Module):
         device = h1.device
         num_samples = B * V
 
-        h1_full = torch.zeros(num_samples, N_total, self.heads, self.out_features, device=device, dtype=h1.dtype)
-        h2_full = torch.zeros(num_samples, N_total, self.heads, self.out_features, device=device, dtype=h2.dtype)
-        for sample in range(num_samples):
-            graph_idx = sample // V
-            start = graph_idx * N_per_graph
-            end = start + N_per_graph
-            h1_full[sample, start:end] = h1[sample]
-            h2_full[sample, start:end] = h2[sample]
+        # Memory-efficient: process per graph to avoid creating large h1_full/h2_full tensors
+        # Each graph has N_per_graph nodes, and edge_index contains edges for all graphs
+        # Extract per-graph edge_index and process separately
+        E_per_graph = N_per_graph * N_per_graph  # Complete graph with self-loops
+        out_list = []
+        for b in range(B):
+            # Get edges for this graph (edges b*E_per_graph to (b+1)*E_per_graph)
+            start_edge = b * E_per_graph
+            end_edge = (b + 1) * E_per_graph
+            graph_edges = edge_index[:, start_edge:end_edge]  # [2, E_per_graph]
+            graph_edge_attr = edge_attr[start_edge:end_edge] if edge_attr is not None else None
+            
+            # Convert global node indices to local node indices (0 to N_per_graph-1)
+            graph_nodes_start = b * N_per_graph
+            graph_edges_local = graph_edges - graph_nodes_start  # [2, E_per_graph]
+            
+            # Process each view for this graph
+            for v in range(V):
+                sample_idx = b * V + v
+                h1_graph = h1[sample_idx]  # [N_per_graph, heads, out_features]
+                h2_graph = h2[sample_idx]  # [N_per_graph, heads, out_features]
+                
+                # Compute attention for this graph-view combination
+                att_scores = self._compute_attention_single(
+                    h1_graph, h2_graph, graph_edges_local, graph_edge_attr
+                )  # [E_per_graph, heads]
+                
+                # Apply dropout
+                if self.training and self.dropout > 0:
+                    att_scores = F.dropout(att_scores, p=self.dropout, training=True)
+                
+                # Aggregate
+                out_graph = self._aggregate_single(
+                    h1_graph, graph_edges_local, att_scores
+                )  # [N_per_graph, heads, out_features]
+                
+                out_list.append(out_graph)
         
-        # Self-loops are already included in edge_index (TacticAI spec: 22×22 complete graph)
-        # Do not add self-loops again if they're already present
-        # Note: edge_index should already contain self-loops from data preprocessing
-        
-        # Compute attention coefficients: TacticAI spec: e_ij = a^T LeakyReLU(W1*h_i + W2*h_j + U*edge_attr_ij)
-        att_scores = self._compute_attention_batched(
-            h1_full, h2_full, edge_index, edge_attr
-        )  # [B*V, E_total, heads]
-        
-        # Apply dropout
-        if self.training and self.dropout > 0:
-            att_scores = F.dropout(att_scores, p=self.dropout, training=True)
-        
-        # Apply attention and aggregate (use h1_full for aggregation)
-        out_full = self._aggregate(h1_full, edge_index, att_scores)  # [B*V, N_total, heads, out_features]
-        
-        # Extract per-graph outputs (loop - small B*V)
-        out = torch.zeros(num_samples, N_per_graph, self.heads, self.out_features, device=device, dtype=h1.dtype)
-        for sample in range(num_samples):
-            graph_idx = sample // V
-            start = graph_idx * N_per_graph
-            end = start + N_per_graph
-            out[sample] = out_full[sample, start:end]
+        # Stack outputs: [B*V, N_per_graph, heads, out_features]
+        out = torch.stack(out_list, dim=0)
         
         # Concatenate or average heads
         if self.concat:
             out = out.view(B * V, N_per_graph, self.heads * self.out_features)
         else:
             out = out.mean(dim=2)  # [B*V, N_per_graph, out_features]
+        
+        return out
+    
+    def _compute_attention_single(
+        self,
+        h1: torch.Tensor,  # [N, heads, out_features]
+        h2: torch.Tensor,  # [N, heads, out_features]
+        edge_index: torch.Tensor,  # [2, E]
+        edge_attr: Optional[torch.Tensor],  # [E, edge_dim]
+    ) -> torch.Tensor:
+        """Compute attention coefficients for a single graph (memory-efficient).
+        
+        Args:
+            h1: Source node features [N, heads, out_features]
+            h2: Destination node features [N, heads, out_features]
+            edge_index: Edge connectivity [2, E]
+            edge_attr: Edge features [E, edge_dim] (optional)
+            
+        Returns:
+            Attention scores [E, heads]
+        """
+        src, dst = edge_index[0], edge_index[1]
+        E = src.size(0)
+        heads, out_features = h1.shape[1], h1.shape[2]
+        
+        # Get source and destination features: [E, heads, out_features]
+        h1_src = h1[src]
+        h2_dst = h2[dst]
+        
+        # TacticAI spec: W1*h_i + W2*h_j + U*edge_attr_ij
+        h_sum = h1_src + h2_dst
+        
+        if edge_attr is not None and self.U is not None:
+            edge_transformed = self.U(edge_attr)  # [E, heads*out_features]
+            edge_transformed = edge_transformed.view(E, heads, out_features)
+            h_sum = h_sum + edge_transformed
+        
+        att_input = F.leaky_relu(h_sum, negative_slope=self.negative_slope)  # [E, heads, out_features]
+        att_scores = (self.att * att_input).sum(dim=-1)  # [E, heads]
+        
+        return att_scores
+    
+    def _aggregate_single(
+        self,
+        h: torch.Tensor,  # [N, heads, out_features]
+        edge_index: torch.Tensor,  # [2, E]
+        att_scores: torch.Tensor,  # [E, heads]
+    ) -> torch.Tensor:
+        """Aggregate features for a single graph (memory-efficient).
+        
+        Args:
+            h: Node features [N, heads, out_features]
+            edge_index: Edge connectivity [2, E]
+            att_scores: Attention scores [E, heads]
+            
+        Returns:
+            Aggregated features [N, heads, out_features]
+        """
+        src, dst = edge_index[0], edge_index[1]
+        N, heads, out_features = h.shape
+        E = src.size(0)
+        
+        # Normalize attention scores per destination node (numerically stable softmax)
+        # att_scores: [E, heads]
+        # Compute max per destination node for numerical stability
+        # Use a simple approach: for each destination node, compute max over its incoming edges
+        att_max = torch.full((N, heads), float('-inf'), device=h.device, dtype=att_scores.dtype)
+        for n in range(N):
+            mask = (dst == n)
+            if mask.any():
+                att_max[n] = att_scores[mask].max(dim=0)[0]  # [heads]
+        
+        # Subtract max per destination
+        att_stable = att_scores - att_max[dst]  # [E, heads]
+        att_exp = att_stable.exp()  # [E, heads]
+        
+        # Compute normalization: sum over edges grouped by destination
+        att_sum = torch.zeros(N, heads, device=h.device, dtype=att_exp.dtype)
+        att_sum.scatter_add_(0, dst.unsqueeze(-1).expand(-1, heads), att_exp)  # [N, heads]
+        
+        # Normalize: att_norm = att_exp / (att_sum[dst] + eps)
+        att_norm = att_exp / (att_sum[dst] + 1e-12)  # [E, heads]
+        
+        # Weight features by attention
+        h_src = h[src]  # [E, heads, out_features]
+        weighted = h_src * att_norm.unsqueeze(-1)  # [E, heads, out_features]
+        
+        # Aggregate: sum over edges grouped by destination
+        out = torch.zeros(N, heads, out_features, device=h.device, dtype=h.dtype)
+        out.scatter_add_(0, dst.unsqueeze(-1).unsqueeze(-1).expand(-1, heads, out_features), weighted)
         
         return out
     
@@ -548,24 +646,26 @@ class GATv2Layer4View(nn.Module):
         edge_index: torch.Tensor,  # [2, E_total]
         edge_attr: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        """Compute attention coefficients for batched graphs (TacticAI spec)."""
+        """Compute attention coefficients for batched graphs (TacticAI spec).
+        
+        Memory-efficient version: use index_select instead of gather to reduce
+        intermediate tensor allocations.
+        """
         src, dst = edge_index[0], edge_index[1]
         num_samples, _, heads, out_features = h1.shape
+        E_total = src.size(0)
 
-        src_index = src.unsqueeze(0).expand(num_samples, -1)
-        dst_index = dst.unsqueeze(0).expand(num_samples, -1)
-
-        gather_src = src_index.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, heads, out_features)
-        gather_dst = dst_index.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, heads, out_features)
-
-        h1_src = h1.gather(1, gather_src)
-        h2_dst = h2.gather(1, gather_dst)
+        # Use index_select instead of gather to reduce memory usage
+        # h1_src: [B*V, E_total, heads, out_features]
+        h1_src = h1.index_select(1, src)  # [B*V, E_total, heads, out_features]
+        h2_dst = h2.index_select(1, dst)  # [B*V, E_total, heads, out_features]
 
         h_sum = h1_src + h2_dst
 
         if edge_attr is not None and self.U is not None:
             edge_transformed = self.U(edge_attr)  # [E_total, heads*out_features]
-            edge_transformed = edge_transformed.view(1, edge_attr.size(0), heads, out_features)
+            edge_transformed = edge_transformed.view(E_total, heads, out_features)
+            edge_transformed = edge_transformed.unsqueeze(0).expand(num_samples, -1, -1, -1)
             h_sum = h_sum + edge_transformed
 
         att_input = F.leaky_relu(h_sum, negative_slope=self.negative_slope)
