@@ -772,7 +772,7 @@ def validate_epoch(
                 for g in range(batch_size):
                     if g >= targets.size(0):
                         stats["excluded_invalid_filter"] += 1
-                    continue
+                        continue
 
                     team_row = team_batched[g]
                     ball_row = ball_batched[g]
@@ -830,11 +830,11 @@ def validate_epoch(
                         if status in ("target_out_of_range", "empty"):
                             stats["invalid_target_not_in_cand"] += 1
                         stats["excluded_invalid_filter"] += 1
-                    continue
+                        continue
 
                     if cand_mask_single.sum().item() < min_cands:
                         stats["excluded_invalid_filter"] += 1
-                    continue
+                        continue
 
                     valid_indices.append(g)
                     cand_masks_list.append(cand_mask_single)
