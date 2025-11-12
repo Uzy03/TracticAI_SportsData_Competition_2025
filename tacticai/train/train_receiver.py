@@ -482,7 +482,7 @@ def train_epoch(
                     cand_mask_candidate = cand_batched[g].to(device=outputs.device, dtype=torch.bool)
                     if cand_mask_candidate.sum().item() == 0:
                         status = "empty"
-                    else:
+            else:
                         cand_mask_single = cand_mask_candidate.clone()
                         if 0 <= target_idx < cand_mask_single.size(0) and not cand_mask_single[target_idx]:
                             cand_mask_single[target_idx] = True
@@ -517,7 +517,7 @@ def train_epoch(
             kicker_team = torch.tensor(kicker_team_vals, device=outputs.device, dtype=team_labels.dtype)
             batch_size = outputs.size(0)
             nodes_per_graph = outputs.size(1)
-        else:
+                else:
             cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
 
         assert cand_masks.sum(dim=1).min().item() > 0, "Train cand_mask contains empty candidate set"
@@ -765,7 +765,7 @@ def validate_epoch(
                 for g in range(batch_size):
                     if g >= targets.size(0):
                         stats["excluded_invalid_filter"] += 1
-                        continue
+                    continue
 
                     team_row = team_batched[g]
                     ball_row = ball_batched[g]
@@ -816,11 +816,11 @@ def validate_epoch(
                         if status in ("target_out_of_range", "empty"):
                             stats["invalid_target_not_in_cand"] += 1
                         stats["excluded_invalid_filter"] += 1
-                        continue
+                    continue
 
                     if cand_mask_single.sum().item() < min_cands:
                         stats["excluded_invalid_filter"] += 1
-                        continue
+                    continue
 
                     valid_indices.append(g)
                     cand_masks_list.append(cand_mask_single)
@@ -1124,8 +1124,8 @@ def main():
         best_val_top3 = checkpoint.get("metrics", {}).get("top3", 0.0)
         logger.info(f"Resumed from epoch {start_epoch}")
     
-    # NOTE: debug: limit epochs to 1, restore Config["train"]["epochs"] when debugging finishes
-    for epoch in range(start_epoch, min(start_epoch + 1, config["train"]["epochs"])):
+    # Training loop
+    for epoch in range(start_epoch, config["train"]["epochs"]):
         logger.info(f"Epoch {epoch+1}/{config['train']['epochs']}")
         
         # Learning rate will be updated after train/val via scheduler step
