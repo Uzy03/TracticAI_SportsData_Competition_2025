@@ -631,6 +631,8 @@ class GATv2Layer4View(nn.Module):
         
         # Weight features by attention
         h_src = h[src]  # [E, heads, out_features]
+        # Ensure att_norm is the same dtype as h for AMP compatibility
+        att_norm = att_norm.to(h.dtype)
         weighted = h_src * att_norm.unsqueeze(-1)  # [E, heads, out_features]
         
         # Aggregate: sum over edges grouped by destination
