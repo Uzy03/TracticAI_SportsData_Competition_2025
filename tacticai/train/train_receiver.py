@@ -740,6 +740,14 @@ def validate_epoch(
 
             min_cands = max(1, int(min_cands_eval))
 
+            # Debug: Check if team/ball tensors are available
+            if batch_idx == 0 and logger is not None:
+                logger.info(
+                    f"[VAL-DBG] batch={batch_idx} team_tensor={'None' if team_tensor is None else 'OK'} "
+                    f"ball_tensor={'None' if ball_tensor is None else 'OK'} "
+                    f"cand_tensor={'None' if cand_tensor is None else 'OK'} batch_size={batch_size}"
+                )
+
             if team_tensor is not None and ball_tensor is not None:
                 team_batched = _reshape_to_batch(team_tensor, batch_size, nodes_per_graph).to(
                     device=outputs.device, dtype=torch.long
@@ -811,6 +819,13 @@ def validate_epoch(
                             target_idx=target_idx,
                         )
 
+                    # Debug logging for first batch, first few graphs
+                    if batch_idx == 0 and g < 3 and logger is not None:
+                        logger.info(
+                            f"[VAL-DBG] g={g} cand_mask_single={'None' if cand_mask_single is None else f'sum={cand_mask_single.sum().item()}'} "
+                            f"status={status} min_cands={min_cands} target_idx={target_idx}"
+                        )
+
                     if cand_mask_single is None:
                         if status in ("target_out_of_range", "empty"):
                             stats["invalid_target_not_in_cand"] += 1
@@ -855,6 +870,10 @@ def validate_epoch(
                         cand_masks.sum(dim=1).float().mean().item(),
                     )
             else:
+                if batch_idx == 0 and logger is not None:
+                    logger.warning(
+                        f"[VAL-DBG] batch={batch_idx} team_tensor or ball_tensor is None, using fallback cand_masks"
+                    )
                 cand_masks = torch.ones(batch_size, nodes_per_graph, dtype=torch.bool, device=outputs.device)
 
             assert cand_masks.sum(dim=1).min().item() > 0, "Validation cand_mask contains empty candidate set"
