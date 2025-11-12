@@ -24,7 +24,7 @@ scheduler:
 
 # Training configuration
 train:
-  batch_size: 16  # Reduced for memory efficiency (was 32)
+  batch_size: 32  # Restored to original (memory-efficient implementation allows larger batch)
   epochs: 50  # ~18秒/エポック × 50 = ~15分（余裕を持たせて50エポック）
   amp: true  # Automatic mixed precision
 
