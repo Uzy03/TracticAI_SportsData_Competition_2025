@@ -487,7 +487,7 @@ def train_epoch(
                         if 0 <= target_idx < cand_mask_single.size(0) and not cand_mask_single[target_idx]:
                             cand_mask_single[target_idx] = True
                             stats["invalid_target_not_in_cand"] += 1
-                
+
                 if cand_mask_single is None:
                     cand_mask_single, status = build_candidate_mask(
                         player_team=team_row,
@@ -828,9 +828,13 @@ def validate_epoch(
 
                 if not cand_masks_list:
                     if logger is not None:
-                        logger.info(
-                            "[VAL-FILTER] batch=%d total=%d kept=0 (all filtered)",
+                        logger.warning(
+                            "[VAL-FILTER] batch=%d total=%d kept=0 (all filtered) - "
+                            "excluded_invalid_filter=%d, invalid_team_mismatch=%d, invalid_target_not_in_cand=%d",
                             batch_idx, batch_size,
+                            stats.get("excluded_invalid_filter", 0),
+                            stats.get("invalid_team_mismatch", 0),
+                            stats.get("invalid_target_not_in_cand", 0),
                         )
                     continue
 
@@ -1123,8 +1127,9 @@ def main():
         best_val_top3 = checkpoint.get("metrics", {}).get("top3", 0.0)
         logger.info(f"Resumed from epoch {start_epoch}")
     
-    # Training loop
-    for epoch in range(start_epoch, config["train"]["epochs"]):
+    # DEBUG: Limit to 1 epoch for debugging
+    # TODO: Restore full training: for epoch in range(start_epoch, config["train"]["epochs"]):
+    for epoch in range(start_epoch, min(start_epoch + 1, config["train"]["epochs"])):
         logger.info(f"Epoch {epoch+1}/{config['train']['epochs']}")
         
         # Learning rate will be updated after train/val via scheduler step
