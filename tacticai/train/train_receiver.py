@@ -487,6 +487,7 @@ def train_epoch(
                         if 0 <= target_idx < cand_mask_single.size(0) and not cand_mask_single[target_idx]:
                             cand_mask_single[target_idx] = True
                             stats["invalid_target_not_in_cand"] += 1
+                
                 if cand_mask_single is None:
                     cand_mask_single, status = build_candidate_mask(
                         player_team=team_row,
