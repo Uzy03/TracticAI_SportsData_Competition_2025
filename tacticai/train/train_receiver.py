@@ -763,7 +763,7 @@ def validate_epoch(
                 for g in range(batch_size):
                     if g >= targets.size(0):
                         stats["excluded_invalid_filter"] += 1
-                        continue
+                    continue
 
                     team_row = team_batched[g]
                     ball_row = ball_batched[g]
