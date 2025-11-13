@@ -2,11 +2,12 @@
 # This config is designed to test if training works correctly by overfitting on a small subset
 
 # Debug overfit configuration
-# When enabled, uses a small subset of training data for both train and val
-# This allows testing if the model can overfit to a small dataset (train_top1 ≈ 1.0)
+# When enabled, uses a very small subset of training data for both train and val
+# This allows testing if the model can overfit to a tiny dataset (train_top1 ≈ 1.0)
+# All regularization is disabled: no label smoothing, dropout, augmentation, weight decay
 debug_overfit:
   enabled: true
-  num_samples: 32  # Number of samples to use (same for train and val)
+  num_samples: 8  # Very small number of samples (4-8 recommended for strict overfitting test)
   seed: 42  # Random seed for reproducible subset selection
 
 # Model configuration
@@ -21,8 +22,8 @@ model:
 # Optimizer configuration
 optimizer:
   type: adam
-  lr: 0.001      # ★ overfit
-  weight_decay: 0.0  # ★ overfit
+  lr: 0.001      # Fixed learning rate (1e-3 or 3e-4 recommended for overfitting test)
+  weight_decay: 0.0  # ★ No weight decay (overfit mode)
 
 # Scheduler configuration
 scheduler:
@@ -30,8 +31,8 @@ scheduler:
 
 # Training configuration
 train:
-  batch_size: 8  # Small batch size for mini subset
-  epochs: 50     # Should be enough to overfit on small dataset
+  batch_size: 4  # Small batch size for very small subset (8 samples = 2 batches)
+  epochs: 200    # Many epochs to ensure overfitting (200-300 recommended)
   amp: false     # ★ disable AMP for stability
 
 # Data configuration
