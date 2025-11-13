@@ -51,6 +51,14 @@ debug-train:
 	python tacticai/train/train_shot.py --config configs/shot.yaml --debug_overfit
 	python tacticai/train/train_cvae.py --config configs/cvae.yaml --debug_overfit
 
+# 過学習テスト：16件のミニセットで学習動作確認
+overfit-test:
+	python tools/make_mini_subset.py \
+		--src data/processed_ck/receiver_train/data.pickle \
+		--dst data/processed_ck/receiver_train/mini16.pickle \
+		--n 16 --seed 42
+	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml
+
 # サンプル実行
 sample-run:
 	python tacticai/train/train_receiver.py --config configs/receiver.yaml

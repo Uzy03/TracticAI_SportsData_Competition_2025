@@ -1,0 +1,76 @@
+# Configuration for receiver overfitting test (mini subset)
+# This config is designed to test if training works correctly by overfitting on 16 samples
+
+# Model configuration
+model:
+  input_dim: 16
+  hidden_dim: 128
+  num_classes: 22
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.0   # ★ overfit
+
+# Optimizer configuration
+optimizer:
+  type: adam
+  lr: 0.001      # ★ overfit
+  weight_decay: 0.0  # ★ overfit
+
+# Scheduler configuration
+scheduler:
+  type: none     # ★ disable scheduler
+
+# Training configuration
+train:
+  batch_size: 8  # 16件なら 8 か 16 推奨
+  epochs: 200    # ★ overfit 充分に回す
+  amp: false     # ★ disable AMP for stability
+
+# Data configuration
+data:
+  train_path: data/processed_ck/receiver_train/mini16.pickle  # ★ mini subset
+  val_path: data/processed_ck/receiver_val/data.pickle
+  test_path: data/processed_ck/receiver_test/data.pickle
+  format: pickle
+
+# Loss configuration
+loss:
+  type: cross_entropy
+  label_smoothing: 0.0   # ★ overfit
+  weight: 1.0
+  focal_loss:
+    enabled: false
+    alpha: 1.0
+    gamma: 2.0
+  class_weights: null
+  regularization:
+    l2_weight: 0.0       # ★ overfit
+    dropout_rate: 0.0    # ★ overfit
+
+# D2 equivariance configuration
+d2:
+  group_pool: false
+  transforms:
+    hflip: false
+    vflip: false          # ★ augmentation も全無効
+
+# Early stopping configuration
+early_stopping:
+  patience: 9999         # ほぼ無効化
+  min_delta: 0.0
+
+# Evaluation configuration
+eval:
+  batch_size: 5
+  min_cands_eval: 1
+
+# System configuration
+device: auto
+seed: 42
+num_workers: 0            # ★ 再現性＆デバッグ優先
+prefetch_factor: 2
+persistent_workers: false
+log_level: INFO
+log_dir: runs
+checkpoint_dir: checkpoints
+
