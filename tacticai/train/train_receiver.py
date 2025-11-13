@@ -13,7 +13,7 @@ from collections import defaultdict
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 import numpy as np
 from tqdm import tqdm
 
@@ -1134,43 +1134,89 @@ def main():
         train_dataset = create_dummy_dataset("receiver", num_samples=10, num_players=22)
         val_dataset = create_dummy_dataset("receiver", num_samples=5, num_players=22)
     else:
-        train_dataset = ReceiverDataset(
-            config["data"]["train_path"],
-            file_format=config["data"].get("format", "parquet"),
-            phase="train",
-        )
-        val_path = config["data"]["val_path"]
-        logger.info(f"[VAL-DATASET] Loading validation dataset from: {val_path}")
-        val_dataset = ReceiverDataset(
-            val_path,
-            file_format=config["data"].get("format", "parquet"),
-            phase="val",
-        )
-        logger.info(f"[VAL-DATASET] Validation dataset loaded: {len(val_dataset)} samples")
-        _assert_dataset_version(train_dataset, "train")
-        _assert_dataset_version(val_dataset, "val")
+        # Check if debug_overfit is enabled in config
+        debug_overfit_config = config.get("debug_overfit", {})
+        use_debug_overfit = debug_overfit_config.get("enabled", False)
         
-        # DEBUG: Check first few validation samples
-        if len(val_dataset) > 0:
-            logger.info(f"[VAL-DATASET] Checking first validation sample...")
-            try:
-                sample_data, sample_target = val_dataset[0]
-                logger.info(
-                    f"[VAL-DATASET] First sample - target={sample_target.item()}, "
-                    f"x.shape={sample_data.get('x', torch.tensor([])).shape}, "
-                    f"team={'present' if 'team' in sample_data else 'missing'}, "
-                    f"ball={'present' if 'ball' in sample_data else 'missing'}, "
-                    f"cand_mask={'present' if 'cand_mask' in sample_data else 'missing'}"
+        if use_debug_overfit:
+            # Load full training dataset first
+            logger.info("[DEBUG-OVERFIT] Creating mini subset for overfitting test...")
+            full_train_dataset = ReceiverDataset(
+                config["data"]["train_path"],
+                file_format=config["data"].get("format", "parquet"),
+                phase="train",
+            )
+            _assert_dataset_version(full_train_dataset, "train")
+            
+            num_samples = debug_overfit_config.get("num_samples", 32)
+            subset_seed = debug_overfit_config.get("seed", 42)
+            
+            # Create reproducible subset indices
+            rng = np.random.RandomState(subset_seed)
+            total_samples = len(full_train_dataset)
+            if num_samples > total_samples:
+                logger.warning(
+                    f"[DEBUG-OVERFIT] Requested {num_samples} samples but only {total_samples} available. "
+                    f"Using all {total_samples} samples."
                 )
-                if 'cand_mask' in sample_data:
-                    cand_mask = sample_data['cand_mask']
-                    target_idx = int(sample_target.item())
+                num_samples = total_samples
+            
+            # Shuffle and select subset indices
+            indices = rng.permutation(total_samples)[:num_samples]
+            indices = sorted(indices.tolist())  # Sort for reproducibility
+            
+            logger.info(
+                f"[DEBUG-OVERFIT] Selected {len(indices)} samples from {total_samples} total samples "
+                f"(seed={subset_seed}, indices={indices[:5]}...{indices[-5:] if len(indices) > 10 else indices})"
+            )
+            
+            # Create subset datasets (train=val=same samples for overfitting test)
+            train_dataset = Subset(full_train_dataset, indices)
+            val_dataset = Subset(full_train_dataset, indices)  # Same samples for train and val
+            
+            logger.info(
+                f"[DEBUG-OVERFIT] Created train/val datasets with {len(train_dataset)} samples each "
+                f"(train=val=same samples for overfitting test)"
+            )
+        else:
+            # Normal training mode
+            train_dataset = ReceiverDataset(
+                config["data"]["train_path"],
+                file_format=config["data"].get("format", "parquet"),
+                phase="train",
+            )
+            val_path = config["data"]["val_path"]
+            logger.info(f"[VAL-DATASET] Loading validation dataset from: {val_path}")
+            val_dataset = ReceiverDataset(
+                val_path,
+                file_format=config["data"].get("format", "parquet"),
+                phase="val",
+            )
+            logger.info(f"[VAL-DATASET] Validation dataset loaded: {len(val_dataset)} samples")
+            _assert_dataset_version(train_dataset, "train")
+            _assert_dataset_version(val_dataset, "val")
+            
+            # DEBUG: Check first few validation samples
+            if len(val_dataset) > 0:
+                logger.info(f"[VAL-DATASET] Checking first validation sample...")
+                try:
+                    sample_data, sample_target = val_dataset[0]
                     logger.info(
-                        f"[VAL-DATASET] First sample cand_mask - sum={cand_mask.sum().item()}, "
-                        f"shape={cand_mask.shape}, target_in_cand={cand_mask[target_idx].item() if target_idx < cand_mask.size(0) else 'N/A'}"
+                        f"[VAL-DATASET] First sample - target={sample_target.item()}, "
+                        f"x.shape={sample_data.get('x', torch.tensor([])).shape}, "
+                        f"team={'present' if 'team' in sample_data else 'missing'}, "
+                        f"ball={'present' if 'ball' in sample_data else 'missing'}, "
+                        f"cand_mask={'present' if 'cand_mask' in sample_data else 'missing'}"
                     )
-            except Exception as e:
-                logger.warning(f"[VAL-DATASET] Error checking first sample: {e}")
+                    if 'cand_mask' in sample_data:
+                        cand_mask = sample_data['cand_mask']
+                        target_idx = int(sample_target.item())
+                        logger.info(
+                            f"[VAL-DATASET] First sample cand_mask - sum={cand_mask.sum().item()}, "
+                            f"shape={cand_mask.shape}, target_in_cand={cand_mask[target_idx].item() if target_idx < cand_mask.size(0) else 'N/A'}"
+                        )
+                except Exception as e:
+                    logger.warning(f"[VAL-DATASET] Error checking first sample: {e}")
     
     # Create data loaders
     train_loader = create_dataloader(
@@ -1344,7 +1390,11 @@ def main():
         )
         
         # Save CSV history after each epoch (overwrite mode)
-        csv_path = Path(config.get("log_dir", "runs")) / "training_history.csv"
+        # Use different filename for debug_overfit mode
+        debug_overfit_config = config.get("debug_overfit", {})
+        use_debug_overfit = debug_overfit_config.get("enabled", False)
+        csv_filename = "training_history_debug_overfit.csv" if use_debug_overfit else "training_history.csv"
+        csv_path = Path(config.get("log_dir", "runs")) / csv_filename
         save_training_history_csv(
             train_history,
             val_history,
@@ -1399,7 +1449,11 @@ def main():
         )
         
         # Save final CSV with test metrics
-        csv_path = Path(config.get("log_dir", "runs")) / "training_history.csv"
+        # Use different filename for debug_overfit mode
+        debug_overfit_config = config.get("debug_overfit", {})
+        use_debug_overfit = debug_overfit_config.get("enabled", False)
+        csv_filename = "training_history_debug_overfit.csv" if use_debug_overfit else "training_history.csv"
+        csv_path = Path(config.get("log_dir", "runs")) / csv_filename
         save_training_history_csv(
             train_history,
             val_history,

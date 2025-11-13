@@ -1,5 +1,13 @@
 # Configuration for receiver overfitting test (mini subset)
-# This config is designed to test if training works correctly by overfitting on 16 samples
+# This config is designed to test if training works correctly by overfitting on a small subset
+
+# Debug overfit configuration
+# When enabled, uses a small subset of training data for both train and val
+# This allows testing if the model can overfit to a small dataset (train_top1 ≈ 1.0)
+debug_overfit:
+  enabled: true
+  num_samples: 32  # Number of samples to use (same for train and val)
+  seed: 42  # Random seed for reproducible subset selection
 
 # Model configuration
 model:
@@ -22,14 +30,16 @@ scheduler:
 
 # Training configuration
 train:
-  batch_size: 8  # 16件なら 8 か 16 推奨
-  epochs: 200    # ★ overfit 充分に回す
+  batch_size: 8  # Small batch size for mini subset
+  epochs: 50     # Should be enough to overfit on small dataset
   amp: false     # ★ disable AMP for stability
 
 # Data configuration
+# Note: When debug_overfit.enabled=true, train_path will be used to create a subset
+# and both train and val will use the same subset samples
 data:
-  train_path: data/processed_ck/receiver_train/mini16.pickle  # ★ mini subset
-  val_path: data/processed_ck/receiver_val/data.pickle
+  train_path: data/processed_ck/receiver_train/data.pickle  # Full training data (subset will be created from this)
+  val_path: data/processed_ck/receiver_val/data.pickle  # Not used when debug_overfit.enabled=true
   test_path: data/processed_ck/receiver_test/data.pickle
   format: pickle
 
