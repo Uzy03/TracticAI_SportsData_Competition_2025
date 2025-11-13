@@ -26,6 +26,7 @@ from tacticai.modules import (
     set_seed, get_device, save_checkpoint, setup_logging,
     CosineAnnealingScheduler, EarlyStopping, save_training_history,
 )
+from tacticai.modules.utils import save_training_history_csv
 from tacticai.modules.transforms import RandomFlipTransform
 
 
@@ -1104,6 +1105,29 @@ def main():
         persistent_workers=config.get("persistent_workers", False) if config.get("num_workers", 0) > 0 else False,
     )
     
+    # Create test dataset and loader (for final evaluation)
+    test_dataset = None
+    test_loader = None
+    if not args.debug_overfit and "test_path" in config.get("data", {}):
+        try:
+            test_dataset = ReceiverDataset(
+                config["data"]["test_path"],
+                file_format=config["data"].get("format", "parquet"),
+                phase="test",
+            )
+            _assert_dataset_version(test_dataset, "test")
+            test_loader = create_dataloader(
+                test_dataset,
+                batch_size=config["eval"]["batch_size"],
+                shuffle=False,
+                num_workers=config.get("num_workers", 0),
+                pin_memory=True if str(device).startswith("cuda") else False,
+                prefetch_factor=config.get("prefetch_factor", 2),
+                persistent_workers=config.get("persistent_workers", False) if config.get("num_workers", 0) > 0 else False,
+            )
+        except Exception as e:
+            logger.warning(f"Could not load test dataset: {e}")
+    
     # Create model
     model = create_model(config, device)
     logger.info(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
@@ -1231,6 +1255,15 @@ def main():
             history_path
         )
         
+        # Save CSV history after each epoch (overwrite mode)
+        csv_path = Path(config.get("log_dir", "runs")) / "training_history.csv"
+        save_training_history_csv(
+            train_history,
+            val_history,
+            test_history=None,  # Test metrics will be added at the end
+            filepath=csv_path
+        )
+        
         # Save best model (based on Top-3 accuracy)
         if val_metrics["top3"] > best_val_top3:
             best_val_top3 = val_metrics["top3"]
@@ -1248,6 +1281,44 @@ def main():
             break
     
     logger.info(f"Training completed. Best validation Top-3 accuracy: {best_val_top3:.4f}")
+    
+    # Evaluate on test set if available
+    test_history = None
+    if test_loader is not None:
+        logger.info("Evaluating on test set...")
+        test_metrics = validate_epoch(
+            model,
+            test_loader,
+            criterion,
+            device,
+            metrics,
+            logger,
+            min_cands_eval=config.get("eval", {}).get("min_cands_eval", 1),
+        )
+        test_history = {
+            "loss": test_metrics["loss"],
+            "accuracy": test_metrics["accuracy"],
+            "top1": test_metrics["top1"],
+            "top3": test_metrics["top3"],
+            "top5": test_metrics["top5"],
+        }
+        logger.info(
+            f"Test - Loss: {test_metrics['loss']:.4f}, "
+            f"Acc: {test_metrics['accuracy']:.4f}, "
+            f"Top-1: {test_metrics['top1']:.4f}, "
+            f"Top-3: {test_metrics['top3']:.4f}, "
+            f"Top-5: {test_metrics['top5']:.4f}"
+        )
+        
+        # Save final CSV with test metrics
+        csv_path = Path(config.get("log_dir", "runs")) / "training_history.csv"
+        save_training_history_csv(
+            train_history,
+            val_history,
+            test_history=test_history,
+            filepath=csv_path
+        )
+        logger.info(f"Training history saved to {csv_path}")
 
 
 if __name__ == "__main__":
