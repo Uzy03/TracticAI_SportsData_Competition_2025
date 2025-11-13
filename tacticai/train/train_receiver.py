@@ -1148,7 +1148,7 @@ def main():
     
     # DEBUG: Limit to 1 epoch for debugging
     # TODO: Restore full training: for epoch in range(start_epoch, config["train"]["epochs"]):
-    for epoch in range(start_epoch, min(start_epoch + 1, config["train"]["epochs"])):
+    for epoch in range(start_epoch, max(start_epoch + 1, config["train"]["epochs"])):
         logger.info(f"Epoch {epoch+1}/{config['train']['epochs']}")
         
         # Learning rate will be updated after train/val via scheduler step
