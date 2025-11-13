@@ -795,6 +795,14 @@ def validate_epoch(
                     kicker_team_val = int(team_row[kicker_idx].item())
 
                     target_idx = int(targets[g].item())
+                    
+                    # DEBUG: Output target_idx for first few batches
+                    if batch_idx < 3 and g < 2 and logger is not None:
+                        logger.info(
+                            f"[VAL-DEBUG-BATCH] batch={batch_idx}, graph={g}, target_idx={target_idx}, "
+                            f"kicker_team={kicker_team_val}, target_team={int(team_row[target_idx].item()) if 0 <= target_idx < team_row.size(0) else 'N/A'}"
+                        )
+                    
                     if 0 <= target_idx < team_row.size(0):
                         if int(team_row[target_idx].item()) != kicker_team_val:
                             stats["invalid_team_mismatch"] += 1
@@ -819,6 +827,26 @@ def validate_epoch(
                             valid_mask=valid_row,
                             target_idx=target_idx,
                         )
+
+                    # DEBUG: Check cand_mask[target_idx] and output details
+                    if cand_mask_single is not None and target_idx < cand_mask_single.size(0):
+                        target_in_cand_mask = bool(cand_mask_single[target_idx].item())
+                        cand_mask_sum = int(cand_mask_single.sum().item())
+                        
+                        # DEBUG: Output for first few batches
+                        if batch_idx < 3 and g < 2 and logger is not None:
+                            logger.info(
+                                f"[VAL-DEBUG-CAND] batch={batch_idx}, graph={g}, target_idx={target_idx}, "
+                                f"cand_mask[target]={target_in_cand_mask}, cand_mask.sum()={cand_mask_sum}, "
+                                f"status={status}"
+                            )
+                        
+                        # Assert that target must be in candidates
+                        if not target_in_cand_mask:
+                            raise AssertionError(
+                                f"Target not in candidates! batch={batch_idx}, graph={g}, target={target_idx}, "
+                                f"cand_mask_sum={cand_mask_sum}, cand_mask[target]={target_in_cand_mask}"
+                            )
 
                     # Debug logging for first batch, first few graphs
                     if batch_idx == 0 and g < 3 and logger is not None:
@@ -896,6 +924,23 @@ def validate_epoch(
                 Ncand = int(cm.sum().item())
                 logits_b = outputs[b][cm] if Ncand > 0 else outputs[b]
                 target_global = int(target[b].item())
+                graph_id = valid_indices[b] if b < len(valid_indices) else b
+
+                # DEBUG: Check if target is in cand_mask
+                if target_global < cm.size(0):
+                    target_in_cand = bool(cm[target_global].item())
+                    if not target_in_cand:
+                        # Assert that target must be in candidates
+                        raise AssertionError(
+                            f"Target not in candidates! graph_id={graph_id}, target={target_global}, "
+                            f"cand_mask_sum={Ncand}, cand_mask[target]={target_in_cand}"
+                        )
+                else:
+                    target_in_cand = False
+                    raise AssertionError(
+                        f"Target index out of range! graph_id={graph_id}, target={target_global}, "
+                        f"cand_mask_size={cm.size(0)}"
+                    )
 
                 cand_indices = torch.arange(outputs.size(1), device=outputs.device)[cm]
                 if (cand_indices == target_global).any():
@@ -934,6 +979,24 @@ def validate_epoch(
                         f"[WARN] target {target_global} not in candidates for graph {b} (val) "
                         f"(target_team={target_team_repr}, kicker_team={kicker_team_repr}, "
                         f"cand_true_sum={int(cm.sum().item())})"
+                    )
+
+                # DEBUG: Output detailed information for first batch, first sample
+                if batch_idx == 0 and b == 0 and logger is not None:
+                    logits_full = outputs[b]  # Full logits before masking
+                    logits_masked = logits_b  # Logits after masking
+                    topk_values, topk_indices = torch.topk(logits_full, k=min(5, logits_full.size(0)))
+                    topk_cand_values, topk_cand_indices = torch.topk(logits_masked, k=min(5, logits_masked.size(0)))
+                    
+                    logger.info(
+                        f"[VAL-DEBUG] batch={batch_idx}, graph={b}, graph_id={graph_id}:\n"
+                        f"  target_global={target_global}, target_in_cand={target_in_cand}, cand_mask[target]={cm[target_global].item() if target_global < cm.size(0) else 'N/A'}\n"
+                        f"  cand_mask.sum()={Ncand}, cand_mask.shape={cm.shape}\n"
+                        f"  logits_full.shape={logits_full.shape}, logits_full.mean()={logits_full.mean().item():.6f}, logits_full.std()={logits_full.std().item():.6f}\n"
+                        f"  logits_masked.shape={logits_masked.shape}, logits_masked.mean()={logits_masked.mean().item():.6f}, logits_masked.std()={logits_masked.std().item():.6f}\n"
+                        f"  topk_full_indices={topk_indices.tolist()}, topk_full_values={topk_values.tolist()}\n"
+                        f"  topk_cand_indices={topk_cand_indices.tolist()}, topk_cand_values={topk_cand_values.tolist()}\n"
+                        f"  cand_target_idx={cand_target_idx}, target_in_topk={cand_target_idx in topk_cand_indices.tolist()}"
                     )
 
                 graph_outputs.append(logits_b.unsqueeze(0))
@@ -1076,13 +1139,38 @@ def main():
             file_format=config["data"].get("format", "parquet"),
             phase="train",
         )
+        val_path = config["data"]["val_path"]
+        logger.info(f"[VAL-DATASET] Loading validation dataset from: {val_path}")
         val_dataset = ReceiverDataset(
-            config["data"]["val_path"],
+            val_path,
             file_format=config["data"].get("format", "parquet"),
             phase="val",
         )
+        logger.info(f"[VAL-DATASET] Validation dataset loaded: {len(val_dataset)} samples")
         _assert_dataset_version(train_dataset, "train")
         _assert_dataset_version(val_dataset, "val")
+        
+        # DEBUG: Check first few validation samples
+        if len(val_dataset) > 0:
+            logger.info(f"[VAL-DATASET] Checking first validation sample...")
+            try:
+                sample_data, sample_target = val_dataset[0]
+                logger.info(
+                    f"[VAL-DATASET] First sample - target={sample_target.item()}, "
+                    f"x.shape={sample_data.get('x', torch.tensor([])).shape}, "
+                    f"team={'present' if 'team' in sample_data else 'missing'}, "
+                    f"ball={'present' if 'ball' in sample_data else 'missing'}, "
+                    f"cand_mask={'present' if 'cand_mask' in sample_data else 'missing'}"
+                )
+                if 'cand_mask' in sample_data:
+                    cand_mask = sample_data['cand_mask']
+                    target_idx = int(sample_target.item())
+                    logger.info(
+                        f"[VAL-DATASET] First sample cand_mask - sum={cand_mask.sum().item()}, "
+                        f"shape={cand_mask.shape}, target_in_cand={cand_mask[target_idx].item() if target_idx < cand_mask.size(0) else 'N/A'}"
+                    )
+            except Exception as e:
+                logger.warning(f"[VAL-DATASET] Error checking first sample: {e}")
     
     # Create data loaders
     train_loader = create_dataloader(
