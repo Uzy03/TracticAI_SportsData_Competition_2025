@@ -1,34 +1,33 @@
 # Configuration for receiver prediction task
 
 # Model configuration
+# Same as overfit test to ensure consistency
 model:
   input_dim: 16  # Node feature dimension: x, y, vx, vy, height, weight, dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker, dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal, ball, team
-  hidden_dim: 256  # Increased from 128 to 256 for better model capacity
+  hidden_dim: 128  # Same as overfit test
   num_classes: 22  # Number of players
-  num_layers: 4  # Increased from 3 to 4 for deeper model
-  num_heads: 8  # Increased from 4 to 8 for more attention heads
-  dropout: 0.15  # Reduced from 0.2 for larger model (less regularization)
-  mlp_num_layers: 3  # MLP head layers (increased from default 2 to 3)
+  num_layers: 3  # Same as overfit test
+  num_heads: 4  # Same as overfit test
+  dropout: 0.0  # Same as overfit test (no regularization for debugging)
 
 # Optimizer configuration
+# Same as overfit test
 optimizer:
   type: "adam"
-  lr: 0.001  # Reduced from 0.003 to prevent loss explosion (step 1: learning rate adjustment)
-  weight_decay: 0.00005  # Reduced from 0.0001 for larger model
+  lr: 0.001  # Same as overfit test
+  weight_decay: 0.0  # Same as overfit test (no weight decay for debugging)
 
 # Scheduler configuration
-# StepLR: Reduce learning rate by gamma every step_size epochs
-# lr=0.001 -> 0.0005 (epoch 10) -> 0.00025 (epoch 20) -> 0.000125 (epoch 30) -> ...
+# Same as overfit test (no scheduler)
 scheduler:
-  type: "step"
-  step_size: 10  # Reduce LR every 10 epochs
-  gamma: 0.5  # Multiply LR by 0.5 at each step
+  type: "none"  # Same as overfit test (fixed learning rate, no scheduler)
 
 # Training configuration
+# batch_size and epochs kept for full training, but amp disabled like overfit test
 train:
-  batch_size: 32  # Restored to original (memory-efficient implementation allows larger batch)
-  epochs: 50  # ~18秒/エポック × 50 = ~15分（余裕を持たせて50エポック）
-  amp: true  # Automatic mixed precision
+  batch_size: 32  # Keep larger batch for full dataset (overfit test uses 4)
+  epochs: 50  # Keep 50 epochs for full training
+  amp: false  # Same as overfit test (disabled for stability)
 
 # Data configuration
 data:
@@ -38,12 +37,10 @@ data:
   format: "pickle"
 
 # Loss configuration
+# Same as overfit test (no regularization)
 loss:
-  # Cross-entropy loss with label smoothing
-  # L = -Σ y_i * log(p_i) where p_i = softmax(logits_i)
-  # With label smoothing: y_i = (1 - α) * y_i + α / num_classes
   type: "cross_entropy"
-  label_smoothing: 0.05  # Reduced from 0.1 for larger model (less regularization)
+  label_smoothing: 0.0  # Same as overfit test (no label smoothing)
   weight: 1.0  # Loss weight
   
   # Focal loss parameters (alternative to cross-entropy)
@@ -57,15 +54,16 @@ loss:
   
   # Regularization terms
   regularization:
-    l2_weight: 0.0001  # L2 regularization weight
-    dropout_rate: 0.2  # Dropout rate
+    l2_weight: 0.0  # Same as overfit test (no L2 regularization)
+    dropout_rate: 0.0  # Same as overfit test (no dropout regularization)
 
 # D2 equivariance configuration
+# Same as overfit test (no augmentation)
 d2:
   group_pool: false  # Disable group pooling; ReceiverModel handles D2 internally
   transforms:
-    hflip: true
-    vflip: true
+    hflip: false  # Same as overfit test (no augmentation)
+    vflip: false  # Same as overfit test (no augmentation)
 
 # Early stopping configuration
 early_stopping:
