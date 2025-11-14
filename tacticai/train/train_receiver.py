@@ -663,7 +663,9 @@ def train_epoch(
             graphs_in_batch += 1
 
         if graphs_in_batch == 0:
-                    continue
+            logger = logging.getLogger(__name__)
+            logger.warning(f"[TRAIN-WARN] batch={batch_idx}: graphs_in_batch=0, skipping gradient update")
+            continue
             
         loss = batch_loss_sum / graphs_in_batch
         num_graphs_total += graphs_in_batch
@@ -682,10 +684,10 @@ def train_epoch(
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
         
-        # Log gradient norm for debugging (first few batches only)
-        if batch_idx < 3:
-            logger = logging.getLogger(__name__)
-            logger.info(f"[TRAIN-GRAD] batch={batch_idx}, grad_norm={grad_norm.item():.6f}, loss={loss.item():.4f}")
+        # Log gradient norm for debugging (first few batches and periodically)
+        logger = logging.getLogger(__name__)
+        if batch_idx < 3 or batch_idx % 10 == 0:
+            logger.info(f"[TRAIN-GRAD] batch={batch_idx}, grad_norm={grad_norm.item():.6f}, loss={loss.item():.4f}, graphs={graphs_in_batch}")
         
         postfix = {"loss": f"{loss.item():.4f}"}
         if profile_enabled and iter_start is not None:
@@ -1163,7 +1165,16 @@ def validate_epoch(
         if num_graphs_total == 0:
             logger.warning("No valid graphs in validation set!")
         else:
-            logger.info(f"Val Loss calculation: total_loss={total_loss:.6f}, num_graphs={num_graphs_total}, avg_loss={total_loss/num_graphs_total:.6f}")
+            avg_loss = total_loss / num_graphs_total
+            logger.info(f"Val Loss calculation: total_loss={total_loss:.6f}, num_graphs={num_graphs_total}, avg_loss={avg_loss:.6f}")
+            # Check if loss is changing (should vary across epochs)
+            if not hasattr(validate_epoch, "_last_val_loss"):
+                validate_epoch._last_val_loss = avg_loss
+            else:
+                loss_diff = abs(avg_loss - validate_epoch._last_val_loss)
+                if loss_diff < 1e-6:
+                    logger.warning(f"Val Loss is not changing! current={avg_loss:.6f}, last={validate_epoch._last_val_loss:.6f}, diff={loss_diff:.9f}")
+                validate_epoch._last_val_loss = avg_loss
     
     return epoch_metrics
 
