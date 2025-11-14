@@ -13,12 +13,12 @@ model:
 # Optimizer configuration
 optimizer:
   type: "adam"
-  lr: 0.003  # Moderate learning rate (0.01 was too high, caused loss explosion)
+  lr: 0.001  # Reduced from 0.003 to prevent loss explosion (step 1: learning rate adjustment)
   weight_decay: 0.00005  # Reduced from 0.0001 for larger model
 
 # Scheduler configuration
 # StepLR: Reduce learning rate by gamma every step_size epochs
-# lr=0.003 -> 0.0015 (epoch 10) -> 0.00075 (epoch 20) -> 0.000375 (epoch 30) -> ...
+# lr=0.001 -> 0.0005 (epoch 10) -> 0.00025 (epoch 20) -> 0.000125 (epoch 30) -> ...
 scheduler:
   type: "step"
   step_size: 10  # Reduce LR every 10 epochs
