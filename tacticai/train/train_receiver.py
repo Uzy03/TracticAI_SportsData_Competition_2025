@@ -7,6 +7,7 @@ import argparse
 import logging
 import math
 import time
+from datetime import datetime
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
@@ -1219,13 +1220,19 @@ def main():
     # Set random seed
     set_seed(config.get("seed", 42))
     
+    # Generate timestamp for file naming (YYYYMMDD_HHMMSS format)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
     # Setup device
     device = get_device(config.get("device", "auto"))
     
-    # Setup logging
+    # Setup logging with timestamped filename
+    log_dir = Path(config.get("log_dir", "runs"))
+    log_filename = f"training_{timestamp}.log"
     logger = setup_logging(
-        config.get("log_dir", "runs"),
-        config.get("log_level", "INFO")
+        log_dir,
+        config.get("log_level", "INFO"),
+        log_file=log_filename
     )
     
     logger.info(f"Training receiver prediction model on {device}")
@@ -1582,13 +1589,17 @@ def main():
         )
         
         # Save CSV history after each epoch (overwrite mode)
-        # Use different filename for debug_overfit mode
+        # Use different filename for debug_overfit mode with timestamp
         if args.debug_overfit_single_sample:
-            csv_filename = "training_history_debug_overfit_single.csv"
+            csv_filename = f"training_history_debug_overfit_single_{timestamp}.csv"
         else:
             debug_overfit_config = config.get("debug_overfit", {})
             use_debug_overfit = debug_overfit_config.get("enabled", False)
-            csv_filename = "training_history_debug_overfit.csv" if use_debug_overfit else "training_history.csv"
+            if use_debug_overfit:
+                num_samples = args.debug_overfit_num_samples or debug_overfit_config.get("num_samples", 8)
+                csv_filename = f"training_history_debug_overfit_n{num_samples}_{timestamp}.csv"
+            else:
+                csv_filename = f"training_history_{timestamp}.csv"
         csv_path = Path(config.get("log_dir", "runs")) / csv_filename
         save_training_history_csv(
             train_history,
@@ -1726,13 +1737,17 @@ def main():
         )
         
         # Save final CSV with test metrics
-        # Use different filename for debug_overfit mode
+        # Use different filename for debug_overfit mode with timestamp
         if args.debug_overfit_single_sample:
-            csv_filename = "training_history_debug_overfit_single.csv"
+            csv_filename = f"training_history_debug_overfit_single_{timestamp}.csv"
         else:
             debug_overfit_config = config.get("debug_overfit", {})
             use_debug_overfit = debug_overfit_config.get("enabled", False)
-            csv_filename = "training_history_debug_overfit.csv" if use_debug_overfit else "training_history.csv"
+            if use_debug_overfit:
+                num_samples = args.debug_overfit_num_samples or debug_overfit_config.get("num_samples", 8)
+                csv_filename = f"training_history_debug_overfit_n{num_samples}_{timestamp}.csv"
+            else:
+                csv_filename = f"training_history_{timestamp}.csv"
         csv_path = Path(config.get("log_dir", "runs")) / csv_filename
         save_training_history_csv(
             train_history,
