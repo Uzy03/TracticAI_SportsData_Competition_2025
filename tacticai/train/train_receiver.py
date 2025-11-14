@@ -1098,6 +1098,11 @@ def main():
     parser = argparse.ArgumentParser(description="Train receiver prediction model")
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
     parser.add_argument("--debug_overfit", action="store_true", help="Debug overfit test")
+    parser.add_argument(
+        "--debug_overfit_single_sample",
+        action="store_true",
+        help="Debug overfit test with single sample (overrides config settings)"
+    )
     parser.add_argument("--resume", type=str, help="Path to checkpoint to resume from")
     parser.add_argument(
         "--profile",
@@ -1129,7 +1134,44 @@ def main():
     assert config["d2"]["group_pool"] is False, "STOP: group_pool must be False but True was loaded."
     
     # Create datasets
-    if args.debug_overfit:
+    if args.debug_overfit_single_sample:
+        # Single sample overfit test mode
+        logger.info("[DEBUG-OVERFIT-SINGLE] Using single sample for overfitting test...")
+        full_train_dataset = ReceiverDataset(
+            config["data"]["train_path"],
+            file_format=config["data"].get("format", "parquet"),
+            phase="train",
+        )
+        _assert_dataset_version(full_train_dataset, "train")
+        
+        if len(full_train_dataset) == 0:
+            raise ValueError("[DEBUG-OVERFIT-SINGLE] Training dataset is empty!")
+        
+        # Use first sample only
+        train_dataset = Subset(full_train_dataset, [0])
+        val_dataset = Subset(full_train_dataset, [0])  # Same sample for train and val
+        
+        logger.info(
+            f"[DEBUG-OVERFIT-SINGLE] Using first sample only: "
+            f"train={len(train_dataset)} samples, val={len(val_dataset)} samples"
+        )
+        
+        # Override config for single sample overfit test
+        config["train"]["batch_size"] = 1
+        config["train"]["epochs"] = 500
+        config["optimizer"]["lr"] = 1e-4
+        config["optimizer"]["weight_decay"] = 0.0
+        config["model"]["dropout"] = 0.0
+        config["loss"]["label_smoothing"] = 0.0
+        config["d2"]["transforms"]["hflip"] = False
+        config["d2"]["transforms"]["vflip"] = False
+        
+        logger.info(
+            f"[DEBUG-OVERFIT-SINGLE] Overridden settings: "
+            f"batch_size=1, epochs=500, lr=1e-4, weight_decay=0.0, dropout=0.0, "
+            f"label_smoothing=0.0, augmentation=OFF"
+        )
+    elif args.debug_overfit:
         # Use small dataset for overfit test
         train_dataset = create_dummy_dataset("receiver", num_samples=10, num_players=22)
         val_dataset = create_dummy_dataset("receiver", num_samples=5, num_players=22)
@@ -1219,10 +1261,12 @@ def main():
                     logger.warning(f"[VAL-DATASET] Error checking first sample: {e}")
     
     # Create data loaders
+    # Override shuffle for single sample mode
+    train_shuffle = False if args.debug_overfit_single_sample else True
     train_loader = create_dataloader(
         train_dataset,
         batch_size=config["train"]["batch_size"],
-        shuffle=True,
+        shuffle=train_shuffle,
         num_workers=config.get("num_workers", 0),
         pin_memory=True if str(device).startswith("cuda") else False,  # Enable for GPU
         prefetch_factor=config.get("prefetch_factor", 2),
@@ -1304,9 +1348,9 @@ def main():
         best_val_top3 = checkpoint.get("metrics", {}).get("top3", 0.0)
         logger.info(f"Resumed from epoch {start_epoch}")
     
-    # DEBUG: Limit to 1 epoch for debugging
-    # TODO: Restore full training: for epoch in range(start_epoch, config["train"]["epochs"]):
-    for epoch in range(start_epoch, max(start_epoch + 1, config["train"]["epochs"])):
+    # Training loop
+    # Note: For debug_overfit_single_sample, epochs is set to 500 in config override
+    for epoch in range(start_epoch, config["train"]["epochs"]):
         logger.info(f"Epoch {epoch+1}/{config['train']['epochs']}")
         
         # Learning rate will be updated after train/val via scheduler step
@@ -1341,25 +1385,32 @@ def main():
             current_lr = optimizer.param_groups[0]['lr']
         
         # Log metrics
-        logger.info(
-            f"Train - Loss: {train_metrics['loss']:.4f}, "
-                   f"Acc: {train_metrics['accuracy']:.4f}, "
-                   f"Top-1: {train_metrics['top1']:.4f}, "
-                   f"Top-3: {train_metrics['top3']:.4f}, "
-            f"Top-5: {train_metrics['top5']:.4f} "
-            f"(excluded_invalid={int(train_metrics.get('excluded_invalid', 0))}, "
-            f"excluded_invalid_filter={int(train_metrics.get('excluded_invalid_filter', 0))})"
-        )
-        
-        logger.info(
-            f"Val   - Loss: {val_metrics['loss']:.4f}, "
-                   f"Acc: {val_metrics['accuracy']:.4f}, "
-                   f"Top-1: {val_metrics['top1']:.4f}, "
-                   f"Top-3: {val_metrics['top3']:.4f}, "
-            f"Top-5: {val_metrics['top5']:.4f} "
-            f"(excluded_invalid={int(val_metrics.get('excluded_invalid', 0))}, "
-            f"excluded_invalid_filter={int(val_metrics.get('excluded_invalid_filter', 0))})"
-        )
+        # Special logging for single sample debug mode
+        if args.debug_overfit_single_sample:
+            logger.info(
+                f"Epoch {epoch+1}: train_loss={train_metrics['loss']:.6f}, train_top1={train_metrics['top1']:.6f}, "
+                f"val_loss={val_metrics['loss']:.6f}, val_top1={val_metrics['top1']:.6f}"
+            )
+        else:
+            logger.info(
+                f"Train - Loss: {train_metrics['loss']:.4f}, "
+                       f"Acc: {train_metrics['accuracy']:.4f}, "
+                       f"Top-1: {train_metrics['top1']:.4f}, "
+                       f"Top-3: {train_metrics['top3']:.4f}, "
+                f"Top-5: {train_metrics['top5']:.4f} "
+                f"(excluded_invalid={int(train_metrics.get('excluded_invalid', 0))}, "
+                f"excluded_invalid_filter={int(train_metrics.get('excluded_invalid_filter', 0))})"
+            )
+            
+            logger.info(
+                f"Val   - Loss: {val_metrics['loss']:.4f}, "
+                       f"Acc: {val_metrics['accuracy']:.4f}, "
+                       f"Top-1: {val_metrics['top1']:.4f}, "
+                       f"Top-3: {val_metrics['top3']:.4f}, "
+                f"Top-5: {val_metrics['top5']:.4f} "
+                f"(excluded_invalid={int(val_metrics.get('excluded_invalid', 0))}, "
+                f"excluded_invalid_filter={int(val_metrics.get('excluded_invalid_filter', 0))})"
+            )
 
         logger.info(
             "[TRAIN-AUDIT] team_mismatch=%d, target_not_in_cand=%d, excluded_invalid_filter=%d",
@@ -1391,9 +1442,12 @@ def main():
         
         # Save CSV history after each epoch (overwrite mode)
         # Use different filename for debug_overfit mode
-        debug_overfit_config = config.get("debug_overfit", {})
-        use_debug_overfit = debug_overfit_config.get("enabled", False)
-        csv_filename = "training_history_debug_overfit.csv" if use_debug_overfit else "training_history.csv"
+        if args.debug_overfit_single_sample:
+            csv_filename = "training_history_debug_overfit_single.csv"
+        else:
+            debug_overfit_config = config.get("debug_overfit", {})
+            use_debug_overfit = debug_overfit_config.get("enabled", False)
+            csv_filename = "training_history_debug_overfit.csv" if use_debug_overfit else "training_history.csv"
         csv_path = Path(config.get("log_dir", "runs")) / csv_filename
         save_training_history_csv(
             train_history,
@@ -1419,6 +1473,88 @@ def main():
             break
     
     logger.info(f"Training completed. Best validation Top-3 accuracy: {best_val_top3:.4f}")
+    
+    # Final debug output for single sample mode
+    if args.debug_overfit_single_sample:
+        logger.info("[DEBUG-OVERFIT-SINGLE] Final epoch evaluation...")
+        model.eval()
+        with torch.no_grad():
+            # Get the single sample
+            for data, target in val_loader:
+                data = {k: v.to(device) for k, v in data.items()}
+                target = target.to(device)
+                
+                # Forward pass
+                outputs = model(
+                    data["x"],
+                    data["edge_index"],
+                    data["batch"],
+                    edge_attr=data.get("edge_attr"),
+                    mask=data.get("mask"),
+                    team=data.get("team"),
+                    ball=data.get("ball"),
+                )
+                
+                if outputs.dtype != torch.float32:
+                    outputs = outputs.float()
+                
+                batch_size = data["batch"].max().item() + 1
+                nodes_per_graph = outputs.numel() // max(1, batch_size)
+                outputs = outputs.view(batch_size, nodes_per_graph)
+                
+                # Get candidate mask and apply
+                team_tensor = data.get("team")
+                ball_tensor = data.get("ball")
+                if team_tensor is not None and ball_tensor is not None:
+                    team_batched = _reshape_to_batch(team_tensor, batch_size, nodes_per_graph).to(
+                        device=outputs.device, dtype=torch.long
+                    )
+                    ball_batched = _reshape_to_batch(ball_tensor, batch_size, nodes_per_graph).to(device=outputs.device)
+                    
+                    team_row = team_batched[0]
+                    ball_row = ball_batched[0]
+                    ball_owner_mask = (ball_row > 0.5).to(torch.bool)
+                    
+                    kicker_candidates = torch.where(ball_row > 0.5)[0]
+                    kicker_idx = (
+                        int(kicker_candidates[0].item())
+                        if kicker_candidates.numel() > 0
+                        else int(torch.argmax(ball_row).item())
+                    )
+                    if nodes_per_graph > 0:
+                        kicker_idx = max(0, min(kicker_idx, nodes_per_graph - 1))
+                    kicker_team_val = int(team_row[kicker_idx].item())
+                    
+                    target_idx = int(target[0].item())
+                    
+                    # Build candidate mask
+                    valid_row = torch.ones(nodes_per_graph, dtype=torch.bool, device=outputs.device)
+                    cand_mask_single, _ = build_candidate_mask(
+                        player_team=team_row,
+                        kicker_team=kicker_team_val,
+                        is_ball_owner=ball_owner_mask,
+                        valid_mask=valid_row,
+                        target_idx=target_idx,
+                    )
+                    
+                    if cand_mask_single is not None:
+                        cand_mask = cand_mask_single.unsqueeze(0)  # [1, N]
+                        masked_outputs = mask_logits(outputs, cand_mask)
+                        
+                        # Get prediction
+                        logits_masked = masked_outputs[0][cand_mask_single]
+                        pred_idx = int(torch.argmax(logits_masked).item())
+                        
+                        # Map back to global index
+                        cand_indices = torch.arange(outputs.size(1), device=outputs.device)[cand_mask_single]
+                        pred_global_idx = int(cand_indices[pred_idx].item())
+                        target_global_idx = target_idx
+                        
+                        logger.info(
+                            f"[DEBUG-OVERFIT-SINGLE] Final debug sample: pred={pred_global_idx}, target={target_global_idx}, "
+                            f"match={pred_global_idx == target_global_idx}"
+                        )
+                break  # Only process first batch
     
     # Evaluate on test set if available
     test_history = None
@@ -1450,9 +1586,12 @@ def main():
         
         # Save final CSV with test metrics
         # Use different filename for debug_overfit mode
-        debug_overfit_config = config.get("debug_overfit", {})
-        use_debug_overfit = debug_overfit_config.get("enabled", False)
-        csv_filename = "training_history_debug_overfit.csv" if use_debug_overfit else "training_history.csv"
+        if args.debug_overfit_single_sample:
+            csv_filename = "training_history_debug_overfit_single.csv"
+        else:
+            debug_overfit_config = config.get("debug_overfit", {})
+            use_debug_overfit = debug_overfit_config.get("enabled", False)
+            csv_filename = "training_history_debug_overfit.csv" if use_debug_overfit else "training_history.csv"
         csv_path = Path(config.get("log_dir", "runs")) / csv_filename
         save_training_history_csv(
             train_history,
