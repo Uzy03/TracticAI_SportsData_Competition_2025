@@ -159,6 +159,7 @@ class ReceiverModel(nn.Module):
             num_classes=model_config["num_classes"],
             hidden_dim=model_config["hidden_dim"],
             dropout=model_config["dropout"],
+            num_layers=model_config.get("mlp_num_layers", 2),  # Allow configurable MLP depth
         )
         self._cand_checks_done = False
     

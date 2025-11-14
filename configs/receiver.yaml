@@ -3,11 +3,12 @@
 # Model configuration
 model:
   input_dim: 16  # Node feature dimension: x, y, vx, vy, height, weight, dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker, dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal, ball, team
-  hidden_dim: 128
+  hidden_dim: 256  # Increased from 128 to 256 for better model capacity
   num_classes: 22  # Number of players
-  num_layers: 3
-  num_heads: 4
+  num_layers: 4  # Increased from 3 to 4 for deeper model
+  num_heads: 8  # Increased from 4 to 8 for more attention heads
   dropout: 0.2
+  mlp_num_layers: 3  # MLP head layers (increased from default 2 to 3)
 
 # Optimizer configuration
 optimizer:
