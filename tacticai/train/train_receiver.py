@@ -356,6 +356,7 @@ def train_epoch(
     metrics: Dict[str, Any],
     use_amp: bool = False,
     profile: bool = False,
+    debug_single_sample: bool = False,
 ) -> Dict[str, float]:
     """Train model for one epoch."""
     model.train()
@@ -569,10 +570,30 @@ def train_epoch(
                     target_team_repr = int(team_labels[b, target_global].item())
                 if kicker_team is not None and b < kicker_team.size(0):
                     kicker_team_repr = int(kicker_team[b].item())
-                print(
-                    f"[WARN] target {target_global} not in candidates for graph {b} "
-                    f"(target_team={target_team_repr}, kicker_team={kicker_team_repr}, "
-                    f"cand_true_sum={int(cm.sum().item())})"
+                
+                # DEBUG: Log warning for single sample mode
+                if debug_single_sample:
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        f"[TRAIN-DEBUG-SINGLE] WARN: target {target_global} not in candidates for graph {b} "
+                        f"(target_team={target_team_repr}, kicker_team={kicker_team_repr}, "
+                        f"cand_true_sum={int(cm.sum().item())}, cand_indices={cand_indices.tolist()})"
+                    )
+                else:
+                    print(
+                        f"[WARN] target {target_global} not in candidates for graph {b} "
+                        f"(target_team={target_team_repr}, kicker_team={kicker_team_repr}, "
+                        f"cand_true_sum={int(cm.sum().item())})"
+                    )
+            
+            # DEBUG: Log cand_target_idx calculation for single sample mode
+            if debug_single_sample and b == 0:
+                logger = logging.getLogger(__name__)
+                logger.info(
+                    f"[TRAIN-DEBUG-SINGLE] Graph {b} target mapping:\n"
+                    f"  target_global={target_global}, cand_indices={cand_indices.tolist()}\n"
+                    f"  target_in_cand={(cand_indices == target_global).any().item()}\n"
+                    f"  cand_target_idx={cand_target_idx}, Ncand={Ncand}"
                 )
 
             graph_outputs.append(logits_b.unsqueeze(0))
@@ -598,6 +619,19 @@ def train_epoch(
 
             pred_top1 = torch.argmax(lb, dim=1)
             target_idx = int(target_tensor.item())
+            
+            # DEBUG: Detailed logging for single sample mode
+            if debug_single_sample and graphs_in_batch == 0:
+                logger = logging.getLogger(__name__)
+                logger.info(
+                    f"[TRAIN-DEBUG-SINGLE] Graph {graphs_in_batch}:\n"
+                    f"  logits_b.shape={lb.shape}, logits_b={lb.tolist()}\n"
+                    f"  logits_b.mean()={lb.mean().item():.6f}, logits_b.std()={lb.std().item():.6f}\n"
+                    f"  pred_top1={pred_top1.item()}, target_idx={target_idx}\n"
+                    f"  match={pred_top1.item() == target_idx}\n"
+                    f"  cand_target_idx={target_idx}, Ncand={Ncand}"
+                )
+            
             acc_correct += int(pred_top1.item() == target_idx)
             top1_correct += int(pred_top1.item() == target_idx)
 
@@ -665,6 +699,7 @@ def validate_epoch(
     metrics: Dict[str, Any],
     logger: Optional[Any] = None,
     min_cands_eval: int = 1,
+    debug_single_sample: bool = False,
 ) -> Dict[str, float]:
     """Validate model for one epoch.
     
@@ -1024,6 +1059,17 @@ def validate_epoch(
 
                 pred_top1 = torch.argmax(lb, dim=1)
                 target_idx = int(target_tensor.item())
+                
+                # DEBUG: Detailed logging for single sample mode
+                if debug_single_sample and graphs_in_batch == 0 and logger is not None:
+                    logger.info(
+                        f"[VAL-DEBUG-SINGLE] Graph {graphs_in_batch}:\n"
+                        f"  logits_b.shape={lb.shape}, logits_b={lb.tolist()}\n"
+                        f"  logits_b.mean()={lb.mean().item():.6f}, logits_b.std()={lb.std().item():.6f}\n"
+                        f"  pred_top1={pred_top1.item()}, target_idx={target_idx}\n"
+                        f"  match={pred_top1.item() == target_idx}"
+                    )
+                
                 acc_correct += int(pred_top1.item() == target_idx)
                 top1_correct += int(pred_top1.item() == target_idx)
 
@@ -1155,6 +1201,27 @@ def main():
             f"[DEBUG-OVERFIT-SINGLE] Using first sample only: "
             f"train={len(train_dataset)} samples, val={len(val_dataset)} samples"
         )
+        
+        # DEBUG: Check the single sample data
+        try:
+            sample_data, sample_target = train_dataset[0]
+            logger.info(
+                f"[DEBUG-OVERFIT-SINGLE] Sample data check:\n"
+                f"  target={sample_target.item()}\n"
+                f"  x.shape={sample_data.get('x', torch.tensor([])).shape}\n"
+                f"  team={'present' if 'team' in sample_data else 'missing'}\n"
+                f"  ball={'present' if 'ball' in sample_data else 'missing'}\n"
+                f"  cand_mask={'present' if 'cand_mask' in sample_data else 'missing'}"
+            )
+            if 'cand_mask' in sample_data:
+                cand_mask = sample_data['cand_mask']
+                target_idx = int(sample_target.item())
+                logger.info(
+                    f"[DEBUG-OVERFIT-SINGLE] cand_mask: sum={cand_mask.sum().item()}, "
+                    f"shape={cand_mask.shape}, target_in_cand={cand_mask[target_idx].item() if target_idx < cand_mask.size(0) else 'N/A'}"
+                )
+        except Exception as e:
+            logger.warning(f"[DEBUG-OVERFIT-SINGLE] Error checking sample data: {e}")
         
         # Override config for single sample overfit test
         config["train"]["batch_size"] = 1
@@ -1363,11 +1430,17 @@ def main():
         # Learning rate will be updated after train/val via scheduler step
         current_lr = optimizer.param_groups[0]['lr']
         
+        # Check if debug_overfit is enabled for debug logging
+        debug_overfit_config = config.get("debug_overfit", {})
+        use_debug_overfit = debug_overfit_config.get("enabled", False)
+        debug_logging = args.debug_overfit_single_sample or use_debug_overfit
+        
         # Training
         train_metrics = train_epoch(
             model, train_loader, optimizer, criterion, device, metrics,
             use_amp=config.get("train", {}).get("amp", False),
             profile=args.profile,
+            debug_single_sample=debug_logging,
         )
         
         # Validation
@@ -1379,6 +1452,7 @@ def main():
             metrics,
             logger,
             min_cands_eval=config.get("eval", {}).get("min_cands_eval", 1),
+            debug_single_sample=debug_logging,
         )
         
         # Update learning rate
