@@ -13,12 +13,12 @@ model:
 # Optimizer configuration
 optimizer:
   type: "adam"
-  lr: 0.001  # Start with moderate learning rate (will be reduced by scheduler)
+  lr: 0.01  # Increased from 0.001 to 0.01 to prevent logits collapse
   weight_decay: 0.00005  # Reduced from 0.0001 for larger model
 
 # Scheduler configuration
 # StepLR: Reduce learning rate by gamma every step_size epochs
-# lr=0.001 -> 0.0005 (epoch 10) -> 0.00025 (epoch 20) -> 0.000125 (epoch 30) -> ...
+# lr=0.01 -> 0.005 (epoch 10) -> 0.0025 (epoch 20) -> 0.00125 (epoch 30) -> ...
 scheduler:
   type: "step"
   step_size: 10  # Reduce LR every 10 epochs

@@ -299,6 +299,15 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
     
     model.apply(init_weights)
     
+    # Special initialization for output layer to prevent logits collapse
+    # Initialize output layer with larger weights to ensure sufficient variance
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear) and module.out_features == 1:
+            # Output layer: use Xavier initialization with larger gain
+            nn.init.xavier_uniform_(module.weight, gain=1.0)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+    
     return model.to(device)
 
 
