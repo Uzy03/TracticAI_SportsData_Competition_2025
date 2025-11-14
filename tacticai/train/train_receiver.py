@@ -300,11 +300,11 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
     model.apply(init_weights)
     
     # Special initialization for output layer to prevent logits collapse
-    # Initialize output layer with larger weights to ensure sufficient variance
+    # Initialize output layer with smaller weights to prevent explosion
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear) and module.out_features == 1:
-            # Output layer: use Xavier initialization with larger gain
-            nn.init.xavier_uniform_(module.weight, gain=1.0)
+            # Output layer: use Xavier initialization with smaller gain to prevent explosion
+            nn.init.xavier_uniform_(module.weight, gain=0.1)  # Reduced from 1.0 to prevent explosion
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
     
@@ -682,19 +682,21 @@ def train_epoch(
             scaler.scale(loss).backward()
             # Gradient clipping for stability (especially important for larger models)
             scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # Reduced from 1.0 to prevent explosion
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
             # Gradient clipping for stability (especially important for larger models)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # Reduced from 1.0 to prevent explosion
             optimizer.step()
         
         # Log gradient norm for debugging (first 3 batches only to avoid I/O overhead)
         if batch_idx < 3:
             logger = logging.getLogger(__name__)
             logger.info(f"[TRAIN-GRAD] batch={batch_idx}, grad_norm={grad_norm.item():.6f}, loss={loss.item():.4f}, graphs={graphs_in_batch}")
+            if grad_norm.item() > 10.0:
+                logger.warning(f"[TRAIN-GRAD-WARN] Gradient norm is very large: {grad_norm.item():.6f}, possible gradient explosion!")
         
         postfix = {"loss": f"{loss.item():.4f}"}
         if profile_enabled and iter_start is not None:
@@ -1196,6 +1198,12 @@ def main():
         action="store_true",
         help="Debug overfit test with single sample (overrides config settings)"
     )
+    parser.add_argument(
+        "--debug_overfit_num_samples",
+        type=int,
+        default=None,
+        help="Override num_samples for debug_overfit mode (e.g., 1, 2, 4, 8, 16, 32)"
+    )
     parser.add_argument("--resume", type=str, help="Path to checkpoint to resume from")
     parser.add_argument(
         "--profile",
@@ -1304,7 +1312,12 @@ def main():
             )
             _assert_dataset_version(full_train_dataset, "train")
             
-            num_samples = debug_overfit_config.get("num_samples", 32)
+            # Override num_samples from command line if provided
+            if args.debug_overfit_num_samples is not None:
+                num_samples = args.debug_overfit_num_samples
+                logger.info(f"[DEBUG-OVERFIT] Using command-line override: num_samples={num_samples}")
+            else:
+                num_samples = debug_overfit_config.get("num_samples", 32)
             subset_seed = debug_overfit_config.get("seed", 42)
             
             # Create reproducible subset indices

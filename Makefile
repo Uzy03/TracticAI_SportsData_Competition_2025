@@ -59,6 +59,29 @@ overfit-test:
 		--n 16 --seed 42
 	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml
 
+# 段階的デバッグテスト：データサイズを1, 2, 4, 8, 16, 32と増やして問題を特定
+overfit-test-1:
+	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml --debug_overfit_num_samples 1
+
+overfit-test-2:
+	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml --debug_overfit_num_samples 2
+
+overfit-test-4:
+	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml --debug_overfit_num_samples 4
+
+overfit-test-8:
+	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml --debug_overfit_num_samples 8
+
+overfit-test-16:
+	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml --debug_overfit_num_samples 16
+
+overfit-test-32:
+	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml --debug_overfit_num_samples 32
+
+# 1サンプルでの過学習テスト（既存のコマンド）
+overfit-test-single:
+	python tacticai/train/train_receiver.py --config configs/receiver.yaml --debug_overfit_single_sample
+
 # 本格的な学習実行
 train-receiver:
 	python tacticai/train/train_receiver.py --config configs/receiver.yaml
