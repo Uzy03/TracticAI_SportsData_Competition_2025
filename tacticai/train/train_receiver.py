@@ -663,8 +663,6 @@ def train_epoch(
             graphs_in_batch += 1
 
         if graphs_in_batch == 0:
-            logger = logging.getLogger(__name__)
-            logger.warning(f"[TRAIN-WARN] batch={batch_idx}: graphs_in_batch=0, skipping gradient update")
             continue
             
         loss = batch_loss_sum / graphs_in_batch
@@ -684,9 +682,9 @@ def train_epoch(
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
         
-        # Log gradient norm for debugging (first few batches and periodically)
-        logger = logging.getLogger(__name__)
-        if batch_idx < 3 or batch_idx % 10 == 0:
+        # Log gradient norm for debugging (first 3 batches only to avoid I/O overhead)
+        if batch_idx < 3:
+            logger = logging.getLogger(__name__)
             logger.info(f"[TRAIN-GRAD] batch={batch_idx}, grad_norm={grad_norm.item():.6f}, loss={loss.item():.4f}, graphs={graphs_in_batch}")
         
         postfix = {"loss": f"{loss.item():.4f}"}
@@ -1167,7 +1165,7 @@ def validate_epoch(
         else:
             avg_loss = total_loss / num_graphs_total
             logger.info(f"Val Loss calculation: total_loss={total_loss:.6f}, num_graphs={num_graphs_total}, avg_loss={avg_loss:.6f}")
-            # Check if loss is changing (should vary across epochs)
+            # Check if loss is changing (should vary across epochs) - only log warning if not changing
             if not hasattr(validate_epoch, "_last_val_loss"):
                 validate_epoch._last_val_loss = avg_loss
             else:
