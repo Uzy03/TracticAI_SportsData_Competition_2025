@@ -1,86 +1,83 @@
-# Configuration for receiver prediction task
+# 受け手予測タスクの設定ファイル
 
-# Model configuration
-# Same as overfit test to ensure consistency
+# モデル設定
 model:
-  input_dim: 16  # Node feature dimension: x, y, vx, vy, height, weight, dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker, dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal, ball, team
-  hidden_dim: 128  # Same as overfit test
-  num_classes: 22  # Number of players
-  num_layers: 3  # Same as overfit test
-  num_heads: 4  # Same as overfit test
-  dropout: 0.0  # Same as overfit test (no regularization for debugging)
+  input_dim: 16  # ノード特徴量の次元数 (default=16): x, y, vx, vy, height, weight, dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker, dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal, ball, team
+  hidden_dim: 128  # 隠れ層の次元数 (default=128)
+  num_classes: 22  # クラス数（プレイヤー数）(default=22)
+  num_layers: 3  # GATv2レイヤー数 (default=3)
+  num_heads: 4  # アテンションヘッド数 (default=4)
+  dropout: 0.1  # ドロップアウト率 (default=0.0, 推奨: 0.1-0.2)
 
-# Optimizer configuration
-# Same as overfit test
+# オプティマイザー設定
 optimizer:
-  type: "adam"
-  lr: 0.001  # Same as overfit test
-  weight_decay: 0.0  # Same as overfit test (no weight decay for debugging)
+  type: "adam"  # オプティマイザーの種類 (default="adam")
+  lr: 0.001  # 学習率 (default=0.001, 推奨範囲: 0.0001-0.01)
+  weight_decay: 0.0001  # 重み減衰（L2正則化）(default=0.0, 推奨: 0.0001-0.001)
 
-# Scheduler configuration
-# Same as overfit test (no scheduler)
+# スケジューラー設定
 scheduler:
-  type: "none"  # Same as overfit test (fixed learning rate, no scheduler)
+  type: "cosine"  # スケジューラーの種類 (default="none", 選択肢: "none", "step", "cosine", "multistep")
+  # type="step"の場合の設定例:
+  # step_size: 10  # 学習率を減らすエポック間隔 (default=10)
+  # gamma: 0.5  # 学習率の減衰率 (default=0.5)
 
-# Training configuration
-# batch_size and epochs kept for full training, but amp disabled like overfit test
+# 学習設定
 train:
-  batch_size: 32  # Keep larger batch for full dataset (overfit test uses 4)
-  epochs: 50  # Keep 50 epochs for full training
-  amp: false  # Same as overfit test (disabled for stability)
+  batch_size: 32  # バッチサイズ (default=32)
+  epochs: 50  # 最大エポック数 (default=50)
+  amp: true  # Automatic Mixed Precisionの使用 (default=false, 推奨: trueで高速化)
 
-# Data configuration
+# データ設定
 data:
-  train_path: "data/processed_ck/receiver_train/data.pickle"
-  val_path: "data/processed_ck/receiver_val/data.pickle"
-  test_path: "data/processed_ck/receiver_test/data.pickle"
-  format: "pickle"
+  train_path: "data/processed_ck/receiver_train/data.pickle"  # 訓練データのパス
+  val_path: "data/processed_ck/receiver_val/data.pickle"  # 検証データのパス
+  test_path: "data/processed_ck/receiver_test/data.pickle"  # テストデータのパス
+  format: "pickle"  # データ形式 (default="pickle")
 
-# Loss configuration
-# Same as overfit test (no regularization)
+# 損失関数設定
 loss:
-  type: "cross_entropy"
-  label_smoothing: 0.0  # Same as overfit test (no label smoothing)
-  weight: 1.0  # Loss weight
+  type: "cross_entropy"  # 損失関数の種類 (default="cross_entropy")
+  label_smoothing: 0.0  # ラベルスムージング率 (default=0.0, 推奨: 0.05-0.1)
+  weight: 1.0  # 損失の重み (default=1.0)
   
-  # Focal loss parameters (alternative to cross-entropy)
+  # Focal Lossのパラメータ（cross_entropyの代替）
   focal_loss:
-    enabled: false
-    alpha: 1.0  # Weighting factor for rare class
-    gamma: 2.0  # Focusing parameter
+    enabled: false  # Focal Lossの使用 (default=false)
+    alpha: 1.0  # レアクラスの重み係数 (default=1.0)
+    gamma: 2.0  # フォーカシングパラメータ (default=2.0)
     
-  # Class weights for imbalanced datasets
-  class_weights: null  # [w_0, w_1, ..., w_{num_classes-1}]
+  # クラス重み（不均衡データセット用）
+  class_weights: null  # クラスごとの重み [w_0, w_1, ..., w_{num_classes-1}] (default=null)
   
-  # Regularization terms
+  # 正則化項
   regularization:
-    l2_weight: 0.0  # Same as overfit test (no L2 regularization)
-    dropout_rate: 0.0  # Same as overfit test (no dropout regularization)
+    l2_weight: 0.0001  # L2正則化の重み (default=0.0, 推奨: 0.0001-0.001)
+    dropout_rate: 0.0  # ドロップアウト正則化の重み (default=0.0)
 
-# D2 equivariance configuration
-# Same as overfit test (no augmentation)
+# D2等変性設定
 d2:
-  group_pool: false  # Disable group pooling; ReceiverModel handles D2 internally
+  group_pool: false  # グループプーリングの使用 (default=false, ReceiverModelが内部でD2を処理)
   transforms:
-    hflip: false  # Same as overfit test (no augmentation)
-    vflip: false  # Same as overfit test (no augmentation)
+    hflip: false  # 水平フリップのデータ拡張 (default=false, 推奨: true)
+    vflip: false  # 垂直フリップのデータ拡張 (default=false, 推奨: true)
 
-# Early stopping configuration
+# Early Stopping設定
 early_stopping:
-  patience: 20  # Increased from 10 to 20 for larger model (more time to learn)
-  min_delta: 0.005  # Reduced from 0.01 to 0.005 (more sensitive to small improvements)
+  patience: 20  # 改善が見られない場合の待機エポック数 (default=20)
+  min_delta: 0.005  # 改善とみなす最小変化量 (default=0.005)
 
-# Evaluation configuration
+# 評価設定
 eval:
-  batch_size: 5
-  min_cands_eval: 1
+  batch_size: 5  # 評価時のバッチサイズ (default=5)
+  min_cands_eval: 1  # 評価に必要な最小候補数 (default=1)
 
-# System configuration
-device: "auto"  # auto, cpu, cuda, mps
-seed: 42
-num_workers: 4  # Reduced for memory efficiency (was 12)
-prefetch_factor: 2  # Reduced for memory efficiency (was 4)
-persistent_workers: true  # Keep workers alive between epochs (reduces overhead)
-log_level: "INFO"
-log_dir: "runs"
-checkpoint_dir: "checkpoints"
+# システム設定
+device: "auto"  # デバイス (default="auto", 選択肢: "auto", "cpu", "cuda", "mps")
+seed: 42  # 乱数シード (default=42)
+num_workers: 4  # データローダーのワーカー数 (default=4)
+prefetch_factor: 2  # プリフェッチ係数 (default=2)
+persistent_workers: true  # ワーカーをエポック間で保持 (default=true, オーバーヘッド削減)
+log_level: "INFO"  # ログレベル (default="INFO")
+log_dir: "runs"  # ログ保存ディレクトリ (default="runs")
+checkpoint_dir: "checkpoints"  # チェックポイント保存ディレクトリ (default="checkpoints")
