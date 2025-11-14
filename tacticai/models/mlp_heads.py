@@ -55,6 +55,7 @@ class NodeScoreHead(nn.Module):
         layers = []
         # First layer: input_dim -> hidden_dim
         layers.append(nn.Linear(input_dim, hidden_dim))
+        layers.append(nn.LayerNorm(hidden_dim))  # Add layer normalization
         layers.append(nn.ReLU())
         if dropout > 0:
             layers.append(nn.Dropout(dropout))
@@ -62,11 +63,12 @@ class NodeScoreHead(nn.Module):
         # Additional hidden layers if num_layers > 2
         for _ in range(num_layers - 2):
             layers.append(nn.Linear(hidden_dim, hidden_dim))
+            layers.append(nn.LayerNorm(hidden_dim))  # Add layer normalization
             layers.append(nn.ReLU())
             if dropout > 0:
                 layers.append(nn.Dropout(dropout))
         
-        # Output layer: hidden_dim -> 1
+        # Output layer: hidden_dim -> 1 (no normalization before output)
         layers.append(nn.Linear(hidden_dim, 1))
         
         self.mlp = nn.Sequential(*layers)

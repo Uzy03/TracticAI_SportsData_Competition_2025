@@ -5,6 +5,7 @@ This script trains a GATv2 model to predict pass receivers in football matches.
 
 import argparse
 import logging
+import math
 import time
 import yaml
 from pathlib import Path
@@ -286,6 +287,18 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
     # No need to wrap with GroupPoolingWrapper
     # The group_pool config is for models that don't have built-in D2 processing
     
+    # Apply improved initialization to all linear layers
+    def init_weights(m):
+        if isinstance(m, nn.Linear):
+            # Use He initialization for better gradient flow
+            nn.init.kaiming_uniform_(m.weight, a=math.sqrt(5))
+            if m.bias is not None:
+                fan_in, _ = nn.init._calculate_fan_in_and_fan_out(m.weight)
+                bound = 1 / math.sqrt(fan_in)
+                nn.init.uniform_(m.bias, -bound, bound)
+    
+    model.apply(init_weights)
+    
     return model.to(device)
 
 
@@ -331,19 +344,24 @@ def create_scheduler(optimizer: optim.Optimizer, config: Dict[str, Any]) -> Any:
     """
     sched_config = config.get("scheduler", {})
     
-    if sched_config.get("type") == "cosine":
+    if sched_config.get("type") == "step":
+        # StepLR: Reduce learning rate by gamma every step_size epochs
+        # Example: lr=0.01, step_size=10, gamma=0.5 -> 0.01 -> 0.005 -> 0.0025 -> ...
+        step_size = sched_config.get("step_size", 10)
+        gamma = sched_config.get("gamma", 0.5)
+        return optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
+    elif sched_config.get("type") == "cosine":
         return CosineAnnealingScheduler(
             optimizer,
             T_max=sched_config.get("T_max", config["train"]["epochs"]),
             eta_min=sched_config.get("eta_min", 0.0),
             warmup_epochs=sched_config.get("warmup_epochs", 0),
         )
-    elif sched_config.get("type") == "step":
-        return optim.lr_scheduler.StepLR(
-            optimizer,
-            step_size=sched_config.get("step_size", 10),
-            gamma=sched_config.get("gamma", 0.1),
-        )
+    elif sched_config.get("type") == "multistep":
+        # MultiStepLR: Reduce learning rate at specific milestones
+        milestones = sched_config.get("milestones", [10, 20, 30])
+        gamma = sched_config.get("gamma", 0.5)
+        return optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
     else:
         return None
 
@@ -653,11 +671,21 @@ def train_epoch(
 
         if use_amp and scaler is not None:
             scaler.scale(loss).backward()
+            # Gradient clipping for stability (especially important for larger models)
+            scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
+            # Gradient clipping for stability (especially important for larger models)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+        
+        # Log gradient norm for debugging (first few batches only)
+        if batch_idx < 3:
+            logger = logging.getLogger(__name__)
+            logger.info(f"[TRAIN-GRAD] batch={batch_idx}, grad_norm={grad_norm.item():.6f}, loss={loss.item():.4f}")
         
         postfix = {"loss": f"{loss.item():.4f}"}
         if profile_enabled and iter_start is not None:

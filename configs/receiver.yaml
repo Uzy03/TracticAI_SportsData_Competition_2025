@@ -13,15 +13,16 @@ model:
 # Optimizer configuration
 optimizer:
   type: "adam"
-  lr: 0.0001  # Reduced from 0.0003 for larger model capacity
+  lr: 0.01  # Start with higher learning rate (will be reduced by scheduler)
   weight_decay: 0.00005  # Reduced from 0.0001 for larger model
 
 # Scheduler configuration
+# StepLR: Reduce learning rate by gamma every step_size epochs
+# lr=0.01 -> 0.005 (epoch 10) -> 0.0025 (epoch 20) -> 0.00125 (epoch 30) -> ...
 scheduler:
-  type: "cosine"
-  T_max: 50
-  eta_min: 0.000001
-  warmup_epochs: 10  # Increased warmup from 5 to 10 for larger model stability
+  type: "step"
+  step_size: 10  # Reduce LR every 10 epochs
+  gamma: 0.5  # Multiply LR by 0.5 at each step
 
 # Training configuration
 train:
