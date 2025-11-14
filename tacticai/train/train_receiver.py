@@ -682,13 +682,13 @@ def train_epoch(
             scaler.scale(loss).backward()
             # Gradient clipping for stability (especially important for larger models)
             scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # Reduced from 1.0 to prevent explosion
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Step 2: Increased from 0.5 to 1.0 to allow more gradient flow
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
             # Gradient clipping for stability (especially important for larger models)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # Reduced from 1.0 to prevent explosion
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Step 2: Increased from 0.5 to 1.0 to allow more gradient flow
             optimizer.step()
         
         # Log gradient norm for debugging (first 3 batches only to avoid I/O overhead)
