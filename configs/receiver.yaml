@@ -24,7 +24,7 @@ scheduler:
 
 # 学習設定
 train:
-  batch_size: 32  # バッチサイズ (default=32)
+  batch_size: 16  # バッチサイズ (default=32)
   epochs: 50  # 最大エポック数 (default=50)
   amp: true  # Automatic Mixed Precisionの使用 (default=false, 推奨: trueで高速化)
 
