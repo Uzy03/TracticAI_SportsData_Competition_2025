@@ -55,7 +55,8 @@ class NodeScoreHead(nn.Module):
         layers = []
         # First layer: input_dim -> hidden_dim
         layers.append(nn.Linear(input_dim, hidden_dim))
-        layers.append(nn.LayerNorm(hidden_dim))  # Add layer normalization
+        # Temporarily disable LayerNorm to debug logits collapse
+        # layers.append(nn.LayerNorm(hidden_dim))  # Add layer normalization
         layers.append(nn.ReLU())
         if dropout > 0:
             layers.append(nn.Dropout(dropout))
@@ -63,7 +64,8 @@ class NodeScoreHead(nn.Module):
         # Additional hidden layers if num_layers > 2
         for _ in range(num_layers - 2):
             layers.append(nn.Linear(hidden_dim, hidden_dim))
-            layers.append(nn.LayerNorm(hidden_dim))  # Add layer normalization
+            # Temporarily disable LayerNorm to debug logits collapse
+            # layers.append(nn.LayerNorm(hidden_dim))  # Add layer normalization
             layers.append(nn.ReLU())
             if dropout > 0:
                 layers.append(nn.Dropout(dropout))

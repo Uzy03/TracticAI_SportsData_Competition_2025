@@ -1015,6 +1015,7 @@ class GATv2Network4View(nn.Module):
         # GATv2 layers with 4-view interaction
         self.gat_layers = nn.ModuleList()
         self.layer_norms = nn.ModuleList()  # Layer normalization for each layer
+        self.use_layer_norm = True  # Can be disabled for debugging
         for i in range(num_layers):
             concat = (i < num_layers - 1)  # Only last layer doesn't concatenate
             layer = GATv2Layer4View(
@@ -1029,7 +1030,8 @@ class GATv2Network4View(nn.Module):
             )
             self.gat_layers.append(layer)
             # Add layer normalization after each GAT layer (except last)
-            if i < num_layers - 1:
+            # Temporarily disable LayerNorm to debug logits collapse
+            if self.use_layer_norm and i < num_layers - 1:
                 self.layer_norms.append(nn.LayerNorm(hidden_dim))
             else:
                 self.layer_norms.append(nn.Identity())
@@ -1081,13 +1083,16 @@ class GATv2Network4View(nn.Module):
                 h = h_new
             
             # Apply layer normalization (before activation)
-            if i < len(self.gat_layers) - 1:  # No normalization after last layer
-                # LayerNorm expects [B, N, D] or [B, V, N, D]
-                # Reshape to [B*V*N, D] for LayerNorm, then reshape back
+            # LayerNorm should normalize over the feature dimension (D) for each node
+            # For [B, V, N, D], we normalize over D dimension, keeping B, V, N separate
+            # Temporarily disabled to debug logits collapse
+            if self.use_layer_norm and i < len(self.gat_layers) - 1:  # No normalization after last layer
+                # Reshape to [B*V*N, D] for LayerNorm (normalizes over D for each node)
+                # This is correct: each node gets normalized independently
                 B, V, N, D = h.shape
                 h_flat = h.view(B * V * N, D)
-                h_flat = self.layer_norms[i](h_flat)
-                h = h_flat.view(B, V, N, D)
+                h_normalized = self.layer_norms[i](h_flat)
+                h = h_normalized.view(B, V, N, D)
             
             # Apply dropout and activation
             if i < len(self.gat_layers) - 1:  # No activation after last layer
