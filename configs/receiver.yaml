@@ -7,21 +7,21 @@ model:
   num_classes: 22  # Number of players
   num_layers: 4  # Increased from 3 to 4 for deeper model
   num_heads: 8  # Increased from 4 to 8 for more attention heads
-  dropout: 0.2
+  dropout: 0.15  # Reduced from 0.2 for larger model (less regularization)
   mlp_num_layers: 3  # MLP head layers (increased from default 2 to 3)
 
 # Optimizer configuration
 optimizer:
   type: "adam"
-  lr: 0.0003
-  weight_decay: 0.0001
+  lr: 0.0001  # Reduced from 0.0003 for larger model capacity
+  weight_decay: 0.00005  # Reduced from 0.0001 for larger model
 
 # Scheduler configuration
 scheduler:
   type: "cosine"
   T_max: 50
   eta_min: 0.000001
-  warmup_epochs: 5  # Warmup epochs for stability
+  warmup_epochs: 10  # Increased warmup from 5 to 10 for larger model stability
 
 # Training configuration
 train:
@@ -42,7 +42,7 @@ loss:
   # L = -Σ y_i * log(p_i) where p_i = softmax(logits_i)
   # With label smoothing: y_i = (1 - α) * y_i + α / num_classes
   type: "cross_entropy"
-  label_smoothing: 0.1  # Introduce mild label smoothing for stability
+  label_smoothing: 0.05  # Reduced from 0.1 for larger model (less regularization)
   weight: 1.0  # Loss weight
   
   # Focal loss parameters (alternative to cross-entropy)
@@ -68,8 +68,8 @@ d2:
 
 # Early stopping configuration
 early_stopping:
-  patience: 10
-  min_delta: 0.01  # 判定を緩める：0.01以上の改善が必要（1%以上改善がないとカウント）
+  patience: 20  # Increased from 10 to 20 for larger model (more time to learn)
+  min_delta: 0.005  # Reduced from 0.01 to 0.005 (more sensitive to small improvements)
 
 # Evaluation configuration
 eval:
