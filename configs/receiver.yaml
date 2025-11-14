@@ -7,26 +7,26 @@ model:
   num_classes: 22  # クラス数（プレイヤー数）(default=22)
   num_layers: 3  # GATv2レイヤー数 (default=3)
   num_heads: 4  # アテンションヘッド数 (default=4)
-  dropout: 0.1  # ドロップアウト率 (default=0.0, 推奨: 0.1-0.2)
+  dropout: 0.0  # ドロップアウト率 (default=0.0, 推奨: 0.1-0.2)
 
 # オプティマイザー設定
 optimizer:
   type: "adam"  # オプティマイザーの種類 (default="adam")
   lr: 0.001  # 学習率 (default=0.001, 推奨範囲: 0.0001-0.01)
-  weight_decay: 0.0001  # 重み減衰（L2正則化）(default=0.0, 推奨: 0.0001-0.001)
+  weight_decay: 0.0  # 重み減衰（L2正則化）(default=0.0, 推奨: 0.0001-0.001)
 
 # スケジューラー設定
 scheduler:
-  type: "cosine"  # スケジューラーの種類 (default="none", 選択肢: "none", "step", "cosine", "multistep")
+  type: "none"  # スケジューラーの種類 (default="none", 選択肢: "none", "step", "cosine", "multistep")
   # type="step"の場合の設定例:
   # step_size: 10  # 学習率を減らすエポック間隔 (default=10)
   # gamma: 0.5  # 学習率の減衰率 (default=0.5)
 
 # 学習設定
 train:
-  batch_size: 16  # バッチサイズ (default=32)
+  batch_size: 32  # バッチサイズ (default=32)
   epochs: 50  # 最大エポック数 (default=50)
-  amp: true  # Automatic Mixed Precisionの使用 (default=false, 推奨: trueで高速化)
+  amp: false  # Automatic Mixed Precisionの使用 (default=false, 推奨: trueで高速化)
 
 # データ設定
 data:
@@ -52,7 +52,7 @@ loss:
   
   # 正則化項
   regularization:
-    l2_weight: 0.0001  # L2正則化の重み (default=0.0, 推奨: 0.0001-0.001)
+    l2_weight: 0.0  # L2正則化の重み (default=0.0, 推奨: 0.0001-0.001)
     dropout_rate: 0.0  # ドロップアウト正則化の重み (default=0.0)
 
 # D2等変性設定
@@ -65,7 +65,7 @@ d2:
 # Early Stopping設定
 early_stopping:
   patience: 20  # 改善が見られない場合の待機エポック数 (default=20)
-  min_delta: 0.005  # 改善とみなす最小変化量 (default=0.005)
+  min_delta: 0.0005  # 改善とみなす最小変化量 (default=0.005)
 
 # 評価設定
 eval:
