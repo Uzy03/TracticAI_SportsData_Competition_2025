@@ -1327,8 +1327,15 @@ def main():
     }
     
     # Create early stopping
+    # Disable early stopping for single sample debug mode
+    if args.debug_overfit_single_sample:
+        early_stopping_patience = 99999  # Effectively disable early stopping
+        logger.info("[DEBUG-OVERFIT-SINGLE] Early stopping disabled (patience=99999)")
+    else:
+        early_stopping_patience = config.get("early_stopping", {}).get("patience", 10)
+    
     early_stopping = EarlyStopping(
-        patience=config.get("early_stopping", {}).get("patience", 10),
+        patience=early_stopping_patience,
         min_delta=config.get("early_stopping", {}).get("min_delta", 0.0),
         mode="max",
         restore_best_weights=True,
