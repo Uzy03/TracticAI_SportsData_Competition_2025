@@ -59,7 +59,11 @@ overfit-test:
 		--n 16 --seed 42
 	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml
 
-# サンプル実行
+# 本格的な学習実行
+train-receiver:
+	python tacticai/train/train_receiver.py --config configs/receiver.yaml
+
+# サンプル実行（学習 + 評価）
 sample-run:
 	python tacticai/train/train_receiver.py --config configs/receiver.yaml
 	python tacticai/eval/eval_receiver.py --config configs/receiver.yaml
