@@ -386,8 +386,24 @@ def train_epoch(
     use_amp: bool = False,
     profile: bool = False,
     debug_single_sample: bool = False,
+    grad_clip_enabled: bool = True,
+    grad_clip_max_norm: float = 1.0,
 ) -> Dict[str, float]:
-    """Train model for one epoch."""
+    """Train model for one epoch.
+    
+    Args:
+        model: Model to train
+        dataloader: Training data loader
+        optimizer: Optimizer
+        criterion: Loss function
+        device: Device to train on
+        metrics: Metric functions
+        use_amp: Whether to use automatic mixed precision
+        profile: Whether to enable profiling
+        debug_single_sample: Whether to enable debug logging for single samples
+        grad_clip_enabled: Whether to enable gradient clipping
+        grad_clip_max_norm: Maximum norm for gradient clipping
+    """
     model.train()
     
     stats = defaultdict(float)
@@ -681,15 +697,34 @@ def train_epoch(
 
         if use_amp and scaler is not None:
             scaler.scale(loss).backward()
-            # Gradient clipping for stability (especially important for larger models)
+            # AMP使用時は scaler.unscale_() の後にクリップを入れる
             scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Step 2: Increased from 0.5 to 1.0 to allow more gradient flow
+            # Gradient clipping for stability (YAML設定に基づいて実行)
+            if grad_clip_enabled:
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
+            else:
+                # 勾配ノルムを計算するが、クリッピングはしない
+                total_norm = 0.0
+                for p in model.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                grad_norm = torch.tensor(total_norm ** (1. / 2), device=device)
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
-            # Gradient clipping for stability (especially important for larger models)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Step 2: Increased from 0.5 to 1.0 to allow more gradient flow
+            # Gradient clipping for stability (YAML設定に基づいて実行)
+            if grad_clip_enabled:
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
+            else:
+                # 勾配ノルムを計算するが、クリッピングはしない
+                total_norm = 0.0
+                for p in model.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                grad_norm = torch.tensor(total_norm ** (1. / 2), device=device)
             optimizer.step()
         
         # Log gradient norm for debugging (first 3 batches only to avoid I/O overhead)
@@ -1503,11 +1538,19 @@ def main():
         debug_logging = args.debug_overfit_single_sample or use_debug_overfit
         
         # Training
+        # 勾配クリッピング設定を取得
+        train_config = config.get("train", {})
+        grad_clip_config = train_config.get("grad_clip", {})
+        grad_clip_enabled = grad_clip_config.get("enabled", True)
+        grad_clip_max_norm = grad_clip_config.get("max_norm", 1.0)
+        
         train_metrics = train_epoch(
             model, train_loader, optimizer, criterion, device, metrics,
-            use_amp=config.get("train", {}).get("amp", False),
+            use_amp=train_config.get("amp", False),
             profile=args.profile,
             debug_single_sample=debug_logging,
+            grad_clip_enabled=grad_clip_enabled,
+            grad_clip_max_norm=grad_clip_max_norm,
         )
         
         # Validation
