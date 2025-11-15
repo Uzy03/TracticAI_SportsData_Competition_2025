@@ -1,71 +1,74 @@
 debug_overfit:
-  enabled: false
-  num_samples: 8
-  seed: 42
+  enabled: false  # デバッグ用過学習モードの有効化 (default=false)
+  num_samples: 8  # 過学習テスト用のサンプル数 (default=8)
+  seed: 42  # 乱数シード (default=42)
 
 model:
-  input_dim: 16
-  hidden_dim: 128
-  num_classes: 22
-  num_layers: 3
-  num_heads: 4
-  dropout: 0.0
+  input_dim: 16  # ノード特徴量の次元数 (default=16)
+  hidden_dim: 256  # 隠れ層の次元数 (default=128)
+  num_classes: 22  # クラス数（プレイヤー数）(default=22)
+  num_layers: 3  # GATv2レイヤー数 (default=3)
+  num_heads: 4  # アテンションヘッド数 (default=4)
+  dropout: 0.2  # ドロップアウト率 (default=0.0)
 
 optimizer:
-  type: adam
-  lr: 0.001
-  weight_decay: 0.0
+  type: adam  # オプティマイザーの種類 (default="adam")
+  lr: 0.0003  # 学習率 (default=0.001)
+  weight_decay: 0.0001  # 重み減衰（L2正則化）(default=0.0)
 
 scheduler:
-  type: none
+  type: cosine  # スケジューラーの種類 (default="none")
+  T_max: 100  # コサインアニーリングの周期（エポック数）(default=train.epochs)
+  eta_min: 1e-6  # 最小学習率 (default=1e-6)
+  warmup_epochs: 5  # ウォームアップエポック数 (default=5)
 
 train:
-  batch_size: 32
-  epochs: 100
-  amp: false
+  batch_size: 32  # バッチサイズ (default=32)
+  epochs: 120  # 最大エポック数 (default=100)
+  amp: true  # Automatic Mixed Precisionの使用 (default=false)
   grad_clip:
-    enabled: true
-    max_norm: 1.0
+    enabled: true  # 勾配クリッピングの有効化 (default=true)
+    max_norm: 1.0  # 勾配の最大ノルム (default=1.0)
 
 data:
-  train_path: data/processed_ck/receiver_train/data.pickle
-  val_path: data/processed_ck/receiver_val/data.pickle
-  test_path: data/processed_ck/receiver_test/data.pickle
-  format: pickle
+  train_path: data/processed_ck/receiver_train/data.pickle  # 訓練データのパス
+  val_path: data/processed_ck/receiver_val/data.pickle  # 検証データのパス
+  test_path: data/processed_ck/receiver_test/data.pickle  # テストデータのパス
+  format: pickle  # データ形式 (default="pickle")
 
 loss:
-  type: cross_entropy
-  label_smoothing: 0.0
-  weight: 1.0
+  type: cross_entropy  # 損失関数の種類 (default="cross_entropy")
+  label_smoothing: 0.1  # ラベルスムージング率 (default=0.0)
+  weight: 1.0  # 損失の重み (default=1.0)
   focal_loss:
-    enabled: false
-    alpha: 1.0
-    gamma: 2.0
-  class_weights: null
+    enabled: false  # Focal Lossの使用 (default=false)
+    alpha: 1.0  # レアクラスの重み係数 (default=1.0)
+    gamma: 2.0  # フォーカシングパラメータ (default=2.0)
+  class_weights: null  # クラスごとの重み (default=null)
   regularization:
-    l2_weight: 0.0
-    dropout_rate: 0.0
+    l2_weight: 0.0  # L2正則化の重み (default=0.0)
+    dropout_rate: 0.0  # ドロップアウト正則化の重み (default=0.0)
 
 d2:
-  group_pool: false
+  group_pool: false  # グループプーリングの使用 (default=false)
   transforms:
-    hflip: false
-    vflip: false
+    hflip: false  # 水平フリップのデータ拡張 (default=false)
+    vflip: false  # 垂直フリップのデータ拡張 (default=false)
 
 early_stopping:
-  patience: 30
-  min_delta: 0.0
+  patience: 30  # 改善が見られない場合の待機エポック数 (default=30)
+  min_delta: 0.0  # 改善とみなす最小変化量 (default=0.0)
 
 eval:
-  batch_size: 5
-  min_cands_eval: 1
+  batch_size: 5  # 評価時のバッチサイズ (default=5)
+  min_cands_eval: 1  # 評価に必要な最小候補数 (default=1)
 
-device: auto
-seed: 42
-num_workers: 4
-prefetch_factor: 2
-persistent_workers: true
-log_level: INFO
-log_dir: runs
-checkpoint_dir: checkpoints
+device: auto  # デバイス (default="auto")
+seed: 42  # 乱数シード (default=42)
+num_workers: 4  # データローダーのワーカー数 (default=4)
+prefetch_factor: 2  # プリフェッチ係数 (default=2)
+persistent_workers: true  # ワーカーをエポック間で保持 (default=true)
+log_level: INFO  # ログレベル (default="INFO")
+log_dir: runs  # ログ保存ディレクトリ (default="runs")
+checkpoint_dir: checkpoints  # チェックポイント保存ディレクトリ (default="checkpoints")
 
