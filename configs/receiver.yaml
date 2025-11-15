@@ -32,7 +32,7 @@ train:
   amp: true  # Automatic Mixed Precisionの使用 (default=false, 推奨: trueで高速化)
   # 勾配クリッピング設定
   grad_clip:
-    enabled: true  # 勾配クリッピングの有効化 (default=true, 安定した学習のため推奨)
+    enabled: false  # 勾配クリッピングの有効化 (default=true, 安定した学習のため推奨)
     max_norm: 1.0  # 勾配の最大ノルム (default=1.0, 推奨範囲: 0.5-2.0)
 
 # データ設定
