@@ -1,0 +1,71 @@
+debug_overfit:
+  enabled: false
+  num_samples: 8
+  seed: 42
+
+model:
+  input_dim: 16
+  hidden_dim: 128
+  num_classes: 22
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.0
+
+optimizer:
+  type: adam
+  lr: 0.001
+  weight_decay: 0.0
+
+scheduler:
+  type: none
+
+train:
+  batch_size: 32
+  epochs: 100
+  amp: false
+  grad_clip:
+    enabled: true
+    max_norm: 1.0
+
+data:
+  train_path: data/processed_ck/receiver_train/data.pickle
+  val_path: data/processed_ck/receiver_val/data.pickle
+  test_path: data/processed_ck/receiver_test/data.pickle
+  format: pickle
+
+loss:
+  type: cross_entropy
+  label_smoothing: 0.0
+  weight: 1.0
+  focal_loss:
+    enabled: false
+    alpha: 1.0
+    gamma: 2.0
+  class_weights: null
+  regularization:
+    l2_weight: 0.0
+    dropout_rate: 0.0
+
+d2:
+  group_pool: false
+  transforms:
+    hflip: false
+    vflip: false
+
+early_stopping:
+  patience: 30
+  min_delta: 0.0
+
+eval:
+  batch_size: 5
+  min_cands_eval: 1
+
+device: auto
+seed: 42
+num_workers: 4
+prefetch_factor: 2
+persistent_workers: true
+log_level: INFO
+log_dir: runs
+checkpoint_dir: checkpoints
+
