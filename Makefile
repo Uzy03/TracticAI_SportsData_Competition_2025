@@ -51,7 +51,42 @@ debug-train:
 	python tacticai/train/train_shot.py --config configs/shot.yaml --debug_overfit
 	python tacticai/train/train_cvae.py --config configs/cvae.yaml --debug_overfit
 
-# サンプル実行
+# 過学習テスト：16件のミニセットで学習動作確認
+overfit-test:
+	python tools/make_mini_subset.py \
+		--src data/processed_ck/receiver_train/data.pickle \
+		--dst data/processed_ck/receiver_train/mini16.pickle \
+		--n 16 --seed 42
+	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml
+
+# 段階的デバッグテスト：データサイズを1, 2, 4, 8, 16, 32と増やして問題を特定
+overfit-test-1:
+	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml --debug_overfit_num_samples 1
+
+overfit-test-2:
+	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml --debug_overfit_num_samples 2
+
+overfit-test-4:
+	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml --debug_overfit_num_samples 4
+
+overfit-test-8:
+	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml --debug_overfit_num_samples 8
+
+overfit-test-16:
+	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml --debug_overfit_num_samples 16
+
+overfit-test-32:
+	python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml --debug_overfit_num_samples 32
+
+# 1サンプルでの過学習テスト（既存のコマンド）
+overfit-test-single:
+	python tacticai/train/train_receiver.py --config configs/receiver.yaml --debug_overfit_single_sample
+
+# 本格的な学習実行
+train-receiver:
+	python tacticai/train/train_receiver.py --config configs/receiver.yaml
+
+# サンプル実行（学習 + 評価）
 sample-run:
 	python tacticai/train/train_receiver.py --config configs/receiver.yaml
 	python tacticai/eval/eval_receiver.py --config configs/receiver.yaml

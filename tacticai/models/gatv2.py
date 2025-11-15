@@ -82,13 +82,16 @@ class GATv2Layer(nn.Module):
         self._reset_parameters()
     
     def _reset_parameters(self):
-        """Initialize parameters."""
-        nn.init.xavier_uniform_(self.W.weight)
-        nn.init.xavier_uniform_(self.W1.weight)
-        nn.init.xavier_uniform_(self.W2.weight)
+        """Initialize parameters with improved initialization."""
+        # Use He initialization (Kaiming uniform) for ReLU/LeakyReLU activations
+        # This is better than Xavier for deeper networks
+        nn.init.kaiming_uniform_(self.W.weight, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(self.W1.weight, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(self.W2.weight, a=math.sqrt(5))
         if self.U is not None:
-            nn.init.xavier_uniform_(self.U.weight)
-        nn.init.xavier_uniform_(self.att)
+            nn.init.kaiming_uniform_(self.U.weight, a=math.sqrt(5))
+        # Attention weights: use smaller initialization to prevent early saturation
+        nn.init.xavier_uniform_(self.att, gain=0.1)
         if self.bias is not None:
             nn.init.constant_(self.bias, 0)
         if getattr(self, "view_linear", None) is not None:
@@ -1011,6 +1014,8 @@ class GATv2Network4View(nn.Module):
         
         # GATv2 layers with 4-view interaction
         self.gat_layers = nn.ModuleList()
+        self.layer_norms = nn.ModuleList()  # Layer normalization for each layer
+        self.use_layer_norm = True  # Can be disabled for debugging
         for i in range(num_layers):
             concat = (i < num_layers - 1)  # Only last layer doesn't concatenate
             layer = GATv2Layer4View(
@@ -1024,6 +1029,12 @@ class GATv2Network4View(nn.Module):
                 add_self_loops=False,  # Self-loops already in edge_index (22×22 complete graph)
             )
             self.gat_layers.append(layer)
+            # Add layer normalization after each GAT layer (except last)
+            # Temporarily disable LayerNorm to debug logits collapse
+            if self.use_layer_norm and i < num_layers - 1:
+                self.layer_norms.append(nn.LayerNorm(hidden_dim))
+            else:
+                self.layer_norms.append(nn.Identity())
         
         # Output projection
         if output_dim is not None:
@@ -1061,7 +1072,7 @@ class GATv2Network4View(nn.Module):
         # Input projection
         h = self.input_proj(x)  # [B, V=4, N, hidden_dim]
         
-        # GATv2 layers with residual connections
+        # GATv2 layers with residual connections and layer normalization
         for i, layer in enumerate(self.gat_layers):
             h_new = layer(h, edge_index, edge_attr)
             
@@ -1070,6 +1081,18 @@ class GATv2Network4View(nn.Module):
                 h = h + h_new
             else:
                 h = h_new
+            
+            # Apply layer normalization (before activation)
+            # LayerNorm should normalize over the feature dimension (D) for each node
+            # For [B, V, N, D], we normalize over D dimension, keeping B, V, N separate
+            # Temporarily disabled to debug logits collapse
+            if self.use_layer_norm and i < len(self.gat_layers) - 1:  # No normalization after last layer
+                # Reshape to [B*V*N, D] for LayerNorm (normalizes over D for each node)
+                # This is correct: each node gets normalized independently
+                B, V, N, D = h.shape
+                h_flat = h.view(B * V * N, D)
+                h_normalized = self.layer_norms[i](h_flat)
+                h = h_normalized.view(B, V, N, D)
             
             # Apply dropout and activation
             if i < len(self.gat_layers) - 1:  # No activation after last layer
