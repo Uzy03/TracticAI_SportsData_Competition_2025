@@ -1,0 +1,91 @@
+# Configuration for receiver overfitting test (mini subset) with gradient clipping
+# This config is designed to test if training works correctly by overfitting on a small subset
+# This version includes gradient clipping to verify that grad_clip doesn't prevent overfitting
+
+# Debug overfit configuration
+# When enabled, uses a very small subset of training data for both train and val
+# This allows testing if the model can overfit to a tiny dataset (train_top1 ≈ 1.0)
+# All regularization is disabled: no label smoothing, dropout, augmentation, weight decay
+debug_overfit:
+  enabled: true
+  num_samples: 8  # Very small number of samples (4-8 recommended for strict overfitting test)
+  seed: 42  # Random seed for reproducible subset selection
+
+# Model configuration
+model:
+  input_dim: 16
+  hidden_dim: 128
+  num_classes: 22
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.0   # ★ overfit
+
+# Optimizer configuration
+optimizer:
+  type: adam
+  lr: 0.001      # Fixed learning rate (1e-3 or 3e-4 recommended for overfitting test)
+  weight_decay: 0.0  # ★ No weight decay (overfit mode)
+
+# Scheduler configuration
+scheduler:
+  type: none     # ★ disable scheduler
+
+# Training configuration
+train:
+  batch_size: 4  # Small batch size for very small subset (8 samples = 2 batches)
+  epochs: 200    # Many epochs to ensure overfitting (200-300 recommended)
+  amp: false     # ★ disable AMP for stability
+  grad_clip:
+    enabled: true  # Enable gradient clipping to test if it prevents overfitting
+    max_norm: 1.0  # Maximum gradient norm
+
+# Data configuration
+# Note: When debug_overfit.enabled=true, train_path will be used to create a subset
+# and both train and val will use the same subset samples
+data:
+  train_path: data/processed_ck/receiver_train/data.pickle  # Full training data (subset will be created from this)
+  val_path: data/processed_ck/receiver_val/data.pickle  # Not used when debug_overfit.enabled=true
+  test_path: data/processed_ck/receiver_test/data.pickle
+  format: pickle
+
+# Loss configuration
+loss:
+  type: cross_entropy
+  label_smoothing: 0.0   # ★ overfit
+  weight: 1.0
+  focal_loss:
+    enabled: false
+    alpha: 1.0
+    gamma: 2.0
+  class_weights: null
+  regularization:
+    l2_weight: 0.0       # ★ overfit
+    dropout_rate: 0.0    # ★ overfit
+
+# D2 equivariance configuration
+d2:
+  group_pool: false
+  transforms:
+    hflip: false
+    vflip: false          # ★ augmentation も全無効
+
+# Early stopping configuration
+early_stopping:
+  patience: 9999         # ほぼ無効化
+  min_delta: 0.0
+
+# Evaluation configuration
+eval:
+  batch_size: 5
+  min_cands_eval: 1
+
+# System configuration
+device: auto
+seed: 42
+num_workers: 0            # ★ 再現性＆デバッグ優先
+prefetch_factor: 2
+persistent_workers: false
+log_level: INFO
+log_dir: runs
+checkpoint_dir: checkpoints
+
