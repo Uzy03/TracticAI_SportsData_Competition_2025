@@ -3,30 +3,33 @@
 # モデル設定
 model:
   input_dim: 16  # ノード特徴量の次元数 (default=16): x, y, vx, vy, height, weight, dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker, dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal, ball, team
-  hidden_dim: 512  # 隠れ層の次元数 (default=128)
+  hidden_dim: 128  # 隠れ層の次元数 (default=128)
   num_classes: 22  # クラス数（プレイヤー数）(default=22)
   num_layers: 3  # GATv2レイヤー数 (default=3)
   num_heads: 4  # アテンションヘッド数 (default=4)
-  dropout: 0.0  # ドロップアウト率 (default=0.2, 推奨範囲: 0.1-0.3, 安定した学習のため推奨)
+  dropout: 0.2  # ドロップアウト率 (default=0.2, 推奨範囲: 0.1-0.3, 安定した学習のため推奨)
 
 # オプティマイザー設定
 optimizer:
   type: "adam"  # オプティマイザーの種類 (default="adam")
-  lr: 0.001  # 学習率 (default=0.0003, 安定した学習のため推奨, 範囲: 0.0001-0.01)
+  lr: 0.0003  # 学習率 (default=0.0003, 安定した学習のため推奨, 範囲: 0.0001-0.01)
   weight_decay: 0.0001  # 重み減衰（L2正則化）(default=0.0001, 安定した学習のため推奨, 範囲: 0.0001-0.001)
 
 # スケジューラー設定
 scheduler:
-  type: "none"  # スケジューラーの種類 (default="none", 選択肢: "none", "step", "cosine", "multistep")
+  type: "cosine"  # スケジューラーの種類 (default="none", 選択肢: "none", "step", "cosine", "multistep")
+  T_max: 50  # コサインアニーリングの周期（エポック数）(default=train.epochs)
+  eta_min: 1e-6  # 最小学習率 (default=1e-6)
+  warmup_epochs: 5  # ウォームアップエポック数 (default=5)
   # type="step"の場合の設定例:
   # step_size: 10  # 学習率を減らすエポック間隔 (default=10)
   # gamma: 0.5  # 学習率の減衰率 (default=0.5)
 
 # 学習設定
 train:
-  batch_size: 8  # バッチサイズ (default=8, 安定した学習のため推奨)
-  epochs: 100  # 最大エポック数 (default=100)
-  amp: false  # Automatic Mixed Precisionの使用 (default=false, 推奨: trueで高速化)
+  batch_size: 32  # バッチサイズ (default=8, 安定した学習のため推奨)
+  epochs: 50  # 最大エポック数 (default=100)
+  amp: true  # Automatic Mixed Precisionの使用 (default=false, 推奨: trueで高速化)
   # 勾配クリッピング設定
   grad_clip:
     enabled: true  # 勾配クリッピングの有効化 (default=true, 安定した学習のため推奨)
@@ -42,7 +45,7 @@ data:
 # 損失関数設定
 loss:
   type: "cross_entropy"  # 損失関数の種類 (default="cross_entropy")
-  label_smoothing: 0.0  # ラベルスムージング率 (default=0.1, 安定した学習のため推奨, 範囲: 0.05-0.1)
+  label_smoothing: 0.1  # ラベルスムージング率 (default=0.1, 安定した学習のため推奨, 範囲: 0.05-0.1)
   weight: 1.0  # 損失の重み (default=1.0)
   
   # Focal Lossのパラメータ（cross_entropyの代替）
@@ -56,20 +59,20 @@ loss:
   
   # 正則化項
   regularization:
-    l2_weight: 0.0  # L2正則化の重み (default=0.0, 推奨: 0.0001-0.001)
-    dropout_rate: 0.0  # ドロップアウト正則化の重み (default=0.0)
+    l2_weight: 0.0001  # L2正則化の重み (default=0.0, 推奨: 0.0001-0.001)
+    dropout_rate: 0.2  # ドロップアウト正則化の重み (default=0.0)
 
 # D2等変性設定
 d2:
   group_pool: false  # グループプーリングの使用 (default=false, ReceiverModelが内部でD2を処理)
   transforms:
-    hflip: false  # 水平フリップのデータ拡張 (default=false, 原因切り分けのためfalse推奨, ただし通常はtrueを推奨)
-    vflip: false  # 垂直フリップのデータ拡張 (default=false, 原因切り分けのためfalse推奨, ただし通常はtrueを推奨)
+    hflip: true  # 水平フリップのデータ拡張 (default=false, 原因切り分けのためfalse推奨, ただし通常はtrueを推奨)
+    vflip: true  # 垂直フリップのデータ拡張 (default=false, 原因切り分けのためfalse推奨, ただし通常はtrueを推奨)
 
 # Early Stopping設定
 early_stopping:
   patience: 10  # 改善が見られない場合の待機エポック数 (default=10)
-  min_delta: 0.001  # 改善とみなす最小変化量 (default=0.001)
+  min_delta: 0.01  # 改善とみなす最小変化量 (default=0.001)
 
 # 評価設定
 eval:
