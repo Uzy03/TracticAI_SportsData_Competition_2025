@@ -7,12 +7,12 @@ model:
   num_classes: 22  # クラス数（プレイヤー数）(default=22)
   num_layers: 3  # GATv2レイヤー数 (default=3)
   num_heads: 4  # アテンションヘッド数 (default=4)
-  dropout: 0.2  # ドロップアウト率 (default=0.2, 推奨範囲: 0.1-0.3, 安定した学習のため推奨)
+  dropout: 0.0  # ドロップアウト率 (default=0.2, 推奨範囲: 0.1-0.3, 安定した学習のため推奨)
 
 # オプティマイザー設定
 optimizer:
   type: "adam"  # オプティマイザーの種類 (default="adam")
-  lr: 0.0003  # 学習率 (default=0.0003, 安定した学習のため推奨, 範囲: 0.0001-0.01)
+  lr: 0.001  # 学習率 (default=0.0003, 安定した学習のため推奨, 範囲: 0.0001-0.01)
   weight_decay: 0.0001  # 重み減衰（L2正則化）(default=0.0001, 安定した学習のため推奨, 範囲: 0.0001-0.001)
 
 # スケジューラー設定
@@ -42,7 +42,7 @@ data:
 # 損失関数設定
 loss:
   type: "cross_entropy"  # 損失関数の種類 (default="cross_entropy")
-  label_smoothing: 0.1  # ラベルスムージング率 (default=0.1, 安定した学習のため推奨, 範囲: 0.05-0.1)
+  label_smoothing: 0.0  # ラベルスムージング率 (default=0.1, 安定した学習のため推奨, 範囲: 0.05-0.1)
   weight: 1.0  # 損失の重み (default=1.0)
   
   # Focal Lossのパラメータ（cross_entropyの代替）
