@@ -30,18 +30,57 @@ def mask_logits(logits: torch.Tensor, cand_mask: torch.Tensor) -> torch.Tensor:
 
 
 class NodeScoreHead(nn.Module):
-    """Minimal per-node scoring head (逐点ロジット)."""
+    """MLP-based per-node scoring head (逐点ロジット)."""
 
-    def __init__(self, input_dim: int, **_: int):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: Optional[int] = None,
+        dropout: float = 0.0,
+        num_layers: int = 2,
+        **kwargs
+    ):
+        """Initialize MLP head.
+        
+        Args:
+            input_dim: Input feature dimension
+            hidden_dim: Hidden dimension (defaults to input_dim if not specified)
+            dropout: Dropout probability
+            num_layers: Number of MLP layers (default: 2)
+        """
         super().__init__()
-        self.linear = nn.Linear(input_dim, 1)
+        if hidden_dim is None:
+            hidden_dim = input_dim
+        
+        layers = []
+        # First layer: input_dim -> hidden_dim
+        layers.append(nn.Linear(input_dim, hidden_dim))
+        # Temporarily disable LayerNorm to debug logits collapse
+        # layers.append(nn.LayerNorm(hidden_dim))  # Add layer normalization
+        layers.append(nn.ReLU())
+        if dropout > 0:
+            layers.append(nn.Dropout(dropout))
+        
+        # Additional hidden layers if num_layers > 2
+        for _ in range(num_layers - 2):
+            layers.append(nn.Linear(hidden_dim, hidden_dim))
+            # Temporarily disable LayerNorm to debug logits collapse
+            # layers.append(nn.LayerNorm(hidden_dim))  # Add layer normalization
+            layers.append(nn.ReLU())
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+        
+        # Output layer: hidden_dim -> 1 (no normalization before output)
+        layers.append(nn.Linear(hidden_dim, 1))
+        
+        self.mlp = nn.Sequential(*layers)
 
     def forward(
         self,
         hidden: torch.Tensor,
         cand_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Project node embeddings to logits.
+        """Project node embeddings to logits using MLP.
 
         Args:
             hidden: Node embeddings ``[B, N, d]`` or ``[N, d]``.
@@ -50,12 +89,13 @@ class NodeScoreHead(nn.Module):
         Returns:
             Per-node logits ``[B, N]`` (or ``[N]`` for 2-D input).
         """
-        del cand_mask  # not needed for this minimal head
+        del cand_mask  # not needed for this head
         original_2d = hidden.dim() == 2
         if original_2d:
             hidden = hidden.unsqueeze(0)
 
-        logits = self.linear(hidden).squeeze(-1)
+        # Apply MLP: [B, N, d] -> [B, N, 1] -> [B, N]
+        logits = self.mlp(hidden).squeeze(-1)
 
         if original_2d:
             logits = logits.squeeze(0)
