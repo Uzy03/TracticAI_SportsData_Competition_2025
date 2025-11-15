@@ -19,7 +19,7 @@ optimizer:
 scheduler:
   type: cosine  # スケジューラーの種類 (default="none")
   T_max: 100  # コサインアニーリングの周期（エポック数）(default=train.epochs)
-  eta_min: 1e-6  # 最小学習率 (default=1e-6)
+  eta_min: 0.000001  # 最小学習率 (default=1e-6)
   warmup_epochs: 5  # ウォームアップエポック数 (default=5)
 
 train:
