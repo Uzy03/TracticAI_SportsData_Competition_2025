@@ -3,7 +3,7 @@
 # モデル設定
 model:
   input_dim: 16  # ノード特徴量の次元数 (default=16): x, y, vx, vy, height, weight, dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker, dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal, ball, team
-  hidden_dim: 128  # 隠れ層の次元数 (default=128)
+  hidden_dim: 256  # 隠れ層の次元数 (default=128)
   num_classes: 22  # クラス数（プレイヤー数）(default=22)
   num_layers: 3  # GATv2レイヤー数 (default=3)
   num_heads: 4  # アテンションヘッド数 (default=4)
