@@ -324,7 +324,8 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
             # Check if this is the first layer in the backbone (GATv2Network4View)
             if hasattr(module, 'in_features') and module.in_features == input_dim:
                 # First layer: amplify small input features with larger weights
-                nn.init.xavier_uniform_(module.weight, gain=5.0)  # Much larger gain to amplify small features
+                # Reduced from 5.0 to 3.0 to prevent gradient explosion
+                nn.init.xavier_uniform_(module.weight, gain=3.0)  # Larger gain to amplify small features
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
             # Output layer: use moderate initialization to allow learning
