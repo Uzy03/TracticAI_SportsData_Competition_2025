@@ -1133,11 +1133,15 @@ def validate_epoch(
                             H_cand = H_b[cand_mask_b]  # [num_cands, hidden_dim]
                             H_cand_std = H_cand.std(dim=0).mean().item()  # Average std across feature dimensions
                     
+                    # Format H std values safely
+                    H_all_std_str = f"{H_all_std:.6f}" if H_all_std is not None else "N/A"
+                    H_cand_std_str = f"{H_cand_std:.6f}" if H_cand_std is not None else "N/A"
+                    
                     logger.info(
                         f"[VAL-DEBUG] batch={batch_idx}, graph={b}, graph_id={graph_id}:\n"
                         f"  target_global={target_global}, target_in_cand={target_in_cand}, cand_mask[target]={cm[target_global].item() if target_global < cm.size(0) else 'N/A'}\n"
                         f"  cand_mask.sum()={Ncand}, cand_mask.shape={cm.shape}\n"
-                        f"  H_all_std={H_all_std:.6f if H_all_std is not None else 'N/A'}, H_cand_std={H_cand_std:.6f if H_cand_std is not None else 'N/A'}\n"
+                        f"  H_all_std={H_all_std_str}, H_cand_std={H_cand_std_str}\n"
                         f"  logits_full.shape={logits_full.shape}, logits_full.mean()={logits_full.mean().item():.6f}, logits_full.std()={logits_full.std().item():.6f}\n"
                         f"  logits_masked.shape={logits_masked.shape}, logits_masked.mean()={logits_masked.mean().item():.6f}, logits_masked.std()={logits_masked.std().item():.6f}\n"
                         f"  topk_full_indices={topk_indices.tolist()}, topk_full_values={topk_values.tolist()}\n"
