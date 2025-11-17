@@ -35,7 +35,7 @@ scheduler:
 # Training configuration
 train:
   batch_size: 4  # 1バッチで学習するため（num_samples=4のため）
-  epochs: 200    # Many epochs to ensure overfitting (200-300 recommended)
+  epochs: 100    # Many epochs to ensure overfitting (200-300 recommended)
   amp: false     # ★ disable AMP for stability
   grad_clip:
     enabled: true  # Enable gradient clipping to test if it prevents overfitting
