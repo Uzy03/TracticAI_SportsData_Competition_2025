@@ -13,7 +13,7 @@ debug_overfit:
 
 # Model configuration
 model:
-  input_dim: 7  # TacticAI paper baseline: x, y, vx, vy, height, weight, ball_possession
+  input_dim: 16  # Enhanced with relative features: x, y, vx, vy, height, weight, ball_possession (7) + dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker (4) + dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal (4) + team_id (1) = 16
   hidden_dim: 128
   num_classes: 22
   num_layers: 3

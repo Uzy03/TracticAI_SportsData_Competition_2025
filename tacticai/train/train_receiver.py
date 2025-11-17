@@ -211,9 +211,10 @@ class ReceiverModel(nn.Module):
         B = batch.max().item() + 1 if batch is not None else 1
         
         # Create 4 views for entire batch at once
-        # TacticAI paper baseline: D2 reflection applies to coordinates and velocity vectors
+        # D2 reflection applies to coordinates, velocity vectors, and relative features
         # x, y at indices 0, 1; vx, vy at indices 2, 3
-        # height, weight, ball_possession are invariant (not flipped)
+        # dx_to_kicker, dy_to_kicker at indices 7, 8; dx_to_goal, dy_to_goal at indices 11, 12
+        # height, weight, ball_possession, dist_to_kicker, angle_to_kicker, dist_to_goal, angle_to_goal, team_id are invariant (not flipped)
         views_list = []
         for view_idx in range(len(D2_VIEWS)):
             x_view = x.clone()
@@ -223,7 +224,12 @@ class ReceiverModel(nn.Module):
             # vx, vy velocities: indices 2, 3
             if x_view.size(-1) > 3:
                 x_view = apply_view_transform(x_view, view_idx, xy_indices=(2, 3))
-            # Note: TacticAI paper baseline does NOT include dx_to_kicker, dx_to_goal etc.
+            # dx_to_kicker, dy_to_kicker: indices 7, 8 (relative features to kicker)
+            if x_view.size(-1) > 8:
+                x_view = apply_view_transform(x_view, view_idx, xy_indices=(7, 8))
+            # dx_to_goal, dy_to_goal: indices 11, 12 (relative features to goal)
+            if x_view.size(-1) > 12:
+                x_view = apply_view_transform(x_view, view_idx, xy_indices=(11, 12))
             views_list.append(x_view)
         
         # Stack views: [4, N_total, D] -> [B, 4, N_total, D]
