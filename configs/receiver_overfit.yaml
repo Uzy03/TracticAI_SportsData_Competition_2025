@@ -13,10 +13,10 @@ debug_overfit:
 # Model configuration
 model:
   input_dim: 7  # TacticAI paper baseline: x, y, vx, vy, height, weight, ball_possession (was 16 in fix/8_hyperpara)
-  hidden_dim: 512  # Balanced: between 256 and 512 for capacity while maintaining stability
+  hidden_dim: 128  # Reduced for small dataset (8 samples): CLRS default=128, was 512
   num_classes: 22
-  num_layers: 3  # Keep 4 layers for stability
-  num_heads: 8  # Keep 8 heads for attention capacity
+  num_layers: 3  # Keep 3 layers
+  num_heads: 4  # Reduced for small dataset: CLRS default=1, was 8
   dropout: 0.0   # ★ overfit
   edge_dim: 1  # TacticAI paper baseline: same_team only
   # global_dim: Receiverタスクでは使用しない (TacticAI paper baseline)
