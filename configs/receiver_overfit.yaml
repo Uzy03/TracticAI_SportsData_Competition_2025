@@ -39,7 +39,7 @@ train:
   # Gradient clipping to prevent NaN
   grad_clip:
     enabled: true  # Enable gradient clipping to prevent gradient explosion
-    max_norm: 0.5  # Balanced: prevent NaN while allowing learning
+    max_norm: 1.0  # CLRS default: 1.0 (was 0.5)
 
 # Data configuration
 # Note: When debug_overfit.enabled=true, train_path will be used to create a subset
