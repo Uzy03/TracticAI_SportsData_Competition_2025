@@ -173,6 +173,8 @@ class ReceiverModel(nn.Module):
             num_layers=model_config.get("mlp_num_layers", 2),  # Allow configurable MLP depth
         )
         self._cand_checks_done = False
+        self._debug_first_forward = False  # Flag for debug logging
+        self._logger = None  # Will be set from outside for debugging
     
     def forward(
         self, 
@@ -260,12 +262,33 @@ class ReceiverModel(nn.Module):
         # This will be used in training/validation loop to check if H has variance among candidates
         self._last_H = H  # [B, N_per_graph, hidden_dim]
         
+        # Debug: Check H variance before head
+        if hasattr(self, '_debug_first_forward'):
+            if not self._debug_first_forward:
+                # Log H statistics for first forward pass
+                H_std = H.std(dim=1).mean().item()  # Average std across feature dimensions per node
+                H_mean = H.mean(dim=1).mean().item()  # Average mean per node
+                H_node_std = H.std(dim=0).mean().item()  # Std across nodes for each feature dimension
+                if hasattr(self, '_logger') and self._logger is not None:
+                    self._logger.info(f"[DEBUG-FORWARD] H stats before head: H_std={H_std:.6f}, H_mean={H_mean:.6f}, H_node_std={H_node_std:.6f}")
+                self._debug_first_forward = True
+        
         cand_mask = None  # Candidate masks are built downstream during training/validation
         
         # Get logits for all nodes (TacticAI spec: [B, N] format)
         # TacticAI spec: Each node outputs 1 scalar logit (no node-mean/sum aggregation)
         # ReceiverHead applies Linear(d→1) point-wise to each node
         logits = self.head(H, cand_mask=cand_mask)  # [B, N_per_graph]
+        
+        # Debug: Check logits variance after head
+        if hasattr(self, '_debug_first_forward') and self._debug_first_forward and not hasattr(self, '_debug_logits_logged'):
+            logits_std = logits.std().item()
+            logits_mean = logits.mean().item()
+            logits_per_node_std = logits.std(dim=1).mean().item()  # Std per graph
+            if hasattr(self, '_logger') and self._logger is not None:
+                self._logger.info(f"[DEBUG-FORWARD] Logits stats after head: logits_std={logits_std:.6f}, logits_mean={logits_mean:.6f}, logits_per_node_std={logits_per_node_std:.6f}")
+                self._logger.info(f"[DEBUG-FORWARD] Head weights stats: {[p.data.std().item() for p in self.head.mlp.parameters() if p.requires_grad][:3]}")
+            self._debug_logits_logged = True
         
         if cand_mask is not None:
             cand_mask = cand_mask.bool()
@@ -1545,6 +1568,9 @@ def main():
     # Create model
     model = create_model(config, device)
     logger.info(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
+    # Set logger for debug output in model forward
+    if hasattr(model, '_logger'):
+        model._logger = logger
     
     # Create optimizer and scheduler
     optimizer = create_optimizer(model, config)
