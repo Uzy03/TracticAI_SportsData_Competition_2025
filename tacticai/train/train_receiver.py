@@ -351,12 +351,14 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
                 nn.init.xavier_uniform_(module.weight, gain=2.5)  # Balanced gain to amplify small features
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-            # Output layer: use moderate initialization to allow learning
+            # Output layer: use larger initialization to amplify small differences in H
             elif hasattr(module, 'out_features') and module.out_features == 1:
-                # Output layer: use Xavier initialization with moderate gain
-                nn.init.xavier_uniform_(module.weight, gain=1.0)  # Increased from 0.1 to allow learning
+                # Output layer: use larger gain to amplify small differences in node embeddings
+                # This helps distinguish candidate nodes with similar features
+                nn.init.xavier_uniform_(module.weight, gain=3.0)  # Increased from 1.0 to amplify differences
                 if module.bias is not None:
-                    nn.init.uniform_(module.bias, -0.1, 0.1)  # Small random bias to break symmetry
+                    # Use larger bias range to break symmetry more effectively
+                    nn.init.uniform_(module.bias, -0.5, 0.5)  # Increased from 0.1 to break symmetry
     
     return model.to(device)
 
