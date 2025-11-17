@@ -24,7 +24,7 @@ model:
 # Optimizer configuration
 optimizer:
   type: adam
-  lr: 0.001      # Balanced: high enough to learn, with gradient clipping to prevent NaN
+  lr: 0.01       # Increased to learn small differences between candidate nodes (was 0.001)
   weight_decay: 0.0  # ★ No weight decay (overfit mode)
 
 # Scheduler configuration
@@ -39,7 +39,7 @@ train:
   # Gradient clipping to prevent NaN
   grad_clip:
     enabled: true  # Enable gradient clipping to prevent gradient explosion
-    max_norm: 1.0  # CLRS default: 1.0 (was 0.5)
+    max_norm: 0.5  # Reduced to allow larger gradients for learning small differences (was 1.0)
 
 # Data configuration
 # Note: When debug_overfit.enabled=true, train_path will be used to create a subset
