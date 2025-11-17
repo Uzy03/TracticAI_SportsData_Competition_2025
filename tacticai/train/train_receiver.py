@@ -316,14 +316,23 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
     
     model.apply(init_weights)
     
-    # Special initialization for output layer to prevent logits collapse
-    # Initialize output layer with smaller weights to prevent explosion
+    # Special initialization for input and output layers to handle small feature variance
+    input_dim = config["model"]["input_dim"]
     for name, module in model.named_modules():
-        if isinstance(module, nn.Linear) and module.out_features == 1:
-            # Output layer: use Xavier initialization with smaller gain to prevent explosion
-            nn.init.xavier_uniform_(module.weight, gain=0.1)  # Reduced from 1.0 to prevent explosion
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
+        if isinstance(module, nn.Linear):
+            # Input layer: use larger initialization to amplify small feature differences
+            # Check if this is the first layer in the backbone (GATv2Network4View)
+            if hasattr(module, 'in_features') and module.in_features == input_dim:
+                # First layer: amplify small input features with larger weights
+                nn.init.xavier_uniform_(module.weight, gain=2.0)  # Larger gain to amplify small features
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            # Output layer: use moderate initialization to allow learning
+            elif hasattr(module, 'out_features') and module.out_features == 1:
+                # Output layer: use Xavier initialization with moderate gain
+                nn.init.xavier_uniform_(module.weight, gain=1.0)  # Increased from 0.1 to allow learning
+                if module.bias is not None:
+                    nn.init.uniform_(module.bias, -0.1, 0.1)  # Small random bias to break symmetry
     
     return model.to(device)
 
