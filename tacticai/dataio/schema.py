@@ -273,12 +273,12 @@ class ReceiverSchema(DataSchema):
         Args:
             data: Raw data dictionary containing player information
             
-        Returns:
+            Returns:
             Node features [N, 7] where:
-                - dim 0-1: x, y (normalized positions)
-                - dim 2-3: vx, vy (velocities)
-                - dim 4: height
-                - dim 5: weight
+                - dim 0-1: x, y (normalized positions to [0, 1])
+                - dim 2-3: vx, vy (normalized velocities to [-1, 1] range)
+                - dim 4: height (normalized to [0, 1] range)
+                - dim 5: weight (normalized to [0, 1] range)
                 - dim 6: ball_possession (1.0 if player has ball, 0.0 otherwise)
         """
         features = []
@@ -301,7 +301,12 @@ class ReceiverSchema(DataSchema):
                 velocities = data[self.velocity_columns].values
             else:
                 velocities = np.array([data[col] for col in self.velocity_columns]).T
-            features.append(torch.tensor(velocities, dtype=torch.float32))
+            # Normalize velocities to similar scale as positions
+            # Maximum speed: typically 0-70 m/s (soccer players), normalize to [-1, 1] range (divide by 70.0)
+            # This allows both positive and negative velocities (directions)
+            max_velocity = 70.0  # m/s (typical maximum speed for soccer players)
+            normalized_velocities = velocities / max_velocity
+            features.append(torch.tensor(normalized_velocities, dtype=torch.float32))
         else:
             # Add zero velocities as placeholder
             features.append(torch.zeros(positions.shape[0], 2, dtype=torch.float32))
@@ -312,7 +317,16 @@ class ReceiverSchema(DataSchema):
                 attrs = data[self.player_attr_columns].values
             else:
                 attrs = np.array([data[col] for col in self.player_attr_columns]).T
-            features.append(torch.tensor(attrs, dtype=torch.float32))
+            # Normalize attributes to similar scale as positions
+            # Height: typically 1.7-2.0m, normalize to [0, 1] range (divide by 2.0)
+            # Weight: typically 60-90kg, normalize to [0, 1] range (divide by 100.0)
+            if attrs.shape[1] >= 2:
+                normalized_attrs = attrs.copy()
+                normalized_attrs[:, 0] = attrs[:, 0] / 2.0  # height: divide by 2.0m
+                normalized_attrs[:, 1] = attrs[:, 1] / 100.0  # weight: divide by 100.0kg
+                features.append(torch.tensor(normalized_attrs, dtype=torch.float32))
+            else:
+                features.append(torch.tensor(attrs, dtype=torch.float32))
         else:
             # Add default attributes (height, weight)
             features.append(torch.zeros(positions.shape[0], 2, dtype=torch.float32))
