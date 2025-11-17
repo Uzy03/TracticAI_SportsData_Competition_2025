@@ -1136,13 +1136,17 @@ def validate_epoch(
                             H_cand_std = H_cand.std(dim=0).mean().item()  # Average std across feature dimensions
                     
                     # Debug: Check input node features (x) variance among candidates
-                    if data.get("x") is not None:
-                        x_batched = _reshape_to_batch(data["x"], batch_size, nodes_per_graph)
-                        if x_batched.size(0) > b:
-                            x_b = x_batched[b]  # [N_per_graph, input_dim]
+                    if data.get("x") is not None and data.get("batch") is not None:
+                        x_tensor = data["x"]  # [N_total, input_dim]
+                        batch_tensor = data["batch"]  # [N_total]
+                        # Extract nodes for graph b
+                        graph_mask = (batch_tensor == b)
+                        if graph_mask.sum() > 0:
+                            x_b = x_tensor[graph_mask]  # [N_per_graph, input_dim]
                             x_all_std = x_b.std(dim=0).mean().item()  # Average std across feature dimensions
+                            # Get candidate mask for this graph
                             cand_mask_b = cm.view(-1)  # [N_per_graph]
-                            if cand_mask_b.sum() > 0:
+                            if cand_mask_b.sum() > 0 and cand_mask_b.size(0) == x_b.size(0):
                                 x_cand = x_b[cand_mask_b]  # [num_cands, input_dim]
                                 x_cand_std = x_cand.std(dim=0).mean().item()  # Average std across feature dimensions
                     
