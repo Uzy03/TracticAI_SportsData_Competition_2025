@@ -499,19 +499,14 @@ class ReceiverSchema(DataSchema):
     def get_edge_attributes(self, data: Dict[str, Any]) -> Optional[torch.Tensor]:
         """Extract edge attributes for receiver prediction (TacticAI spec).
         
-        Returns 9-dimensional edge features:
-        - dx, dy: position differences
-        - dist_ij: distance between nodes
-        - angle_ij: angle between nodes
-        - dvx, dvy: velocity differences
-        - same_team: binary indicator
-        - from_kicker, to_kicker: binary indicators
+        Returns 1-dimensional edge features (same_team only):
+        - same_team: binary indicator (1.0 if same team or self-loop, 0.0 otherwise)
         
         Args:
             data: Raw data dictionary
             
         Returns:
-            Edge attributes tensor [E, 9] or None
+            Edge attributes tensor [E, 1] or None (same_team only, matching fix/8_hyperpara)
         """
         if not self.use_edge_attributes:
             return None
