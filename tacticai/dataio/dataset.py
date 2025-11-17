@@ -314,7 +314,10 @@ class ReceiverDataset(TacticAIDataset):
         # Extract features using schema
         node_features = self.schema.get_node_features(sample)
         edge_index = self.schema.get_edge_index(sample)
-        edge_attr = self.schema.get_edge_attributes(sample)  # TacticAI spec: include edge_attr
+        edge_attr = self.schema.get_edge_attributes(sample)  # TacticAI spec: include edge_attr (9-dim)
+        global_x = None
+        if hasattr(self.schema, 'get_global_features'):
+            global_x = self.schema.get_global_features(sample)  # TacticAI spec: include global_x (8-dim)
         target = self.schema.get_targets(sample)
         
         # Create batch tensor (all nodes belong to same graph)
@@ -326,9 +329,13 @@ class ReceiverDataset(TacticAIDataset):
             "batch": batch,
         }
         
-        # Add edge_attr if available (TacticAI spec: same_team feature)
+        # Add edge_attr if available (TacticAI spec: 9-dimensional edge features)
         if edge_attr is not None:
             input_data["edge_attr"] = edge_attr
+        
+        # Add global_x if available (TacticAI spec: 8-dimensional global features)
+        if global_x is not None:
+            input_data["global_x"] = global_x
         
         # Add mask, team, ball if available in sample
         if isinstance(sample, dict):
@@ -646,12 +653,19 @@ def collate_fn(batch: List[Tuple[Dict[str, torch.Tensor], torch.Tensor]]) -> Tup
         "batch": batch_tensor,
     }
     
-    # Concatenate edge_attr if present (TacticAI spec: same_team feature)
+    # Concatenate edge_attr if present (TacticAI spec: 9-dimensional edge features)
     if all("edge_attr" in data and data["edge_attr"] is not None for data in input_data_list):
         edge_attrs = []
         for data in input_data_list:
             edge_attrs.append(data["edge_attr"])
         batched_input["edge_attr"] = torch.cat(edge_attrs, dim=0)
+    
+    # Stack global_x if present (TacticAI spec: 8-dimensional global features)
+    if all("global_x" in data and data["global_x"] is not None for data in input_data_list):
+        global_features = []
+        for data in input_data_list:
+            global_features.append(data["global_x"])
+        batched_input["global_x"] = torch.stack(global_features, dim=0)  # [B, 8]
     
     # Optional per-node fields: mask, team, ball
     # Concatenate if present in all items

@@ -996,6 +996,7 @@ class GATv2Network4View(nn.Module):
         readout: str = "mean",
         residual: bool = True,
         view_mixing: str = "attention",
+        edge_feature_dim: int = 1,  # TacticAI spec: edge feature dimension (default: 1 for same_team, or 9 for full features)
     ):
         super().__init__()
         
@@ -1006,6 +1007,7 @@ class GATv2Network4View(nn.Module):
         self.num_heads = num_heads
         self.dropout = dropout
         self.readout = readout
+        self.edge_feature_dim = edge_feature_dim
         self.residual = residual
         self.view_mixing = view_mixing
         
@@ -1025,7 +1027,7 @@ class GATv2Network4View(nn.Module):
                 concat=concat,
                 dropout=dropout,
                 view_mixing=view_mixing,
-                edge_feature_dim=1,  # TacticAI spec: same_team only
+                edge_feature_dim=edge_feature_dim,  # TacticAI spec: edge feature dimension (9 for full features)
                 add_self_loops=False,  # Self-loops already in edge_index (22×22 complete graph)
             )
             self.gat_layers.append(layer)

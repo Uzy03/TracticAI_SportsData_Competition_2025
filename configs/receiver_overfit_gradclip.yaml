@@ -19,6 +19,8 @@ model:
   num_layers: 3
   num_heads: 4
   dropout: 0.0   # ★ overfit
+  edge_dim: 9  # Edge feature dimension: dx, dy, dist_ij, angle_ij, dvx, dvy, same_team, from_kicker, to_kicker
+  global_dim: 8  # Global feature dimension: ball_x, ball_y, ball_vx, ball_vy, kicker_x, kicker_y, kicker_vx, kicker_vy
 
 # Optimizer configuration
 optimizer:

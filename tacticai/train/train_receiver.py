@@ -142,6 +142,12 @@ class ReceiverModel(nn.Module):
         super().__init__()
         model_config = config["model"]
         
+        # Get edge_dim and global_dim from config (with defaults)
+        edge_dim = model_config.get("edge_dim", 9)
+        global_dim = model_config.get("global_dim", 8)
+        self.edge_dim = edge_dim
+        self.global_dim = global_dim
+        
         # Create backbone with 4-view D2 equivariance
         self.backbone = GATv2Network4View(
             input_dim=model_config["input_dim"],
@@ -153,11 +159,14 @@ class ReceiverModel(nn.Module):
             readout="mean",
             residual=True,
             view_mixing="attention",
+            edge_feature_dim=edge_dim,  # TacticAI spec: 9-dimensional edge features
         )
         
-        # Create head
+        # Create head with global_dim added to input
+        # If global_x is provided, input to head will be hidden_dim + global_dim
+        head_input_dim = model_config["hidden_dim"] + global_dim if global_dim > 0 else model_config["hidden_dim"]
         self.head = ReceiverHead(
-            input_dim=model_config["hidden_dim"],
+            input_dim=head_input_dim,
             num_classes=model_config["num_classes"],
             hidden_dim=model_config["hidden_dim"],
             dropout=model_config["dropout"],
@@ -170,10 +179,11 @@ class ReceiverModel(nn.Module):
         x: torch.Tensor, 
         edge_index: torch.Tensor, 
         batch: torch.Tensor,
-        edge_attr: Optional[torch.Tensor] = None,  # TacticAI spec: same_team feature
+        edge_attr: Optional[torch.Tensor] = None,  # TacticAI spec: 9-dimensional edge features
         mask: Optional[torch.Tensor] = None,
         team: Optional[torch.Tensor] = None,
         ball: Optional[torch.Tensor] = None,
+        global_x: Optional[torch.Tensor] = None,  # TacticAI spec: 8-dimensional global features
     ) -> torch.Tensor:
         """Forward pass with D2 equivariance.
         
@@ -181,9 +191,11 @@ class ReceiverModel(nn.Module):
             x: Node features [N, input_dim]
             edge_index: Edge indices [2, E]
             batch: Batch indices [N]
+            edge_attr: Edge features [E, edge_dim] (optional, default: 9-dim)
             mask: Node mask [N] where 1=valid, 0=missing (optional)
             team: Team IDs [N] where 0=attacking team, 1=defending team (optional)
             ball: Ball possession [N] where 1=has ball, 0=no ball (optional)
+            global_x: Global features [B, global_dim] (optional, default: 8-dim)
             
         Returns:
             Receiver predictions - shape depends on filtering:
@@ -228,7 +240,7 @@ class ReceiverModel(nn.Module):
         
         # Use edge_index and edge_attr (already batched correctly by collate_fn)
         # edge_index contains edges for all graphs with proper offsets
-        # edge_attr contains same_team features [E, 1] (TacticAI spec)
+        # edge_attr contains 9-dimensional edge features [E, 9] (TacticAI spec)
         # Get node embeddings from backbone: [B, 4, N_per_graph, output_dim]
         node_emb_4view = self.backbone(x_4view, edge_index, edge_attr)  # [B, 4, N_per_graph, output_dim]
         
@@ -243,6 +255,13 @@ class ReceiverModel(nn.Module):
                 mask_batched = mask_batched.unsqueeze(0).expand(B, -1)
             mask_expanded = mask_batched.unsqueeze(-1).expand_as(H)  # [B, N_per_graph, D]
             H = H * mask_expanded.float()
+        
+        # TacticAI spec: Combine node embeddings with global features
+        if global_x is not None and self.global_dim > 0:
+            # global_x: [B, global_dim]
+            # Broadcast to [B, N_per_graph, global_dim] and concatenate with H
+            global_expanded = global_x.unsqueeze(1).expand(-1, num_nodes_per_graph, -1)  # [B, N_per_graph, global_dim]
+            H = torch.cat([H, global_expanded], dim=-1)  # [B, N_per_graph, hidden_dim + global_dim]
         
         cand_mask = None  # Candidate masks are built downstream during training/validation
         
@@ -447,6 +466,7 @@ def train_epoch(
                     mask=data.get("mask"),
                     team=data.get("team"),
                     ball=data.get("ball"),
+                    global_x=data.get("global_x"),  # TacticAI spec: 8-dimensional global features
                 )
         else:
             outputs = model(
@@ -457,6 +477,7 @@ def train_epoch(
                 mask=data.get("mask"),
                 team=data.get("team"),
                 ball=data.get("ball"),
+                global_x=data.get("global_x"),  # TacticAI spec: 8-dimensional global features
             )
 
         outputs = outputs.float()
@@ -815,7 +836,7 @@ def validate_epoch(
             data = {k: v.to(device) for k, v in data.items()}
             targets = targets.to(device)
             
-            # Pass edge_attr, mask, team, ball if available
+            # Pass edge_attr, mask, team, ball, global_x if available
             outputs = model(
                 data["x"], 
                 data["edge_index"], 
@@ -824,6 +845,7 @@ def validate_epoch(
                 mask=data.get("mask"),
                 team=data.get("team"),
                 ball=data.get("ball"),
+                global_x=data.get("global_x"),  # TacticAI spec: 8-dimensional global features
             )
             
             if outputs.dtype != torch.float32:
@@ -1688,6 +1710,7 @@ def main():
                     mask=data.get("mask"),
                     team=data.get("team"),
                     ball=data.get("ball"),
+                    global_x=data.get("global_x"),  # TacticAI spec: 8-dimensional global features
                 )
                 
                 if outputs.dtype != torch.float32:

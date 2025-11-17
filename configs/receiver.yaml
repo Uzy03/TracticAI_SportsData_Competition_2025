@@ -8,6 +8,8 @@ model:
   num_layers: 3  # GATv2レイヤー数 (default=3)
   num_heads: 4  # アテンションヘッド数 (default=4)
   dropout: 0.2  # ドロップアウト率 (default=0.2, 推奨範囲: 0.1-0.3, 安定した学習のため推奨)
+  edge_dim: 9  # エッジ特徴次元 (default=9): dx, dy, dist_ij, angle_ij, dvx, dvy, same_team, from_kicker, to_kicker
+  global_dim: 8  # グローバル特徴次元 (default=8): ball_x, ball_y, ball_vx, ball_vy, kicker_x, kicker_y, kicker_vx, kicker_vy
 
 # オプティマイザー設定
 optimizer:
