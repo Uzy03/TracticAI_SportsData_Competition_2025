@@ -13,7 +13,7 @@ debug_overfit:
 # Model configuration
 model:
   input_dim: 7  # TacticAI paper baseline: x, y, vx, vy, height, weight, ball_possession (was 16 in fix/8_hyperpara)
-  hidden_dim: 384  # Balanced: between 256 and 512 for capacity while maintaining stability
+  hidden_dim: 512  # Balanced: between 256 and 512 for capacity while maintaining stability
   num_classes: 22
   num_layers: 4  # Keep 4 layers for stability
   num_heads: 8  # Keep 8 heads for attention capacity
@@ -24,7 +24,7 @@ model:
 # Optimizer configuration
 optimizer:
   type: adam
-  lr: 0.005      # Balanced: high enough to learn, with gradient clipping to prevent NaN
+  lr: 0.001      # Balanced: high enough to learn, with gradient clipping to prevent NaN
   weight_decay: 0.0  # ★ No weight decay (overfit mode)
 
 # Scheduler configuration
