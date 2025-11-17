@@ -7,16 +7,16 @@
 # All regularization is disabled: no label smoothing, dropout, augmentation, weight decay
 debug_overfit:
   enabled: true
-  num_samples: 4  # 1バッチで学習するため4サンプルに変更（batch_size=4のため）
+  num_samples: 8  # Very small number of samples (4-8 recommended for strict overfitting test)
   seed: 42  # Random seed for reproducible subset selection
 
 # Model configuration
 model:
-  input_dim: 7  # TacticAI paper baseline: x, y, vx, vy, height, weight, ball_possession
-  hidden_dim: 128  # Increased from 128 to 256 for better expressiveness (overfitting test)
+  input_dim: 7  # TacticAI paper baseline: x, y, vx, vy, height, weight, ball_possession (was 16 in fix/8_hyperpara)
+  hidden_dim: 128
   num_classes: 22
-  num_layers: 3  # Increased from 3 to 4 for deeper representation (overfitting test)
-  num_heads: 4  # Increased from 4 to 8 for better attention (overfitting test)
+  num_layers: 3
+  num_heads: 4
   dropout: 0.0   # ★ overfit
   edge_dim: 1  # TacticAI paper baseline: same_team only
   # global_dim: Receiverタスクでは使用しない (TacticAI paper baseline)
@@ -24,7 +24,7 @@ model:
 # Optimizer configuration
 optimizer:
   type: adam
-  lr: 0.001       # Higher learning rate for overfitting test (was 0.001, too small)
+  lr: 0.001      # Fixed learning rate (1e-3 or 3e-4 recommended for overfitting test)
   weight_decay: 0.0  # ★ No weight decay (overfit mode)
 
 # Scheduler configuration
@@ -33,8 +33,8 @@ scheduler:
 
 # Training configuration
 train:
-  batch_size: 4  # 1バッチで学習するため（num_samples=4のため）
-  epochs: 50    # Many epochs to ensure overfitting (200-300 recommended)
+  batch_size: 4  # Small batch size for very small subset (8 samples = 2 batches)
+  epochs: 200    # Many epochs to ensure overfitting (200-300 recommended)
   amp: false     # ★ disable AMP for stability
 
 # Data configuration
@@ -86,4 +86,3 @@ persistent_workers: false
 log_level: INFO
 log_dir: runs
 checkpoint_dir: checkpoints
-
