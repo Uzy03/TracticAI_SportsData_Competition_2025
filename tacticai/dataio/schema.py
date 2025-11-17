@@ -455,15 +455,27 @@ class ReceiverSchema(DataSchema):
         
         # Get edge index
         edge_index = self.get_edge_index(data)
-        src, dst = edge_index[0], edge_index[1]
-        num_edges = edge_index.size(1)
         
         # TacticAI paper baseline: edge features = same_team indicator only (1 dimension)
-        # same_team[i->j] = 1.0 if nodes i and j are on the same team, else 0.0
-        same_team = (team_ids[src] == team_ids[dst]).float()  # [E]
-        
-        # Return as [E, 1] shape for TacticAI paper baseline
-        return same_team.unsqueeze(1)  # [E, 1]
+        # Use edge_schema.compute_edge_attributes to match fix/8_hyperpara implementation
+        # This ensures self-loops are explicitly set to 1.0 (same as fix/8_hyperpara)
+        if self.edge_schema is not None:
+            # Compute edge attributes using EdgeAttributeSchema (same as fix/8_hyperpara)
+            edge_attrs = self.edge_schema.compute_edge_attributes(
+                positions_meters,  # Positions in meters (required by EdgeAttributeSchema)
+                edge_index,
+                team_ids
+            )
+            return edge_attrs  # [E, 1] - same_team only
+        else:
+            # Fallback: direct computation if edge_schema is not available
+            src, dst = edge_index[0], edge_index[1]
+            same_team = (team_ids[src] == team_ids[dst]).float()  # [E]
+            # Explicitly set self-loops to 1.0 (same as EdgeAttributeSchema)
+            self_loop_mask = (src == dst)
+            same_team = same_team.unsqueeze(1)  # [E, 1]
+            same_team[self_loop_mask] = 1.0
+            return same_team  # [E, 1]
     
     def get_graph_attributes(self, data: Dict[str, Any]) -> Optional[torch.Tensor]:
         """Extract graph attributes for receiver prediction.
