@@ -13,10 +13,10 @@ debug_overfit:
 # Model configuration
 model:
   input_dim: 7  # TacticAI paper baseline: x, y, vx, vy, height, weight, ball_possession (was 16 in fix/8_hyperpara)
-  hidden_dim: 128
+  hidden_dim: 512  # Increased from 128 to 512 to handle small feature differences
   num_classes: 22
-  num_layers: 3
-  num_heads: 4
+  num_layers: 5  # Increased from 3 to 5 for more capacity
+  num_heads: 8  # Increased from 4 to 8 for more attention capacity
   dropout: 0.0   # ★ overfit
   edge_dim: 1  # TacticAI paper baseline: same_team only
   # global_dim: Receiverタスクでは使用しない (TacticAI paper baseline)
@@ -24,7 +24,7 @@ model:
 # Optimizer configuration
 optimizer:
   type: adam
-  lr: 0.01       # Increased learning rate to help model learn from small feature differences
+  lr: 0.05       # Further increased learning rate to help model learn from small feature differences
   weight_decay: 0.0  # ★ No weight decay (overfit mode)
 
 # Scheduler configuration
