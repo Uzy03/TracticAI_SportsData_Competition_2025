@@ -24,7 +24,7 @@ model:
 # Optimizer configuration
 optimizer:
   type: adam
-  lr: 0.001      # Fixed learning rate (1e-3 or 3e-4 recommended for overfitting test)
+  lr: 0.01       # Higher learning rate for overfitting test (was 0.001, too small)
   weight_decay: 0.0  # ★ No weight decay (overfit mode)
 
 # Scheduler configuration

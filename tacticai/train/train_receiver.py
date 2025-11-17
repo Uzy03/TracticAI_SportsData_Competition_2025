@@ -256,6 +256,10 @@ class ReceiverModel(nn.Module):
         # TacticAI paper baseline: Receiver task does NOT use global features
         # H remains as [B, N_per_graph, hidden_dim] without concatenating global_x
         
+        # Debug: Store H for debugging candidate node embeddings
+        # This will be used in training/validation loop to check if H has variance among candidates
+        self._last_H = H  # [B, N_per_graph, hidden_dim]
+        
         cand_mask = None  # Candidate masks are built downstream during training/validation
         
         # Get logits for all nodes (TacticAI spec: [B, N] format)
@@ -1116,10 +1120,24 @@ def validate_epoch(
                     topk_values, topk_indices = torch.topk(logits_full, k=min(5, logits_full.size(0)))
                     topk_cand_values, topk_cand_indices = torch.topk(logits_masked, k=min(5, logits_masked.size(0)))
                     
+                    # Debug: Check node embeddings (H) variance among candidates
+                    H_debug = getattr(model, '_last_H', None)
+                    H_cand_std = None
+                    H_all_std = None
+                    if H_debug is not None and H_debug.size(0) > b:
+                        H_b = H_debug[b]  # [N_per_graph, hidden_dim]
+                        H_all_std = H_b.std(dim=0).mean().item()  # Average std across feature dimensions
+                        # Get candidate node embeddings
+                        cand_mask_b = cm.view(-1)  # [N_per_graph]
+                        if cand_mask_b.sum() > 0:
+                            H_cand = H_b[cand_mask_b]  # [num_cands, hidden_dim]
+                            H_cand_std = H_cand.std(dim=0).mean().item()  # Average std across feature dimensions
+                    
                     logger.info(
                         f"[VAL-DEBUG] batch={batch_idx}, graph={b}, graph_id={graph_id}:\n"
                         f"  target_global={target_global}, target_in_cand={target_in_cand}, cand_mask[target]={cm[target_global].item() if target_global < cm.size(0) else 'N/A'}\n"
                         f"  cand_mask.sum()={Ncand}, cand_mask.shape={cm.shape}\n"
+                        f"  H_all_std={H_all_std:.6f if H_all_std is not None else 'N/A'}, H_cand_std={H_cand_std:.6f if H_cand_std is not None else 'N/A'}\n"
                         f"  logits_full.shape={logits_full.shape}, logits_full.mean()={logits_full.mean().item():.6f}, logits_full.std()={logits_full.std().item():.6f}\n"
                         f"  logits_masked.shape={logits_masked.shape}, logits_masked.mean()={logits_masked.mean().item():.6f}, logits_masked.std()={logits_masked.std().item():.6f}\n"
                         f"  topk_full_indices={topk_indices.tolist()}, topk_full_values={topk_values.tolist()}\n"
