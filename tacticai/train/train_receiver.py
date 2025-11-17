@@ -317,15 +317,13 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
     model.apply(init_weights)
     
     # Special initialization for output layer to prevent logits collapse
-    # Initialize output layer with reasonable weights for better gradient flow
+    # Initialize output layer with smaller weights to prevent explosion
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear) and module.out_features == 1:
-            # Output layer: use Xavier initialization with normal gain (was 0.1, too small)
-            # Use gain=1.0 for better gradient flow in overfitting test
-            nn.init.xavier_uniform_(module.weight, gain=1.0)
+            # Output layer: use Xavier initialization with smaller gain to prevent explosion
+            nn.init.xavier_uniform_(module.weight, gain=0.1)  # Reduced from 1.0 to prevent explosion
             if module.bias is not None:
-                # Initialize bias to small negative value to prevent initial logits from being too large
-                nn.init.uniform_(module.bias, -0.1, 0.1)
+                nn.init.zeros_(module.bias)
     
     return model.to(device)
 
