@@ -15,7 +15,7 @@ model:
   input_dim: 7  # TacticAI paper baseline: x, y, vx, vy, height, weight, ball_possession (was 16 in fix/8_hyperpara)
   hidden_dim: 512  # Balanced: between 256 and 512 for capacity while maintaining stability
   num_classes: 22
-  num_layers: 4  # Keep 4 layers for stability
+  num_layers: 3  # Keep 4 layers for stability
   num_heads: 8  # Keep 8 heads for attention capacity
   dropout: 0.0   # ★ overfit
   edge_dim: 1  # TacticAI paper baseline: same_team only
