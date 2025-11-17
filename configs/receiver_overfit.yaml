@@ -13,10 +13,10 @@ debug_overfit:
 # Model configuration
 model:
   input_dim: 7  # TacticAI paper baseline: x, y, vx, vy, height, weight, ball_possession
-  hidden_dim: 128
+  hidden_dim: 256  # Increased from 128 to 256 for better expressiveness (overfitting test)
   num_classes: 22
-  num_layers: 3
-  num_heads: 4
+  num_layers: 4  # Increased from 3 to 4 for deeper representation (overfitting test)
+  num_heads: 8  # Increased from 4 to 8 for better attention (overfitting test)
   dropout: 0.0   # ★ overfit
   edge_dim: 1  # TacticAI paper baseline: same_team only
   # global_dim: Receiverタスクでは使用しない (TacticAI paper baseline)
@@ -24,7 +24,7 @@ model:
 # Optimizer configuration
 optimizer:
   type: adam
-  lr: 0.01       # Higher learning rate for overfitting test (was 0.001, too small)
+  lr: 0.001       # Higher learning rate for overfitting test (was 0.001, too small)
   weight_decay: 0.0  # ★ No weight decay (overfit mode)
 
 # Scheduler configuration
