@@ -1124,6 +1124,8 @@ def validate_epoch(
                     H_debug = getattr(model, '_last_H', None)
                     H_cand_std = None
                     H_all_std = None
+                    x_cand_std = None
+                    x_all_std = None
                     if H_debug is not None and H_debug.size(0) > b:
                         H_b = H_debug[b]  # [N_per_graph, hidden_dim]
                         H_all_std = H_b.std(dim=0).mean().item()  # Average std across feature dimensions
@@ -1133,15 +1135,29 @@ def validate_epoch(
                             H_cand = H_b[cand_mask_b]  # [num_cands, hidden_dim]
                             H_cand_std = H_cand.std(dim=0).mean().item()  # Average std across feature dimensions
                     
+                    # Debug: Check input node features (x) variance among candidates
+                    if data.get("x") is not None:
+                        x_batched = _reshape_to_batch(data["x"], batch_size, nodes_per_graph)
+                        if x_batched.size(0) > b:
+                            x_b = x_batched[b]  # [N_per_graph, input_dim]
+                            x_all_std = x_b.std(dim=0).mean().item()  # Average std across feature dimensions
+                            cand_mask_b = cm.view(-1)  # [N_per_graph]
+                            if cand_mask_b.sum() > 0:
+                                x_cand = x_b[cand_mask_b]  # [num_cands, input_dim]
+                                x_cand_std = x_cand.std(dim=0).mean().item()  # Average std across feature dimensions
+                    
                     # Format H std values safely
                     H_all_std_str = f"{H_all_std:.6f}" if H_all_std is not None else "N/A"
                     H_cand_std_str = f"{H_cand_std:.6f}" if H_cand_std is not None else "N/A"
+                    x_all_std_str = f"{x_all_std:.6f}" if x_all_std is not None else "N/A"
+                    x_cand_std_str = f"{x_cand_std:.6f}" if x_cand_std is not None else "N/A"
                     
                     logger.info(
                         f"[VAL-DEBUG] batch={batch_idx}, graph={b}, graph_id={graph_id}:\n"
                         f"  target_global={target_global}, target_in_cand={target_in_cand}, cand_mask[target]={cm[target_global].item() if target_global < cm.size(0) else 'N/A'}\n"
                         f"  cand_mask.sum()={Ncand}, cand_mask.shape={cm.shape}\n"
-                        f"  H_all_std={H_all_std_str}, H_cand_std={H_cand_std_str}\n"
+                        f"  x_all_std={x_all_std_str}, x_cand_std={x_cand_std_str} (input features)\n"
+                        f"  H_all_std={H_all_std_str}, H_cand_std={H_cand_std_str} (node embeddings after GNN)\n"
                         f"  logits_full.shape={logits_full.shape}, logits_full.mean()={logits_full.mean().item():.6f}, logits_full.std()={logits_full.std().item():.6f}\n"
                         f"  logits_masked.shape={logits_masked.shape}, logits_masked.mean()={logits_masked.mean().item():.6f}, logits_masked.std()={logits_masked.std().item():.6f}\n"
                         f"  topk_full_indices={topk_indices.tolist()}, topk_full_values={topk_values.tolist()}\n"
