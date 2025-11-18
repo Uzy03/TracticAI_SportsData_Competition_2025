@@ -8,7 +8,7 @@ model:
   num_layers: 3  # GATv2レイヤー数 (default=3)
   num_heads: 4  # アテンションヘッド数 (default=4)
   dropout: 0.2  # ドロップアウト率 (default=0.2, 推奨範囲: 0.1-0.3, 安定した学習のため推奨)
-  edge_dim: 1  # エッジ特徴次元 (TacticAI paper baseline=1): same_team only
+  edge_dim: 5  # エッジ特徴次元 (enhanced): dx, dy, dist_ij, angle_ij, same_team (was 1: same_team only)
   # global_dim: Receiverタスクでは使用しない (TacticAI paper baseline)
 
 # オプティマイザー設定

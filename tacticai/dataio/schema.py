@@ -497,16 +497,20 @@ class ReceiverSchema(DataSchema):
         return torch.tensor(int(receiver_idx), dtype=torch.long)
     
     def get_edge_attributes(self, data: Dict[str, Any]) -> Optional[torch.Tensor]:
-        """Extract edge attributes for receiver prediction (TacticAI spec).
+        """Extract edge attributes for receiver prediction (enhanced with distance and angle).
         
-        Returns 1-dimensional edge features (same_team only):
+        Returns 5-dimensional edge features:
+        - dx: x方向の位置差（正規化）
+        - dy: y方向の位置差（正規化）
+        - dist_ij: ノードiとjの距離（正規化）
+        - angle_ij: ノードiからjへの角度（正規化）
         - same_team: binary indicator (1.0 if same team or self-loop, 0.0 otherwise)
         
         Args:
             data: Raw data dictionary
             
         Returns:
-            Edge attributes tensor [E, 1] or None (same_team only, matching fix/8_hyperpara)
+            Edge attributes tensor [E, 5] or None
         """
         if not self.use_edge_attributes:
             return None
@@ -523,7 +527,7 @@ class ReceiverSchema(DataSchema):
         positions_meters[:, 0] *= self.field_length
         positions_meters[:, 1] *= self.field_width
         
-        # Get velocities (vx, vy)
+        # Get velocities (vx, vy) - optional, for future use
         velocities = None
         if self.velocity_columns:
             if isinstance(data, pd.DataFrame):
@@ -549,27 +553,46 @@ class ReceiverSchema(DataSchema):
         
         # Get edge index
         edge_index = self.get_edge_index(data)
+        src, dst = edge_index[0], edge_index[1]
         
-        # TacticAI paper baseline: edge features = same_team indicator only (1 dimension)
-        # Use edge_schema.compute_edge_attributes to match fix/8_hyperpara implementation
-        # This ensures self-loops are explicitly set to 1.0 (same as fix/8_hyperpara)
-        if self.edge_schema is not None:
-            # Compute edge attributes using EdgeAttributeSchema (same as fix/8_hyperpara)
-            edge_attrs = self.edge_schema.compute_edge_attributes(
-                positions_meters,  # Positions in meters (required by EdgeAttributeSchema)
-                edge_index,
-                team_ids
-            )
-            return edge_attrs  # [E, 1] - same_team only
-        else:
-            # Fallback: direct computation if edge_schema is not available
-            src, dst = edge_index[0], edge_index[1]
-            same_team = (team_ids[src] == team_ids[dst]).float()  # [E]
-            # Explicitly set self-loops to 1.0 (same as EdgeAttributeSchema)
-            self_loop_mask = (src == dst)
-            same_team = same_team.unsqueeze(1)  # [E, 1]
-            same_team[self_loop_mask] = 1.0
-            return same_team  # [E, 1]
+        # Compute edge features: dx, dy, dist_ij, angle_ij, same_team
+        pos_src = positions_meters[src]  # [E, 2]
+        pos_dst = positions_meters[dst]  # [E, 2]
+        
+        # Position differences (dx, dy) in meters
+        dx = pos_dst[:, 0] - pos_src[:, 0]  # [E]
+        dy = pos_dst[:, 1] - pos_src[:, 1]  # [E]
+        
+        # Distance (dist_ij) in meters
+        dist_ij = torch.sqrt(dx ** 2 + dy ** 2 + 1e-6)  # [E] (add small epsilon to avoid zero)
+        
+        # Angle (angle_ij) in radians [-π, π]
+        angle_ij = torch.atan2(dy, dx)  # [E]
+        
+        # Normalize edge features
+        # dx, dy: normalize by field dimensions
+        max_dist = math.sqrt(self.field_length ** 2 + self.field_width ** 2)  # Field diagonal
+        dx_norm = dx / self.field_length  # Normalize to [-1, 1] range
+        dy_norm = dy / self.field_width   # Normalize to [-1, 1] range
+        dist_ij_norm = dist_ij / max_dist  # Normalize to [0, 1] range
+        angle_ij_norm = angle_ij / math.pi  # Normalize to [-1, 1] range
+        
+        # Same team indicator
+        same_team = (team_ids[src] == team_ids[dst]).float()  # [E]
+        # Explicitly set self-loops to 1.0
+        self_loop_mask = (src == dst)
+        same_team[self_loop_mask] = 1.0
+        
+        # Stack all edge features: [E, 5]
+        edge_attrs = torch.stack([
+            dx_norm,        # [E]
+            dy_norm,        # [E]
+            dist_ij_norm,   # [E]
+            angle_ij_norm,  # [E]
+            same_team       # [E]
+        ], dim=1)  # [E, 5]
+        
+        return edge_attrs
     
     def get_graph_attributes(self, data: Dict[str, Any]) -> Optional[torch.Tensor]:
         """Extract graph attributes for receiver prediction.

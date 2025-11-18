@@ -18,7 +18,7 @@ model:
   num_layers: 3  # Keep 3 layers
   num_heads: 4  # Reduced for small dataset: CLRS default=1, was 8
   dropout: 0.0   # ★ overfit
-  edge_dim: 1  # TacticAI paper baseline: same_team only
+  edge_dim: 5  # Enhanced edge features: dx, dy, dist_ij, angle_ij, same_team (was 1: same_team only)
   # global_dim: Receiverタスクでは使用しない (TacticAI paper baseline)
 
 # Optimizer configuration
