@@ -7,7 +7,7 @@
 # All regularization is disabled: no label smoothing, dropout, augmentation, weight decay
 debug_overfit:
   enabled: true
-  num_samples: 8  # Very small number of samples (4-8 recommended for strict overfitting test)
+  num_samples: 32  # Very small number of samples (4-8 recommended for strict overfitting test)
   seed: 42  # Random seed for reproducible subset selection
 
 # Model configuration
