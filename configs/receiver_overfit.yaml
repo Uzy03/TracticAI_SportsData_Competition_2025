@@ -24,7 +24,7 @@ model:
 # Optimizer configuration
 optimizer:
   type: adam
-  lr: 0.0005     # Reduced from 0.001 to stabilize training (prevent gradient explosion)
+  lr: 0.0003     # Reduced from 0.0005 to further stabilize training (matching fix/8_hyperpara receiver.yaml)
   weight_decay: 0.0  # ★ No weight decay (overfit mode)
 
 # Scheduler configuration
@@ -36,10 +36,10 @@ train:
   batch_size: 4  # Small batch size for very small subset (8 samples = 2 batches)
   epochs: 300    # Many epochs to ensure overfitting (increased from 200 to allow more training)
   amp: false     # ★ disable AMP for stability
-  # Gradient clipping (enabled to prevent gradient explosion, as seen in epoch 144)
+  # Gradient clipping (enabled to prevent gradient explosion, as seen in epochs 158, 251, 252, 257)
   grad_clip:
-    enabled: true  # Enabled to prevent gradient explosion (val_loss jumped to 6.55 at epoch 144)
-    max_norm: 1.0  # Maximum gradient norm to prevent explosion
+    enabled: true  # Enabled to prevent gradient explosion (train_loss jumped to 9.61 at epoch 252)
+    max_norm: 0.5  # Reduced from 1.0 to prevent gradient explosion (loss spikes still occurring)
 
 # Data configuration
 # Note: When debug_overfit.enabled=true, train_path will be used to create a subset
