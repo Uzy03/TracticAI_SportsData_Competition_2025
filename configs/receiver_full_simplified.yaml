@@ -15,12 +15,12 @@ model:
 
 optimizer:
   type: adam  # オプティマイザーの種類 (default="adam")
-  lr: 0.0003  # 学習率 (default=0.001)
+  lr: 0.0005  # 学習率 (default=0.001) - 修正: 0.0003→0.0005に上げて学習を促進
   weight_decay: 0.0001  # 重み減衰（L2正則化）(default=0.0)
 
 scheduler:
   type: cosine  # スケジューラーの種類 (default="none")
-  T_max: 100  # コサインアニーリングの周期（エポック数）(default=train.epochs)
+  T_max: 120  # コサインアニーリングの周期（エポック数）(default=train.epochs) - 修正: 100→120に変更してepochsと一致させる
   eta_min: 0.000001  # 最小学習率 (default=1e-6)
   warmup_epochs: 5  # ウォームアップエポック数 (default=5)
 
@@ -54,8 +54,8 @@ loss:
 d2:
   group_pool: false  # グループプーリングの使用 (default=false)
   transforms:
-    hflip: false  # 水平フリップのデータ拡張 (default=false)
-    vflip: false  # 垂直フリップのデータ拡張 (default=false)
+    hflip: true  # 水平フリップのデータ拡張 (default=false) - 修正: false→trueに変更してデータ拡張を有効化
+    vflip: true  # 垂直フリップのデータ拡張 (default=false) - 修正: false→trueに変更してデータ拡張を有効化
 
 early_stopping:
   patience: 30  # 改善が見られない場合の待機エポック数 (default=30)
