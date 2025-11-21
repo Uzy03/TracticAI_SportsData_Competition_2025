@@ -15,22 +15,22 @@ model:
 
 optimizer:
   type: adam  # オプティマイザーの種類 (default="adam")
-  lr: 0.0005  # 学習率 (default=0.001) - 修正: 0.0003→0.0005に上げて学習を促進
+  lr: 0.001  # 学習率 (default=0.001) - 修正: 0.0005→0.001に上げて学習を促進（過学習テストの成功設定に近づける）
   weight_decay: 0.0001  # 重み減衰（L2正則化）(default=0.0)
 
 scheduler:
-  type: cosine  # スケジューラーの種類 (default="none")
-  T_max: 120  # コサインアニーリングの周期（エポック数）(default=train.epochs) - 修正: 100→120に変更してepochsと一致させる
-  eta_min: 0.000001  # 最小学習率 (default=1e-6)
-  warmup_epochs: 5  # ウォームアップエポック数 (default=5)
+  type: none  # スケジューラーの種類 (default="none") - 修正: cosine→noneに変更（過学習テストで成功した設定に合わせる）
+  # T_max: 120  # コサインアニーリングの周期（エポック数）(default=train.epochs)
+  # eta_min: 0.000001  # 最小学習率 (default=1e-6)
+  # warmup_epochs: 5  # ウォームアップエポック数 (default=5)
 
 train:
-  batch_size: 32  # バッチサイズ (default=32)
+  batch_size: 16  # バッチサイズ (default=32) - 修正: 32→16に減らして学習を安定化
   epochs: 120  # 最大エポック数 (default=100)
   amp: true  # Automatic Mixed Precisionの使用 (default=false)
   grad_clip:
     enabled: true  # 勾配クリッピングの有効化 (default=true)
-    max_norm: 1.0  # 勾配の最大ノルム (default=1.0)
+    max_norm: 0.5  # 勾配の最大ノルム (default=1.0) - 修正: 1.0→0.5に変更（過学習テストで成功した設定に合わせる）
 
 data:
   train_path: data/processed_ck/receiver_train/data.pickle  # 訓練データのパス
