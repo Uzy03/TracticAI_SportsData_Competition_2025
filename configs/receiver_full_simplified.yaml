@@ -7,30 +7,30 @@ model:
   input_dim: 16  # Enhanced with relative features: x, y, vx, vy, height, weight, ball_possession (7) + dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker (4) + dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal (4) + team_id (1) = 16
   hidden_dim: 256  # 隠れ層の次元数 (default=128) - 修正: 128→256に増やしてモデル容量を拡大（Top-3精度70%を目指す）
   num_classes: 22  # クラス数（プレイヤー数）(default=22)
-  num_layers: 3  # GATv2レイヤー数 (default=3)
-  num_heads: 4  # アテンションヘッド数 (default=4)
-  dropout: 0.1  # ドロップアウト率 (default=0.0) - 修正: 0.2→0.1に下げて学習を促進
+  num_layers: 5  # GATv2レイヤー数 (default=3) - 修正: 3→5に増やしてより深いモデルに（モデルアーキテクチャ改善）
+  num_heads: 8  # アテンションヘッド数 (default=4) - 修正: 4→8に増やしてより強力なアテンション機構に（モデルアーキテクチャ改善）
+  dropout: 0.05  # ドロップアウト率 (default=0.0) - 修正: 0.1→0.05に下げて学習をさらに促進（モデル容量を活かす）
   edge_dim: 5  # エッジ特徴次元 (enhanced): dx, dy, dist_ij, angle_ij, same_team (was 1: same_team only)
   # global_dim: Receiverタスクでは使用しない (TacticAI paper baseline)
 
 optimizer:
   type: adam  # オプティマイザーの種類 (default="adam")
-  lr: 0.0008  # 学習率 (default=0.001) - 修正: 0.001→0.0008に下げて安定化（Top-3精度70%を目指す）
+  lr: 0.001  # 学習率 (default=0.001) - 修正: 0.0008→0.001に上げて学習を促進（スケジューラーなしで安定した学習率を使用）
   weight_decay: 0.0001  # 重み減衰（L2正則化）(default=0.0)
 
 scheduler:
-  type: cosine  # スケジューラーの種類 (default="none") - 修正: none→cosineに変更して学習率を段階的に下げる（Top-3精度70%を目指す）
-  T_max: 200  # コサインアニーリングの周期（エポック数）(default=train.epochs) - 修正: epochsに合わせて200に設定
-  eta_min: 0.00001  # 最小学習率 (default=1e-6) - 修正: 1e-6→1e-5に上げて学習を継続
-  warmup_epochs: 5  # ウォームアップエポック数 (default=5)
+  type: none  # スケジューラーの種類 (default="none") - 修正: cosine→noneに変更（過学習テストで成功した設定に戻す、学習率を一定に保つ）
+  # T_max: 200  # コサインアニーリングの周期（エポック数）(default=train.epochs)
+  # eta_min: 0.00001  # 最小学習率 (default=1e-6)
+  # warmup_epochs: 5  # ウォームアップエポック数 (default=5)
 
 train:
-  batch_size: 16  # バッチサイズ (default=32) - 修正: 32→16に減らして学習を安定化
+  batch_size: 32  # バッチサイズ (default=32) - 修正: 16→32に戻して学習を安定化
   epochs: 200  # 最大エポック数 (default=100) - 修正: 120→200に増やして十分な学習を確保（Top-3精度70%を目指す）
   amp: true  # Automatic Mixed Precisionの使用 (default=false)
   grad_clip:
     enabled: true  # 勾配クリッピングの有効化 (default=true)
-    max_norm: 0.5  # 勾配の最大ノルム (default=1.0) - 修正: 1.0→0.5に変更（過学習テストで成功した設定に合わせる）
+    max_norm: 1.0  # 勾配の最大ノルム (default=1.0) - 修正: 0.5→1.0に緩めてより大きな更新を許可
 
 data:
   train_path: data/processed_ck/receiver_train/data.pickle  # 訓練データのパス
