@@ -5,28 +5,28 @@ debug_overfit:
 
 model:
   input_dim: 16  # Enhanced with relative features: x, y, vx, vy, height, weight, ball_possession (7) + dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker (4) + dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal (4) + team_id (1) = 16
-  hidden_dim: 128  # 隠れ層の次元数 (default=128)
+  hidden_dim: 256  # 隠れ層の次元数 (default=128) - 修正: 128→256に増やしてモデル容量を拡大（Top-3精度70%を目指す）
   num_classes: 22  # クラス数（プレイヤー数）(default=22)
   num_layers: 3  # GATv2レイヤー数 (default=3)
   num_heads: 4  # アテンションヘッド数 (default=4)
-  dropout: 0.2  # ドロップアウト率 (default=0.0)
+  dropout: 0.1  # ドロップアウト率 (default=0.0) - 修正: 0.2→0.1に下げて学習を促進
   edge_dim: 5  # エッジ特徴次元 (enhanced): dx, dy, dist_ij, angle_ij, same_team (was 1: same_team only)
   # global_dim: Receiverタスクでは使用しない (TacticAI paper baseline)
 
 optimizer:
   type: adam  # オプティマイザーの種類 (default="adam")
-  lr: 0.001  # 学習率 (default=0.001) - 修正: 0.0005→0.001に上げて学習を促進（過学習テストの成功設定に近づける）
+  lr: 0.0008  # 学習率 (default=0.001) - 修正: 0.001→0.0008に下げて安定化（Top-3精度70%を目指す）
   weight_decay: 0.0001  # 重み減衰（L2正則化）(default=0.0)
 
 scheduler:
-  type: none  # スケジューラーの種類 (default="none") - 修正: cosine→noneに変更（過学習テストで成功した設定に合わせる）
-  # T_max: 120  # コサインアニーリングの周期（エポック数）(default=train.epochs)
-  # eta_min: 0.000001  # 最小学習率 (default=1e-6)
-  # warmup_epochs: 5  # ウォームアップエポック数 (default=5)
+  type: cosine  # スケジューラーの種類 (default="none") - 修正: none→cosineに変更して学習率を段階的に下げる（Top-3精度70%を目指す）
+  T_max: 200  # コサインアニーリングの周期（エポック数）(default=train.epochs) - 修正: epochsに合わせて200に設定
+  eta_min: 0.00001  # 最小学習率 (default=1e-6) - 修正: 1e-6→1e-5に上げて学習を継続
+  warmup_epochs: 5  # ウォームアップエポック数 (default=5)
 
 train:
   batch_size: 16  # バッチサイズ (default=32) - 修正: 32→16に減らして学習を安定化
-  epochs: 120  # 最大エポック数 (default=100)
+  epochs: 200  # 最大エポック数 (default=100) - 修正: 120→200に増やして十分な学習を確保（Top-3精度70%を目指す）
   amp: true  # Automatic Mixed Precisionの使用 (default=false)
   grad_clip:
     enabled: true  # 勾配クリッピングの有効化 (default=true)
@@ -58,8 +58,8 @@ d2:
     vflip: true  # 垂直フリップのデータ拡張 (default=false) - 修正: false→trueに変更してデータ拡張を有効化
 
 early_stopping:
-  patience: 30  # 改善が見られない場合の待機エポック数 (default=30)
-  min_delta: 0.0  # 改善とみなす最小変化量 (default=0.0)
+  patience: 50  # 改善が見られない場合の待機エポック数 (default=30) - 修正: 30→50に増やしてより長く学習を継続
+  min_delta: 0.001  # 改善とみなす最小変化量 (default=0.0) - 修正: 0.0→0.001に設定して微小な改善も検出
 
 eval:
   batch_size: 5  # 評価時のバッチサイズ (default=5)
