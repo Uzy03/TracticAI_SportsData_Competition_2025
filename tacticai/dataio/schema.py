@@ -499,18 +499,23 @@ class ReceiverSchema(DataSchema):
     def get_edge_attributes(self, data: Dict[str, Any]) -> Optional[torch.Tensor]:
         """Extract edge attributes for receiver prediction (enhanced with distance and angle).
         
-        Returns 5-dimensional edge features:
+        Returns 10-dimensional edge features:
         - dx: x方向の位置差（正規化）
         - dy: y方向の位置差（正規化）
         - dist_ij: ノードiとjの距離（正規化）
         - angle_ij: ノードiからjへの角度（正規化）
         - same_team: binary indicator (1.0 if same team or self-loop, 0.0 otherwise)
+        - dvx: x方向の速度差（正規化）
+        - dvy: y方向の速度差（正規化）
+        - rel_speed: 相対速度の大きさ（正規化）
+        - from_kicker: キッカーから出るエッジかどうか (1.0/0.0)
+        - to_kicker: キッカーへ向かうエッジかどうか (1.0/0.0)
         
         Args:
             data: Raw data dictionary
             
         Returns:
-            Edge attributes tensor [E, 5] or None
+            Edge attributes tensor [E, 10] or None
         """
         if not self.use_edge_attributes:
             return None
@@ -527,7 +532,7 @@ class ReceiverSchema(DataSchema):
         positions_meters[:, 0] *= self.field_length
         positions_meters[:, 1] *= self.field_width
         
-        # Get velocities (vx, vy) - optional, for future use
+        # Get velocities (vx, vy)
         velocities = None
         if self.velocity_columns:
             if isinstance(data, pd.DataFrame):
@@ -583,14 +588,57 @@ class ReceiverSchema(DataSchema):
         self_loop_mask = (src == dst)
         same_team[self_loop_mask] = 1.0
         
-        # Stack all edge features: [E, 5]
+        # Velocity differences (dvx, dvy)
+        vel_src = velocities[src]  # [E, 2]
+        vel_dst = velocities[dst]  # [E, 2]
+        dvx = vel_dst[:, 0] - vel_src[:, 0]
+        dvy = vel_dst[:, 1] - vel_src[:, 1]
+        rel_speed = torch.sqrt(dvx ** 2 + dvy ** 2 + 1e-6)
+        
+        # Normalize velocity features (relative speed ~20m/s max)
+        max_rel_speed = 20.0
+        dvx_norm = dvx / max_rel_speed
+        dvy_norm = dvy / max_rel_speed
+        rel_speed_norm = rel_speed / max_rel_speed
+        
+        # Kicker indicators
+        # Identify kicker
+        ball_idx = None
+        if self.ball_column:
+            if isinstance(data, pd.DataFrame):
+                ball_info = data[self.ball_column].values
+            else:
+                ball_info = np.array(data[self.ball_column])
+            ball_info = np.array(ball_info)
+            if ball_info.sum() > 0:
+                ball_idx = int(np.argmax(ball_info))
+        
+        kicker_idx = None
+        if "kicker_idx" in data and data["kicker_idx"] is not None:
+            kicker_idx = int(data["kicker_idx"])
+        elif ball_idx is not None:
+            kicker_idx = ball_idx
+            
+        from_kicker = torch.zeros_like(same_team)
+        to_kicker = torch.zeros_like(same_team)
+        
+        if kicker_idx is not None and kicker_idx < positions_tensor.shape[0]:
+            from_kicker[src == kicker_idx] = 1.0
+            to_kicker[dst == kicker_idx] = 1.0
+        
+        # Stack all edge features: [E, 10]
         edge_attrs = torch.stack([
             dx_norm,        # [E]
             dy_norm,        # [E]
             dist_ij_norm,   # [E]
             angle_ij_norm,  # [E]
-            same_team       # [E]
-        ], dim=1)  # [E, 5]
+            same_team,      # [E]
+            dvx_norm,       # [E]
+            dvy_norm,       # [E]
+            rel_speed_norm, # [E]
+            from_kicker,    # [E]
+            to_kicker       # [E]
+        ], dim=1)  # [E, 10]
         
         return edge_attrs
     

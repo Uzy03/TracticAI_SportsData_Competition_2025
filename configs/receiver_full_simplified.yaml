@@ -10,7 +10,7 @@ model:
   num_layers: 5  # GATv2レイヤー数 (default=3) - 修正: 3→5に増やしてより深いモデルに（モデルアーキテクチャ改善）
   num_heads: 8  # アテンションヘッド数 (default=4) - 修正: 4→8に増やしてより強力なアテンション機構に（モデルアーキテクチャ改善）
   dropout: 0.05  # ドロップアウト率 (default=0.0) - 修正: 0.1→0.05に下げて学習をさらに促進（モデル容量を活かす）
-  edge_dim: 5  # エッジ特徴次元 (enhanced): dx, dy, dist_ij, angle_ij, same_team (was 1: same_team only)
+  edge_dim: 10  # エッジ特徴次元 (enhanced): dx, dy, dist_ij, angle_ij, same_team, dvx, dvy, rel_speed, from_kicker, to_kicker (was 5)
   # global_dim: Receiverタスクでは使用しない (TacticAI paper baseline)
 
 optimizer:
