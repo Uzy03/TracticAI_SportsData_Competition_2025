@@ -7,7 +7,7 @@ model:
   input_dim: 16  # Enhanced with relative features: x, y, vx, vy, height, weight, ball_possession (7) + dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker (4) + dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal (4) + team_id (1) = 16
   hidden_dim: 256  # 隠れ層の次元数 (default=128) - 修正: 128→256に増やしてモデル容量を拡大（Top-3精度70%を目指す）
   num_classes: 22  # クラス数（プレイヤー数）(default=22)
-  num_layers: 5  # GATv2レイヤー数 (default=3) - 修正: 3→5に増やしてより深いモデルに（モデルアーキテクチャ改善）
+  num_layers: 3  # GATv2レイヤー数 (default=3) - 修正: 5→3に戻して学習を安定化（Focal Lossと併用）
   num_heads: 8  # アテンションヘッド数 (default=4) - 修正: 4→8に増やしてより強力なアテンション機構に（モデルアーキテクチャ改善）
   dropout: 0.05  # ドロップアウト率 (default=0.0) - 修正: 0.1→0.05に下げて学習をさらに促進（モデル容量を活かす）
   edge_dim: 10  # エッジ特徴次元 (enhanced): dx, dy, dist_ij, angle_ij, same_team, dvx, dvy, rel_speed, from_kicker, to_kicker (was 5)
@@ -30,7 +30,7 @@ train:
   amp: true  # Automatic Mixed Precisionの使用 (default=false)
   grad_clip:
     enabled: true  # 勾配クリッピングの有効化 (default=true)
-    max_norm: 1.0  # 勾配の最大ノルム (default=1.0) - 修正: 0.5→1.0に緩めてより大きな更新を許可
+    max_norm: 0.5  # 勾配の最大ノルム (default=1.0) - 修正: 1.0→0.5に厳しくして学習を安定化
 
 data:
   train_path: data/processed_ck/receiver_train/data.pickle  # 訓練データのパス
@@ -43,7 +43,7 @@ loss:
   label_smoothing: 0.1  # ラベルスムージング率 (default=0.0)
   weight: 1.0  # 損失の重み (default=1.0)
   focal_loss:
-    enabled: false  # Focal Lossの使用 (default=false)
+    enabled: true  # Focal Lossの使用 (default=false) - 修正: false→trueに変更して困難なサンプルの学習を促進
     alpha: 1.0  # レアクラスの重み係数 (default=1.0)
     gamma: 2.0  # フォーカシングパラメータ (default=2.0)
   class_weights: null  # クラスごとの重み (default=null)
