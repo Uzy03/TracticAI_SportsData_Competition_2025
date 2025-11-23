@@ -33,9 +33,9 @@ train:
     max_norm: 0.5  # 勾配の最大ノルム (default=1.0) - 修正: 1.0→0.5に厳しくして学習を安定化
 
 data:
-  train_path: data/processed_ck/receiver_train/data.pickle  # 訓練データのパス
-  val_path: data/processed_ck/receiver_val/data.pickle  # 検証データのパス
-  test_path: data/processed_ck/receiver_test/data.pickle  # テストデータのパス
+  train_path: data/processed_ck_v3/receiver_train/data.pickle  # 訓練データのパス
+  val_path: data/processed_ck_v3/receiver_val/data.pickle  # 検証データのパス
+  test_path: data/processed_ck_v3/receiver_test/data.pickle  # テストデータのパス
   format: pickle  # データ形式 (default="pickle")
 
 loss:
