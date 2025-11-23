@@ -280,7 +280,7 @@ class ReceiverDataset(TacticAIDataset):
                 version = None
                 samples: List[Dict[str, Any]]
                 if isinstance(data, dict) and "samples" in data:
-                    version = data.get("preprocess_version")
+                    version = data.get("preprocess_version") or data.get("version")
                     samples = data.get("samples", [])
                 elif isinstance(data, list):
                     samples = data

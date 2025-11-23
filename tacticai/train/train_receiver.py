@@ -32,7 +32,7 @@ from tacticai.modules.utils import save_training_history_csv
 from tacticai.modules.transforms import RandomFlipTransform
 
 
-EXPECTED_PREPROCESS_VERSION = "ck_improved_v2"
+EXPECTED_PREPROCESS_VERSION = "v3"
 
 AUDIT_LOGGER = logging.getLogger(__name__)
 
