@@ -150,18 +150,23 @@ class ReceiverModel(nn.Module):
         self.global_dim = 0
         
         # Create backbone with 4-view D2 equivariance
-        self.backbone = GATv2Network4View(
-            input_dim=model_config["input_dim"],  # TacticAI paper baseline: 7-dim for Receiver
-            hidden_dim=model_config["hidden_dim"],
-            output_dim=model_config["hidden_dim"],
-            num_layers=model_config["num_layers"],
-            num_heads=model_config["num_heads"],
-            dropout=model_config["dropout"],
-            readout="mean",
-            residual=True,
-            view_mixing="attention",
-            edge_feature_dim=edge_dim,  # TacticAI paper baseline: 1-dim (same_team only)
-        )
+        self.use_gnn = model_config.get("use_gnn", True)
+        if self.use_gnn:
+            self.backbone = GATv2Network4View(
+                input_dim=model_config["input_dim"],
+                hidden_dim=model_config["hidden_dim"],
+                output_dim=model_config["hidden_dim"],
+                num_layers=model_config["num_layers"],
+                num_heads=model_config["num_heads"],
+                dropout=model_config["dropout"],
+                readout="mean",
+                residual=True,
+                view_mixing="attention",
+                edge_feature_dim=edge_dim,
+            )
+        else:
+            # MLP baseline: simple linear projection
+            self.input_proj = nn.Linear(model_config["input_dim"], model_config["hidden_dim"])
         
         # Create head with hidden_dim input only (TacticAI paper baseline: no global features)
         head_input_dim = model_config["hidden_dim"]
@@ -246,11 +251,21 @@ class ReceiverModel(nn.Module):
         # Use edge_index and edge_attr (already batched correctly by collate_fn)
         # edge_index contains edges for all graphs with proper offsets
         # edge_attr contains 1-dimensional edge features [E, 1] (TacticAI paper baseline: same_team only)
-        # Get node embeddings from backbone: [B, 4, N_per_graph, output_dim]
-        node_emb_4view = self.backbone(x_4view, edge_index, edge_attr)  # [B, 4, N_per_graph, output_dim]
         
-        # TacticAI paper baseline: Average over 4 views: [B, N_per_graph, output_dim]
-        H = node_emb_4view.mean(dim=1)  # [B, N_per_graph, output_dim]
+        if self.use_gnn:
+            # Get node embeddings from backbone: [B, 4, N_per_graph, output_dim]
+            node_emb_4view = self.backbone(x_4view, edge_index, edge_attr)  # [B, 4, N_per_graph, output_dim]
+            
+            # TacticAI paper baseline: Average over 4 views: [B, N_per_graph, output_dim]
+            H = node_emb_4view.mean(dim=1)  # [B, N_per_graph, output_dim]
+        else:
+            # MLP Baseline: Skip GNN, just use node features
+            # Apply projection to each view
+            # x_4view: [B, 4, N_per_graph, input_dim]
+            h_4view = self.input_proj(x_4view)  # [B, 4, N_per_graph, hidden_dim]
+            
+            # Average over views
+            H = h_4view.mean(dim=1)  # [B, N_per_graph, hidden_dim]
         
         # Apply mask if provided (element-wise multiplication, not pooling)
         if mask is not None:
@@ -350,8 +365,9 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear):
             # Input layer: use larger initialization to amplify small feature differences
-            # Check if this is the first layer in the backbone (GATv2Network4View)
-            if hasattr(module, 'in_features') and module.in_features == input_dim:
+            # Check if this is the first layer in the backbone (GATv2Network4View) or input_proj
+            if (hasattr(module, 'in_features') and module.in_features == input_dim) or \
+               (isinstance(module, nn.Linear) and getattr(model, 'input_proj', None) is module):
                 # First layer: amplify small input features with larger weights
                 # Balanced: high enough to amplify small features, low enough to prevent explosion
                 nn.init.xavier_uniform_(module.weight, gain=2.5)  # Balanced gain to amplify small features

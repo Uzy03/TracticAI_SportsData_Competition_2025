@@ -45,9 +45,9 @@ train:
 # Note: When debug_overfit.enabled=true, train_path will be used to create a subset
 # and both train and val will use the same subset samples
 data:
-  train_path: data/processed_ck/receiver_train/data.pickle  # Full training data (subset will be created from this)
-  val_path: data/processed_ck/receiver_val/data.pickle  # Not used when debug_overfit.enabled=true
-  test_path: data/processed_ck/receiver_test/data.pickle
+  train_path: data/processed_ck_v3/receiver_train/data.pickle  # Full training data (subset will be created from this)
+  val_path: data/processed_ck_v3/receiver_val/data.pickle  # Not used when debug_overfit.enabled=true
+  test_path: data/processed_ck_v3/receiver_test/data.pickle
   format: pickle
 
 # Loss configuration
