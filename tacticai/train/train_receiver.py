@@ -1566,6 +1566,23 @@ def main():
         persistent_workers=config.get("persistent_workers", False) if config.get("num_workers", 0) > 0 else False,
     )
     
+    # Auto-detect input dimensions from dataset if possible
+    if len(train_dataset) > 0:
+        try:
+            sample_data, _ = train_dataset[0]
+            if "x" in sample_data:
+                input_dim = sample_data["x"].shape[-1]
+                if input_dim != config["model"].get("input_dim"):
+                    logger.info(f"Auto-detected input_dim from dataset: {input_dim} (config was {config['model'].get('input_dim')})")
+                    config["model"]["input_dim"] = input_dim
+            if "edge_attr" in sample_data:
+                edge_dim = sample_data["edge_attr"].shape[-1]
+                if edge_dim != config["model"].get("edge_dim"):
+                    logger.info(f"Auto-detected edge_dim from dataset: {edge_dim} (config was {config['model'].get('edge_dim')})")
+                    config["model"]["edge_dim"] = edge_dim
+        except Exception as e:
+            logger.warning(f"Failed to auto-detect dimensions from dataset: {e}")
+    
     # Create test dataset and loader (for final evaluation)
     test_dataset = None
     test_loader = None
