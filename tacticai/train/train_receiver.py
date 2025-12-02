@@ -33,6 +33,8 @@ from tacticai.modules.transforms import RandomFlipTransform
 
 
 EXPECTED_PREPROCESS_VERSION = "v3"
+# Also allow older versions for backward compatibility
+ACCEPTED_PREPROCESS_VERSIONS = {"v3", "ck_improved_v2"}
 
 AUDIT_LOGGER = logging.getLogger(__name__)
 
@@ -77,11 +79,12 @@ def _assert_dataset_version(dataset: ReceiverDataset, split_name: str) -> None:
             f"{split_name} dataset is missing preprocess_version metadata. "
             "Please regenerate the data with the latest preprocessing script."
         )
-    if versions != {EXPECTED_PREPROCESS_VERSION}:
+    # Allow multiple versions for backward compatibility
+    if not versions.issubset(ACCEPTED_PREPROCESS_VERSIONS):
         raise AssertionError(
             f"{split_name} dataset preprocess_version mismatch: found {versions}, "
-            f"expected {{{EXPECTED_PREPROCESS_VERSION}}}. "
-            "Regenerate data via SoccerData/preprocess_ck_improved.py."
+            f"expected one of {ACCEPTED_PREPROCESS_VERSIONS}. "
+            "Regenerate data via SoccerData/preprocess_ck_improved.py or SoccerData/preprocess_ck_v3.py."
         )
 
 
