@@ -5,42 +5,38 @@ debug_overfit:
 
 model:
   input_dim: 16  # Enhanced with relative features: x, y, vx, vy, height, weight, ball_possession (7) + dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker (4) + dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal (4) + team_id (1) = 16
-  hidden_dim: 128  # 隠れ層の次元数 (default=128) - データ量が少ないため、小さいモデルで安定化
+  hidden_dim: 512  # 隠れ層の次元数 (default=128) - 以前の良い結果の設定に合わせて512に変更
   num_classes: 22  # クラス数（プレイヤー数）(default=22)
   num_layers: 3  # GATv2レイヤー数 (default=3)
-  num_heads: 4  # アテンションヘッド数 (default=4) - データ量が少ないため、小さいモデルで安定化
-  dropout: 0.1  # ドロップアウト率 (default=0.0)
+  num_heads: 4  # アテンションヘッド数 (default=4)
+  dropout: 0.0  # ドロップアウト率 (default=0.0) - 以前の良い結果の設定に合わせて0.0に変更
   edge_dim: 10  # エッジ特徴次元 (enhanced): dx, dy, dist_ij, angle_ij, same_team, dvx, dvy, rel_speed, from_kicker, to_kicker (was 5)
   # global_dim: Receiverタスクでは使用しない (TacticAI paper baseline)
 
 optimizer:
   type: adam  # オプティマイザーの種類 (default="adam")
-  lr: 0.0005  # 学習率 (default=0.001) - 小さい学習率で安定化
-  weight_decay: 0.0001  # 重み減衰（L2正則化）(default=0.0)
+  lr: 0.001  # 学習率 (default=0.001) - 以前の良い結果の設定に合わせて0.001に変更
+  weight_decay: 0.0  # 重み減衰（L2正則化）(default=0.0) - 以前の良い結果の設定に合わせて0.0に変更
 
 scheduler:
-  type: cosine  # スケジューラーの種類 (default="none") - 修正: none→cosineに戻して学習率を調整
-  # T_max: 200  # コサインアニーリングの周期（エポック数）(default=train.epochs)
-  eta_min: 0.00001  # 最小学習率 (default=1e-6)
-  warmup_epochs: 5  # ウォームアップエポック数 (default=5)
+  type: none  # スケジューラーの種類 (default="none") - 以前の良い結果の設定に合わせてnoneに変更
 
 train:
   batch_size: 32  # バッチサイズ (default=32)
-  epochs: 200  # 最大エポック数 (default=100)
-  amp: true  # Automatic Mixed Precisionの使用 (default=false)
+  epochs: 50  # 最大エポック数 (default=100) - 以前の良い結果の設定に合わせて50に変更
+  amp: false  # Automatic Mixed Precisionの使用 (default=false) - 以前の良い結果の設定に合わせてfalseに変更
   grad_clip:
-    enabled: true  # 勾配クリッピングの有効化 (default=true)
-    max_norm: 1.0  # 勾配の最大ノルム (default=1.0) - 修正: 0.5→1.0に戻す
+    enabled: false  # 勾配クリッピングの有効化 (default=true) - 以前の良い結果の設定に合わせてfalseに変更（以前のログにはgrad_clipの設定がなかった）
 
 data:
-  train_path: data/processed_ck_v3/receiver_train/data.pickle  # 訓練データのパス
-  val_path: data/processed_ck_v3/receiver_val/data.pickle  # 検証データのパス
-  test_path: data/processed_ck_v3/receiver_test/data.pickle  # テストデータのパス
+  train_path: data/processed_ck/receiver_train/data.pickle  # 訓練データのパス - 以前の良い結果の設定に合わせてprocessed_ckに変更
+  val_path: data/processed_ck/receiver_val/data.pickle  # 検証データのパス - 以前の良い結果の設定に合わせてprocessed_ckに変更
+  test_path: data/processed_ck/receiver_test/data.pickle  # テストデータのパス - 以前の良い結果の設定に合わせてprocessed_ckに変更
   format: pickle  # データ形式 (default="pickle")
 
 loss:
   type: cross_entropy  # 損失関数の種類 (default="cross_entropy")
-  label_smoothing: 0.1  # ラベルスムージング率 (default=0.0)
+  label_smoothing: 0.0  # ラベルスムージング率 (default=0.0) - 以前の良い結果の設定に合わせて0.0に変更
   weight: 1.0  # 損失の重み (default=1.0)
   focal_loss:
     enabled: false  # Focal Lossの使用 (default=false) - 修正: true→falseに戻して標準的な損失関数を使用
@@ -54,12 +50,12 @@ loss:
 d2:
   group_pool: false  # グループプーリングの使用 (default=false)
   transforms:
-    hflip: true  # 水平フリップのデータ拡張 (default=false) - 修正: false→trueに変更してデータ拡張を有効化
-    vflip: true  # 垂直フリップのデータ拡張 (default=false) - 修正: false→trueに変更してデータ拡張を有効化
+    hflip: false  # 水平フリップのデータ拡張 (default=false) - 以前の良い結果の設定に合わせてfalseに変更
+    vflip: false  # 垂直フリップのデータ拡張 (default=false) - 以前の良い結果の設定に合わせてfalseに変更
 
 early_stopping:
-  patience: 50  # 改善が見られない場合の待機エポック数 (default=30) - 修正: 30→50に増やしてより長く学習を継続
-  min_delta: 0.001  # 改善とみなす最小変化量 (default=0.0) - 修正: 0.0→0.001に設定して微小な改善も検出
+  patience: 20  # 改善が見られない場合の待機エポック数 (default=30) - 以前の良い結果の設定に合わせて20に変更
+  min_delta: 0.0005  # 改善とみなす最小変化量 (default=0.0) - 以前の良い結果の設定に合わせて0.0005に変更
 
 eval:
   batch_size: 5  # 評価時のバッチサイズ (default=5)
