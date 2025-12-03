@@ -15,7 +15,7 @@ from collections import defaultdict
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, ConcatDataset
 import numpy as np
 from tqdm import tqdm
 
@@ -1508,43 +1508,69 @@ def main():
             )
         else:
             # Normal training mode
-            train_dataset = ReceiverDataset(
+            train_dataset_base = ReceiverDataset(
                 config["data"]["train_path"],
                 file_format=config["data"].get("format", "parquet"),
                 phase="train",
             )
-            val_path = config["data"]["val_path"]
-            logger.info(f"[VAL-DATASET] Loading validation dataset from: {val_path}")
-            val_dataset = ReceiverDataset(
-                val_path,
-                file_format=config["data"].get("format", "parquet"),
-                phase="val",
-            )
-            logger.info(f"[VAL-DATASET] Validation dataset loaded: {len(val_dataset)} samples")
-            _assert_dataset_version(train_dataset, "train")
-            _assert_dataset_version(val_dataset, "val")
+            _assert_dataset_version(train_dataset_base, "train")
             
-            # DEBUG: Check first few validation samples
-            if len(val_dataset) > 0:
-                logger.info(f"[VAL-DATASET] Checking first validation sample...")
-                try:
-                    sample_data, sample_target = val_dataset[0]
-                    logger.info(
-                        f"[VAL-DATASET] First sample - target={sample_target.item()}, "
-                        f"x.shape={sample_data.get('x', torch.tensor([])).shape}, "
-                        f"team={'present' if 'team' in sample_data else 'missing'}, "
-                        f"ball={'present' if 'ball' in sample_data else 'missing'}, "
-                        f"cand_mask={'present' if 'cand_mask' in sample_data else 'missing'}"
-                    )
-                    if 'cand_mask' in sample_data:
-                        cand_mask = sample_data['cand_mask']
-                        target_idx = int(sample_target.item())
+            # Check if Val should be merged to Train
+            merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+            
+            if merge_val_to_train:
+                # Load Val dataset to merge with Train
+                val_path = config["data"]["val_path"]
+                logger.info(f"[MERGE-VAL] Loading validation dataset to merge with train: {val_path}")
+                val_dataset_base = ReceiverDataset(
+                    val_path,
+                    file_format=config["data"].get("format", "parquet"),
+                    phase="val",
+                )
+                logger.info(f"[MERGE-VAL] Validation dataset loaded: {len(val_dataset_base)} samples")
+                _assert_dataset_version(val_dataset_base, "val")
+                
+                # Merge Train and Val datasets
+                train_dataset = ConcatDataset([train_dataset_base, val_dataset_base])
+                logger.info(f"[MERGE-VAL] Merged train dataset: {len(train_dataset_base)} (train) + {len(val_dataset_base)} (val) = {len(train_dataset)} samples")
+                
+                # Set Val dataset to None (not used when merged)
+                val_dataset = None
+                logger.info(f"[MERGE-VAL] Val dataset set to None (using merged train dataset only)")
+            else:
+                # Normal mode: separate Train and Val
+                train_dataset = train_dataset_base
+                val_path = config["data"]["val_path"]
+                logger.info(f"[VAL-DATASET] Loading validation dataset from: {val_path}")
+                val_dataset = ReceiverDataset(
+                    val_path,
+                    file_format=config["data"].get("format", "parquet"),
+                    phase="val",
+                )
+                logger.info(f"[VAL-DATASET] Validation dataset loaded: {len(val_dataset)} samples")
+                _assert_dataset_version(val_dataset, "val")
+                
+                # DEBUG: Check first few validation samples
+                if len(val_dataset) > 0:
+                    logger.info(f"[VAL-DATASET] Checking first validation sample...")
+                    try:
+                        sample_data, sample_target = val_dataset[0]
                         logger.info(
-                            f"[VAL-DATASET] First sample cand_mask - sum={cand_mask.sum().item()}, "
-                            f"shape={cand_mask.shape}, target_in_cand={cand_mask[target_idx].item() if target_idx < cand_mask.size(0) else 'N/A'}"
+                            f"[VAL-DATASET] First sample - target={sample_target.item()}, "
+                            f"x.shape={sample_data.get('x', torch.tensor([])).shape}, "
+                            f"team={'present' if 'team' in sample_data else 'missing'}, "
+                            f"ball={'present' if 'ball' in sample_data else 'missing'}, "
+                            f"cand_mask={'present' if 'cand_mask' in sample_data else 'missing'}"
                         )
-                except Exception as e:
-                    logger.warning(f"[VAL-DATASET] Error checking first sample: {e}")
+                        if 'cand_mask' in sample_data:
+                            cand_mask = sample_data['cand_mask']
+                            target_idx = int(sample_target.item())
+                            logger.info(
+                                f"[VAL-DATASET] First sample cand_mask - sum={cand_mask.sum().item()}, "
+                                f"shape={cand_mask.shape}, target_in_cand={cand_mask[target_idx].item() if target_idx < cand_mask.size(0) else 'N/A'}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"[VAL-DATASET] Error checking first sample: {e}")
     
     # Create data loaders
     # Override shuffle for single sample mode
@@ -1559,15 +1585,22 @@ def main():
         persistent_workers=config.get("persistent_workers", False) if config.get("num_workers", 0) > 0 else False,
     )
     
-    val_loader = create_dataloader(
-        val_dataset,
-        batch_size=config["eval"]["batch_size"],
-        shuffle=False,
-        num_workers=config.get("num_workers", 0),
-        pin_memory=True if str(device).startswith("cuda") else False,  # Enable for GPU
-        prefetch_factor=config.get("prefetch_factor", 2),
-        persistent_workers=config.get("persistent_workers", False) if config.get("num_workers", 0) > 0 else False,
-    )
+    # Create Val loader (skip if Val dataset is None when merged)
+    merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+    if merge_val_to_train and val_dataset is None:
+        # Val dataset is None (merged to train), create dummy loader
+        val_loader = None
+        logger.info("[MERGE-VAL] Val loader set to None (Val merged to Train)")
+    else:
+        val_loader = create_dataloader(
+            val_dataset,
+            batch_size=config["eval"]["batch_size"],
+            shuffle=False,
+            num_workers=config.get("num_workers", 0),
+            pin_memory=True if str(device).startswith("cuda") else False,  # Enable for GPU
+            prefetch_factor=config.get("prefetch_factor", 2),
+            persistent_workers=config.get("persistent_workers", False) if config.get("num_workers", 0) > 0 else False,
+        )
     
     # Auto-detect input dimensions from dataset if possible
     if len(train_dataset) > 0:
@@ -1633,10 +1666,14 @@ def main():
     }
     
     # Create early stopping
-    # Disable early stopping for single sample debug mode
+    # Disable early stopping for single sample debug mode or when Val is merged to Train
+    merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
     if args.debug_overfit_single_sample:
         early_stopping_patience = 99999  # Effectively disable early stopping
         logger.info("[DEBUG-OVERFIT-SINGLE] Early stopping disabled (patience=99999)")
+    elif merge_val_to_train:
+        early_stopping_patience = 99999  # Effectively disable early stopping when Val is merged
+        logger.info("[MERGE-VAL] Early stopping disabled (Val merged to Train, no validation set)")
     else:
         early_stopping_patience = config.get("early_stopping", {}).get("patience", 10)
     
@@ -1690,17 +1727,33 @@ def main():
             grad_clip_max_norm=grad_clip_max_norm,
         )
         
-        # Validation
-        val_metrics = validate_epoch(
-            model,
-            val_loader,
-            criterion,
-            device,
-            metrics,
-            logger,
-            min_cands_eval=config.get("eval", {}).get("min_cands_eval", 1),
-            debug_single_sample=debug_logging,
-        )
+        # Validation (skip if Val is merged to Train)
+        merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+        if merge_val_to_train and (val_loader is None or val_dataset is None):
+            # Create dummy val_metrics when Val is merged to Train
+            val_metrics = {
+                "loss": 0.0,
+                "accuracy": 0.0,
+                "top1": 0.0,
+                "top3": 0.0,
+                "top5": 0.0,
+                "excluded_invalid": 0,
+                "excluded_invalid_filter": 0,
+                "invalid_team_mismatch": 0,
+                "invalid_target_not_in_cand": 0,
+            }
+            logger.info("[MERGE-VAL] Validation skipped (Val merged to Train)")
+        else:
+            val_metrics = validate_epoch(
+                model,
+                val_loader,
+                criterion,
+                device,
+                metrics,
+                logger,
+                min_cands_eval=config.get("eval", {}).get("min_cands_eval", 1),
+                debug_single_sample=debug_logging,
+            )
         
         # Update learning rate
         if scheduler is not None:
@@ -1730,15 +1783,22 @@ def main():
                 f"excluded_invalid_filter={int(train_metrics.get('excluded_invalid_filter', 0))})"
             )
             
-            logger.info(
-                f"Val   - Loss: {val_metrics['loss']:.4f}, "
-                       f"Acc: {val_metrics['accuracy']:.4f}, "
-                       f"Top-1: {val_metrics['top1']:.4f}, "
-                       f"Top-3: {val_metrics['top3']:.4f}, "
-                f"Top-5: {val_metrics['top5']:.4f} "
-                f"(excluded_invalid={int(val_metrics.get('excluded_invalid', 0))}, "
-                f"excluded_invalid_filter={int(val_metrics.get('excluded_invalid_filter', 0))})"
-            )
+            # Check if Val is merged
+            merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+            if merge_val_to_train:
+                logger.info(
+                    f"Val   - (skipped: Val merged to Train)"
+                )
+            else:
+                logger.info(
+                    f"Val   - Loss: {val_metrics['loss']:.4f}, "
+                           f"Acc: {val_metrics['accuracy']:.4f}, "
+                           f"Top-1: {val_metrics['top1']:.4f}, "
+                           f"Top-3: {val_metrics['top3']:.4f}, "
+                    f"Top-5: {val_metrics['top5']:.4f} "
+                    f"(excluded_invalid={int(val_metrics.get('excluded_invalid', 0))}, "
+                    f"excluded_invalid_filter={int(val_metrics.get('excluded_invalid_filter', 0))})"
+                )
 
         logger.info(
             "[TRAIN-AUDIT] team_mismatch=%d, target_not_in_cand=%d, excluded_invalid_filter=%d",
@@ -1747,12 +1807,15 @@ def main():
             int(train_metrics.get("excluded_invalid_filter", 0)),
         )
 
-        logger.info(
-            "[VAL-AUDIT] team_mismatch=%d, target_not_in_cand=%d, excluded_invalid_filter=%d",
-            int(val_metrics.get("invalid_team_mismatch", 0)),
-            int(val_metrics.get("invalid_target_not_in_cand", 0)),
-            int(val_metrics.get("excluded_invalid_filter", 0)),
-        )
+        # Skip VAL-AUDIT log when Val is merged
+        merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+        if not merge_val_to_train:
+            logger.info(
+                "[VAL-AUDIT] team_mismatch=%d, target_not_in_cand=%d, excluded_invalid_filter=%d",
+                int(val_metrics.get("invalid_team_mismatch", 0)),
+                int(val_metrics.get("invalid_target_not_in_cand", 0)),
+                int(val_metrics.get("excluded_invalid_filter", 0)),
+            )
         
         logger.info(f"Learning rate: {current_lr:.6f}")
         
@@ -1789,22 +1852,41 @@ def main():
         )
         
         # Save best model (based on Top-3 accuracy)
-        if val_metrics["top3"] > best_val_top3:
-            best_val_top3 = val_metrics["top3"]
-            
-            checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "receiver" / "best.ckpt"
-            save_checkpoint(
-                model, optimizer, epoch, val_metrics["loss"], val_metrics,
-                checkpoint_path, scheduler
-            )
-            logger.info(f"New best model saved with Top-3 accuracy: {best_val_top3:.4f}")
+        # When Val is merged, use Train metrics instead
+        merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+        if merge_val_to_train:
+            # Use Train Top-3 accuracy for best model when Val is merged
+            metric_for_best = train_metrics["top3"]
+            if metric_for_best > best_val_top3:
+                best_val_top3 = metric_for_best
+                checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "receiver" / "best.ckpt"
+                save_checkpoint(
+                    model, optimizer, epoch, train_metrics["loss"], train_metrics,
+                    checkpoint_path, scheduler
+                )
+                logger.info(f"New best model saved with Train Top-3 accuracy: {best_val_top3:.4f}")
+        else:
+            # Normal mode: use Val metrics
+            if val_metrics["top3"] > best_val_top3:
+                best_val_top3 = val_metrics["top3"]
+                checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "receiver" / "best.ckpt"
+                save_checkpoint(
+                    model, optimizer, epoch, val_metrics["loss"], val_metrics,
+                    checkpoint_path, scheduler
+                )
+                logger.info(f"New best model saved with Top-3 accuracy: {best_val_top3:.4f}")
         
-        # Early stopping (based on Top-3 accuracy)
-        if early_stopping(val_metrics["top3"], model):
-            logger.info(f"Early stopping at epoch {epoch+1}")
-            break
+        # Early stopping (based on Top-3 accuracy, skipped when Val is merged)
+        if not merge_val_to_train:
+            if early_stopping(val_metrics["top3"], model):
+                logger.info(f"Early stopping at epoch {epoch+1}")
+                break
     
-    logger.info(f"Training completed. Best validation Top-3 accuracy: {best_val_top3:.4f}")
+    merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+    if merge_val_to_train:
+        logger.info(f"Training completed. Best Train Top-3 accuracy: {best_val_top3:.4f} (Val merged to Train)")
+    else:
+        logger.info(f"Training completed. Best validation Top-3 accuracy: {best_val_top3:.4f}")
     
     # Final debug output for single sample mode
     if args.debug_overfit_single_sample:

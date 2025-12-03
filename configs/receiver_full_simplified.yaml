@@ -33,6 +33,7 @@ data:
   val_path: data/processed_ck/receiver_val/data.pickle  # 検証データのパス - 以前の良い結果の設定に合わせてprocessed_ckに変更
   test_path: data/processed_ck/receiver_test/data.pickle  # テストデータのパス - 以前の良い結果の設定に合わせてprocessed_ckに変更
   format: pickle  # データ形式 (default="pickle")
+  merge_val_to_train: true  # ValデータをTrainに統合する (default=false) - データが少ないため統合推奨
 
 loss:
   type: cross_entropy  # 損失関数の種類 (default="cross_entropy")
