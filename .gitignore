@@ -146,3 +146,5 @@ SoccerData/出場選手プロフィール情報.xlsx
 data/processed_ck/receiver_train/
 data/processed_ck/receiver_val/
 data/processed_ck/receiver_test/
+
+third_party/

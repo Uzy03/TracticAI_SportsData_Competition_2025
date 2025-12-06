@@ -268,18 +268,21 @@ class ReceiverSchema(DataSchema):
             self.graph_schema = None
     
     def get_node_features(self, data: Dict[str, Any]) -> torch.Tensor:
-        """Extract node features for receiver prediction (TacticAI paper baseline: 7 dimensions).
+        """Extract node features for receiver prediction (enhanced with relative features: 16 dimensions).
         
         Args:
             data: Raw data dictionary containing player information
             
             Returns:
-            Node features [N, 7] where:
+            Node features [N, 16] where:
                 - dim 0-1: x, y (normalized positions to [0, 1])
                 - dim 2-3: vx, vy (normalized velocities to [-1, 1] range)
                 - dim 4: height (normalized to [0, 1] range)
                 - dim 5: weight (normalized to [0, 1] range)
                 - dim 6: ball_possession (1.0 if player has ball, 0.0 otherwise)
+                - dim 7-10: dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker (relative to kicker)
+                - dim 11-14: dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal (relative to goal)
+                - dim 15: team_id (0=attacking team, 1=defending team)
         """
         features = []
         
@@ -342,11 +345,93 @@ class ReceiverSchema(DataSchema):
             # Add zero ball info as placeholder
             features.append(torch.zeros(positions.shape[0], 1, dtype=torch.float32))
         
-        # Note: TacticAI paper baseline does NOT include:
-        # - dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker
-        # - dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal
-        # - team ID
+        # Extract relative features to kicker (dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker)
+        positions_tensor = torch.tensor(positions, dtype=torch.float32)
+        num_nodes = positions_tensor.shape[0]
         
+        # Get kicker index (same logic as get_global_features)
+        kicker_idx = None
+        ball_idx = None
+        if self.ball_column:
+            if isinstance(data, pd.DataFrame):
+                ball_info = data[self.ball_column].values
+            else:
+                ball_info = np.array(data[self.ball_column])
+            ball_info = np.array(ball_info)
+            if ball_info.sum() > 0:
+                ball_idx = int(np.argmax(ball_info))
+        
+        if "kicker_idx" in data and data["kicker_idx"] is not None:
+            kicker_idx = int(data["kicker_idx"])
+        elif ball_idx is not None:
+            kicker_idx = ball_idx
+        
+        if kicker_idx is not None and kicker_idx < num_nodes:
+            kicker_pos = positions_tensor[kicker_idx]  # [2]
+            # Compute relative position to kicker for each node
+            dx_to_kicker = positions_tensor[:, 0] - kicker_pos[0]  # [N]
+            dy_to_kicker = positions_tensor[:, 1] - kicker_pos[1]  # [N]
+            dist_to_kicker = torch.sqrt(dx_to_kicker ** 2 + dy_to_kicker ** 2 + 1e-6)  # [N] (add small epsilon to avoid zero)
+            angle_to_kicker = torch.atan2(dy_to_kicker, dx_to_kicker)  # [N] (in radians, -π to π)
+            
+            # Normalize relative features
+            # Distance: normalize by field diagonal (max distance on field)
+            max_dist = math.sqrt(self.field_length ** 2 + self.field_width ** 2)
+            dist_to_kicker = dist_to_kicker / max_dist  # Normalize to [0, 1]
+            # Angle: normalize to [-1, 1] (divide by π)
+            angle_to_kicker = angle_to_kicker / math.pi  # Normalize to [-1, 1]
+            # dx, dy: normalize by field dimensions
+            dx_to_kicker = dx_to_kicker / self.field_length  # Normalize to [-1, 1]
+            dy_to_kicker = dy_to_kicker / self.field_width   # Normalize to [-1, 1]
+            
+            relative_to_kicker = torch.stack([dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker], dim=1)  # [N, 4]
+        else:
+            # If no kicker info, use zeros
+            relative_to_kicker = torch.zeros(num_nodes, 4, dtype=torch.float32)
+        
+        features.append(relative_to_kicker)
+        
+        # Extract relative features to goal (dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal)
+        # Goal position: typically at the end of the field (x = field_length for attacking team)
+        # For corner kicks, attacking team is usually on one side
+        # Use goal at x = field_length (opponent's goal)
+        goal_x = self.field_length
+        goal_y = self.field_width / 2.0  # Center of goal (goal width is field width)
+        goal_pos = torch.tensor([goal_x, goal_y], dtype=torch.float32)
+        
+        # Compute relative position to goal for each node
+        dx_to_goal = positions_tensor[:, 0] - goal_pos[0]  # [N]
+        dy_to_goal = positions_tensor[:, 1] - goal_pos[1]  # [N]
+        dist_to_goal = torch.sqrt(dx_to_goal ** 2 + dy_to_goal ** 2 + 1e-6)  # [N]
+        angle_to_goal = torch.atan2(dy_to_goal, dx_to_goal)  # [N]
+        
+        # Normalize relative features (same as kicker)
+        max_dist = math.sqrt(self.field_length ** 2 + self.field_width ** 2)
+        dist_to_goal = dist_to_goal / max_dist  # Normalize to [0, 1]
+        angle_to_goal = angle_to_goal / math.pi  # Normalize to [-1, 1]
+        dx_to_goal = dx_to_goal / self.field_length  # Normalize to [-1, 1]
+        dy_to_goal = dy_to_goal / self.field_width   # Normalize to [-1, 1]
+        
+        relative_to_goal = torch.stack([dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal], dim=1)  # [N, 4]
+        features.append(relative_to_goal)
+        
+        # Extract team ID (0=attacking team, 1=defending team)
+        if self.team_column:
+            if isinstance(data, pd.DataFrame):
+                team_info = data[self.team_column].values
+            else:
+                team_info = np.array(data[self.team_column])
+            team_tensor = torch.tensor(team_info, dtype=torch.float32)
+            if team_tensor.dim() == 1:
+                team_tensor = team_tensor.unsqueeze(1)  # [N, 1]
+            features.append(team_tensor)
+        else:
+            # Default: assume alternating teams (first 11 = attacking team, last 11 = defending team)
+            team_id_tensor = torch.zeros(num_nodes, 1, dtype=torch.float32)
+            team_id_tensor[11:] = 1.0  # Last 11 players are defending team
+            features.append(team_id_tensor)
+        
+        # Total: 7 (baseline) + 4 (kicker) + 4 (goal) + 1 (team) = 16 dimensions
         return torch.cat(features, dim=1)
     
     def get_edge_index(self, data: Dict[str, Any]) -> torch.Tensor:
@@ -412,21 +497,25 @@ class ReceiverSchema(DataSchema):
         return torch.tensor(int(receiver_idx), dtype=torch.long)
     
     def get_edge_attributes(self, data: Dict[str, Any]) -> Optional[torch.Tensor]:
-        """Extract edge attributes for receiver prediction (TacticAI spec).
+        """Extract edge attributes for receiver prediction (enhanced with distance and angle).
         
-        Returns 9-dimensional edge features:
-        - dx, dy: position differences
-        - dist_ij: distance between nodes
-        - angle_ij: angle between nodes
-        - dvx, dvy: velocity differences
-        - same_team: binary indicator
-        - from_kicker, to_kicker: binary indicators
+        Returns 10-dimensional edge features:
+        - dx: x方向の位置差（正規化）
+        - dy: y方向の位置差（正規化）
+        - dist_ij: ノードiとjの距離（正規化）
+        - angle_ij: ノードiからjへの角度（正規化）
+        - same_team: binary indicator (1.0 if same team or self-loop, 0.0 otherwise)
+        - dvx: x方向の速度差（正規化）
+        - dvy: y方向の速度差（正規化）
+        - rel_speed: 相対速度の大きさ（正規化）
+        - from_kicker: キッカーから出るエッジかどうか (1.0/0.0)
+        - to_kicker: キッカーへ向かうエッジかどうか (1.0/0.0)
         
         Args:
             data: Raw data dictionary
             
         Returns:
-            Edge attributes tensor [E, 9] or None
+            Edge attributes tensor [E, 10] or None
         """
         if not self.use_edge_attributes:
             return None
@@ -469,27 +558,89 @@ class ReceiverSchema(DataSchema):
         
         # Get edge index
         edge_index = self.get_edge_index(data)
+        src, dst = edge_index[0], edge_index[1]
         
-        # TacticAI paper baseline: edge features = same_team indicator only (1 dimension)
-        # Use edge_schema.compute_edge_attributes to match fix/8_hyperpara implementation
-        # This ensures self-loops are explicitly set to 1.0 (same as fix/8_hyperpara)
-        if self.edge_schema is not None:
-            # Compute edge attributes using EdgeAttributeSchema (same as fix/8_hyperpara)
-            edge_attrs = self.edge_schema.compute_edge_attributes(
-                positions_meters,  # Positions in meters (required by EdgeAttributeSchema)
-                edge_index,
-                team_ids
-            )
-            return edge_attrs  # [E, 1] - same_team only
-        else:
-            # Fallback: direct computation if edge_schema is not available
-            src, dst = edge_index[0], edge_index[1]
-            same_team = (team_ids[src] == team_ids[dst]).float()  # [E]
-            # Explicitly set self-loops to 1.0 (same as EdgeAttributeSchema)
-            self_loop_mask = (src == dst)
-            same_team = same_team.unsqueeze(1)  # [E, 1]
-            same_team[self_loop_mask] = 1.0
-            return same_team  # [E, 1]
+        # Compute edge features: dx, dy, dist_ij, angle_ij, same_team
+        pos_src = positions_meters[src]  # [E, 2]
+        pos_dst = positions_meters[dst]  # [E, 2]
+        
+        # Position differences (dx, dy) in meters
+        dx = pos_dst[:, 0] - pos_src[:, 0]  # [E]
+        dy = pos_dst[:, 1] - pos_src[:, 1]  # [E]
+        
+        # Distance (dist_ij) in meters
+        dist_ij = torch.sqrt(dx ** 2 + dy ** 2 + 1e-6)  # [E] (add small epsilon to avoid zero)
+        
+        # Angle (angle_ij) in radians [-π, π]
+        angle_ij = torch.atan2(dy, dx)  # [E]
+        
+        # Normalize edge features
+        # dx, dy: normalize by field dimensions
+        max_dist = math.sqrt(self.field_length ** 2 + self.field_width ** 2)  # Field diagonal
+        dx_norm = dx / self.field_length  # Normalize to [-1, 1] range
+        dy_norm = dy / self.field_width   # Normalize to [-1, 1] range
+        dist_ij_norm = dist_ij / max_dist  # Normalize to [0, 1] range
+        angle_ij_norm = angle_ij / math.pi  # Normalize to [-1, 1] range
+        
+        # Same team indicator
+        same_team = (team_ids[src] == team_ids[dst]).float()  # [E]
+        # Explicitly set self-loops to 1.0
+        self_loop_mask = (src == dst)
+        same_team[self_loop_mask] = 1.0
+        
+        # Velocity differences (dvx, dvy)
+        vel_src = velocities[src]  # [E, 2]
+        vel_dst = velocities[dst]  # [E, 2]
+        dvx = vel_dst[:, 0] - vel_src[:, 0]
+        dvy = vel_dst[:, 1] - vel_src[:, 1]
+        rel_speed = torch.sqrt(dvx ** 2 + dvy ** 2 + 1e-6)
+        
+        # Normalize velocity features (relative speed ~20m/s max)
+        max_rel_speed = 20.0
+        dvx_norm = dvx / max_rel_speed
+        dvy_norm = dvy / max_rel_speed
+        rel_speed_norm = rel_speed / max_rel_speed
+        
+        # Kicker indicators
+        # Identify kicker
+        ball_idx = None
+        if self.ball_column:
+            if isinstance(data, pd.DataFrame):
+                ball_info = data[self.ball_column].values
+            else:
+                ball_info = np.array(data[self.ball_column])
+            ball_info = np.array(ball_info)
+            if ball_info.sum() > 0:
+                ball_idx = int(np.argmax(ball_info))
+        
+        kicker_idx = None
+        if "kicker_idx" in data and data["kicker_idx"] is not None:
+            kicker_idx = int(data["kicker_idx"])
+        elif ball_idx is not None:
+            kicker_idx = ball_idx
+            
+        from_kicker = torch.zeros_like(same_team)
+        to_kicker = torch.zeros_like(same_team)
+        
+        if kicker_idx is not None and kicker_idx < positions_tensor.shape[0]:
+            from_kicker[src == kicker_idx] = 1.0
+            to_kicker[dst == kicker_idx] = 1.0
+        
+        # Stack all edge features: [E, 10]
+        edge_attrs = torch.stack([
+            dx_norm,        # [E]
+            dy_norm,        # [E]
+            dist_ij_norm,   # [E]
+            angle_ij_norm,  # [E]
+            same_team,      # [E]
+            dvx_norm,       # [E]
+            dvy_norm,       # [E]
+            rel_speed_norm, # [E]
+            from_kicker,    # [E]
+            to_kicker       # [E]
+        ], dim=1)  # [E, 10]
+        
+        return edge_attrs
     
     def get_graph_attributes(self, data: Dict[str, Any]) -> Optional[torch.Tensor]:
         """Extract graph attributes for receiver prediction.

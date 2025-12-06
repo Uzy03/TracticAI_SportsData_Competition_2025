@@ -210,7 +210,9 @@ class ReceiverDataset(TacticAIDataset):
             sample["valid"] = False
             return sample
 
-        phase_with_team_constraint = self.phase in {"train", "val"}
+        # Always apply team constraint to ensure consistency across train/val/test
+        # This ensures model is trained and evaluated on the same task: selecting from same-team candidates only
+        phase_with_team_constraint = True  # Changed: always True to maintain consistency
         candidates: List[int] = []
         for idx in range(num_nodes):
             if not mask_arr[idx]:
@@ -280,7 +282,7 @@ class ReceiverDataset(TacticAIDataset):
                 version = None
                 samples: List[Dict[str, Any]]
                 if isinstance(data, dict) and "samples" in data:
-                    version = data.get("preprocess_version")
+                    version = data.get("preprocess_version") or data.get("version")
                     samples = data.get("samples", [])
                 elif isinstance(data, list):
                     samples = data
