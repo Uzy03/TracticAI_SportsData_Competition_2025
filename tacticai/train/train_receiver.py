@@ -151,10 +151,6 @@ class ReceiverModel(nn.Module):
         
         # Get edge_dim from config (TacticAI paper baseline: 1-dim for Receiver task)
         edge_dim = model_config.get("edge_dim", 1)
-        # When D2 is disabled and using GATv2Network, temporarily disable edge features if OOM
-        # TODO: Fix memory issue with edge features in GATv2Network
-        if not self.use_d2_equivariance:
-            edge_dim = 0  # Temporarily disable edge features to avoid OOM
         self.edge_dim = edge_dim
         # Receiver task does NOT use global features (TacticAI paper baseline)
         # global_dim may be used in other tasks (Shot, Guided generation) but not in Receiver
