@@ -49,7 +49,7 @@ loss:
     dropout_rate: 0.0  # ドロップアウト正則化の重み (default=0.0)
 
 d2:
-  enabled: true  # D2群対応の有効化 (default=true) - falseにすると通常のGATv2Networkを使用
+  enabled: false  # D2群対応の有効化 (default=true) - falseにすると通常のGATv2Networkを使用
   group_pool: false  # グループプーリングの使用 (default=false, legacy option)
   transforms:
     hflip: false  # 水平フリップのデータ拡張 (default=false) - 以前の良い結果の設定に合わせてfalseに変更
