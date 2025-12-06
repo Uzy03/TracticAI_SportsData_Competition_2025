@@ -210,7 +210,9 @@ class ReceiverDataset(TacticAIDataset):
             sample["valid"] = False
             return sample
 
-        phase_with_team_constraint = self.phase in {"train", "val"}
+        # Always apply team constraint to ensure consistency across train/val/test
+        # This ensures model is trained and evaluated on the same task: selecting from same-team candidates only
+        phase_with_team_constraint = True  # Changed: always True to maintain consistency
         candidates: List[int] = []
         for idx in range(num_nodes):
             if not mask_arr[idx]:
@@ -280,7 +282,7 @@ class ReceiverDataset(TacticAIDataset):
                 version = None
                 samples: List[Dict[str, Any]]
                 if isinstance(data, dict) and "samples" in data:
-                    version = data.get("preprocess_version")
+                    version = data.get("preprocess_version") or data.get("version")
                     samples = data.get("samples", [])
                 elif isinstance(data, list):
                     samples = data
@@ -312,9 +314,11 @@ class ReceiverDataset(TacticAIDataset):
         sample = self.data[idx]
         
         # Extract features using schema
+        # TacticAI paper baseline: Receiver task uses 7-dim node features and 1-dim edge features
+        # No global features for Receiver task (may be used in Shot/Guided generation tasks)
         node_features = self.schema.get_node_features(sample)
         edge_index = self.schema.get_edge_index(sample)
-        edge_attr = self.schema.get_edge_attributes(sample)  # TacticAI spec: include edge_attr
+        edge_attr = self.schema.get_edge_attributes(sample)  # TacticAI paper baseline: 1-dim (same_team only)
         target = self.schema.get_targets(sample)
         
         # Create batch tensor (all nodes belong to same graph)
@@ -326,9 +330,12 @@ class ReceiverDataset(TacticAIDataset):
             "batch": batch,
         }
         
-        # Add edge_attr if available (TacticAI spec: same_team feature)
+        # Add edge_attr if available (TacticAI paper baseline: 1-dimensional edge features)
         if edge_attr is not None:
             input_data["edge_attr"] = edge_attr
+        
+        # Note: Receiver task does NOT use global_x (TacticAI paper baseline)
+        # global_x may be used in other tasks (Shot, Guided generation) but not in Receiver
         
         # Add mask, team, ball if available in sample
         if isinstance(sample, dict):
@@ -646,12 +653,16 @@ def collate_fn(batch: List[Tuple[Dict[str, torch.Tensor], torch.Tensor]]) -> Tup
         "batch": batch_tensor,
     }
     
-    # Concatenate edge_attr if present (TacticAI spec: same_team feature)
+    # Concatenate edge_attr if present
+    # TacticAI paper baseline: Receiver task uses 1-dim edge features (same_team only)
     if all("edge_attr" in data and data["edge_attr"] is not None for data in input_data_list):
         edge_attrs = []
         for data in input_data_list:
             edge_attrs.append(data["edge_attr"])
         batched_input["edge_attr"] = torch.cat(edge_attrs, dim=0)
+    
+    # Note: Receiver task does NOT batch global_x (TacticAI paper baseline)
+    # global_x batching may be needed for other tasks (Shot, Guided generation) but not for Receiver
     
     # Optional per-node fields: mask, team, ball
     # Concatenate if present in all items

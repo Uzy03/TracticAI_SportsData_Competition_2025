@@ -1,0 +1,92 @@
+# Configuration for receiver overfitting test (mini subset)
+# This config is designed to test if training works correctly by overfitting on a small subset
+
+# Debug overfit configuration
+# When enabled, uses a very small subset of training data for both train and val
+# This allows testing if the model can overfit to a tiny dataset (train_top1 ≈ 1.0)
+# All regularization is disabled: no label smoothing, dropout, augmentation, weight decay
+debug_overfit:
+  enabled: true
+  num_samples: 32  # Very small number of samples (4-8 recommended for strict overfitting test)
+  seed: 42  # Random seed for reproducible subset selection
+
+# Model configuration
+model:
+  input_dim: 16  # Enhanced with relative features: x, y, vx, vy, height, weight, ball_possession (7) + dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker (4) + dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal (4) + team_id (1) = 16
+  hidden_dim: 128  # Reduced for small dataset (8 samples): CLRS default=128, was 512
+  num_classes: 22
+  num_layers: 3  # Keep 3 layers
+  num_heads: 4  # Reduced for small dataset: CLRS default=1, was 8
+  dropout: 0.0   # ★ overfit
+  edge_dim: 5  # Enhanced edge features: dx, dy, dist_ij, angle_ij, same_team (was 1: same_team only)
+  # global_dim: Receiverタスクでは使用しない (TacticAI paper baseline)
+
+# Optimizer configuration
+optimizer:
+  type: adam
+  lr: 0.0003     # Reduced from 0.0005 to further stabilize training (matching fix/8_hyperpara receiver.yaml)
+  weight_decay: 0.0  # ★ No weight decay (overfit mode)
+
+# Scheduler configuration
+scheduler:
+  type: none     # ★ disable scheduler
+
+# Training configuration
+train:
+  batch_size: 4  # Small batch size for very small subset (8 samples = 2 batches)
+  epochs: 300    # Many epochs to ensure overfitting (increased from 200 to allow more training)
+  amp: false     # ★ disable AMP for stability
+  # Gradient clipping (enabled to prevent gradient explosion, as seen in epochs 158, 251, 252, 257)
+  grad_clip:
+    enabled: true  # Enabled to prevent gradient explosion (train_loss jumped to 9.61 at epoch 252)
+    max_norm: 0.5  # Reduced from 1.0 to prevent gradient explosion (loss spikes still occurring)
+
+# Data configuration
+# Note: When debug_overfit.enabled=true, train_path will be used to create a subset
+# and both train and val will use the same subset samples
+data:
+  train_path: data/processed_ck_v3/receiver_train/data.pickle  # Full training data (subset will be created from this)
+  val_path: data/processed_ck_v3/receiver_val/data.pickle  # Not used when debug_overfit.enabled=true
+  test_path: data/processed_ck_v3/receiver_test/data.pickle
+  format: pickle
+
+# Loss configuration
+loss:
+  type: cross_entropy
+  label_smoothing: 0.0   # ★ overfit
+  weight: 1.0
+  focal_loss:
+    enabled: false
+    alpha: 1.0
+    gamma: 2.0
+  class_weights: null
+  regularization:
+    l2_weight: 0.0       # ★ overfit
+    dropout_rate: 0.0    # ★ overfit
+
+# D2 equivariance configuration
+d2:
+  group_pool: false
+  transforms:
+    hflip: false
+    vflip: false          # ★ augmentation も全無効
+
+# Early stopping configuration
+early_stopping:
+  patience: 9999         # ほぼ無効化
+  min_delta: 0.0
+
+# Evaluation configuration
+eval:
+  batch_size: 5
+  min_cands_eval: 1
+
+# System configuration
+device: auto
+seed: 42
+num_workers: 0            # ★ 再現性＆デバッグ優先
+prefetch_factor: 2
+persistent_workers: false
+log_level: INFO
+log_dir: runs
+checkpoint_dir: checkpoints

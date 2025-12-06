@@ -96,6 +96,30 @@ make lint
 make format
 ```
 
+### 5. ミニセット過学習テスト（学習動作確認）
+
+学習が正しく進むか確認するための過学習テストです。16件のサブセットで学習し、Top-1精度が0.9以上になれば実装は正常です。
+
+```bash
+# 1. ミニサブセット（16件）の作成
+python tools/make_mini_subset.py \
+  --src data/processed_ck/receiver_train/data.pickle \
+  --dst data/processed_ck/receiver_train/mini16.pickle \
+  --n 16 --seed 42
+
+# 2. 過学習テストの実行
+python tacticai/train/train_receiver.py --config configs/receiver_overfit.yaml
+
+# 3. 成功判定
+# ログファイル（runs/training.log）または標準出力でTop-1精度を確認
+# Top-1 > 0.9 であれば成功（実装は正常）
+# Top-1 <= 0.9 であれば実装不具合の疑いあり
+```
+
+**成功判定の目安:**
+- **Top-1精度 > 0.9**: 実装は正常に動作しています
+- **Top-1精度 <= 0.9**: 実装に問題がある可能性があります（損失関数、勾配計算、データローダーなどを確認）
+
 ## プロジェクト構造
 
 ```

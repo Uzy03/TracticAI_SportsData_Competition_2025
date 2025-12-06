@@ -227,6 +227,74 @@ def load_training_history(filepath: Union[str, Path]) -> Dict[str, list]:
         return json.load(f)
 
 
+def save_training_history_csv(
+    train_history: Dict[str, list],
+    val_history: Dict[str, list],
+    test_history: Optional[Dict[str, float]] = None,
+    filepath: Union[str, Path] = "runs/training_history.csv"
+) -> None:
+    """Save training history to CSV file in a readable format.
+    
+    Args:
+        train_history: Training history dictionary (e.g., {"loss": [...], "accuracy": [...], ...})
+        val_history: Validation history dictionary
+        test_history: Test metrics dictionary (optional, single values per metric)
+        filepath: Path to save CSV file
+    """
+    import csv
+    
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Get all epochs
+    num_epochs = len(train_history.get("loss", []))
+    
+    # Prepare CSV rows
+    rows = []
+    for epoch in range(num_epochs):
+        row = {
+            "epoch": epoch + 1,
+            "train_loss": train_history.get("loss", [0.0])[epoch] if epoch < len(train_history.get("loss", [])) else 0.0,
+            "train_acc": train_history.get("accuracy", [0.0])[epoch] if epoch < len(train_history.get("accuracy", [])) else 0.0,
+            "train_top1": train_history.get("top1", [0.0])[epoch] if epoch < len(train_history.get("top1", [])) else 0.0,
+            "train_top3": train_history.get("top3", [0.0])[epoch] if epoch < len(train_history.get("top3", [])) else 0.0,
+            "train_top5": train_history.get("top5", [0.0])[epoch] if epoch < len(train_history.get("top5", [])) else 0.0,
+            "val_loss": val_history.get("loss", [0.0])[epoch] if epoch < len(val_history.get("loss", [])) else 0.0,
+            "val_acc": val_history.get("accuracy", [0.0])[epoch] if epoch < len(val_history.get("accuracy", [])) else 0.0,
+            "val_top1": val_history.get("top1", [0.0])[epoch] if epoch < len(val_history.get("top1", [])) else 0.0,
+            "val_top3": val_history.get("top3", [0.0])[epoch] if epoch < len(val_history.get("top3", [])) else 0.0,
+            "val_top5": val_history.get("top5", [0.0])[epoch] if epoch < len(val_history.get("top5", [])) else 0.0,
+        }
+        
+        # Add test metrics if available (only for the last epoch)
+        if test_history is not None and epoch == num_epochs - 1:
+            row["test_loss"] = test_history.get("loss", 0.0)
+            row["test_acc"] = test_history.get("accuracy", 0.0)
+            row["test_top1"] = test_history.get("top1", 0.0)
+            row["test_top3"] = test_history.get("top3", 0.0)
+            row["test_top5"] = test_history.get("top5", 0.0)
+        else:
+            row["test_loss"] = ""
+            row["test_acc"] = ""
+            row["test_top1"] = ""
+            row["test_top3"] = ""
+            row["test_top5"] = ""
+        
+        rows.append(row)
+    
+    # Write CSV file (overwrite mode)
+    fieldnames = [
+        "epoch", "train_loss", "train_acc", "train_top1", "train_top3", "train_top5",
+        "val_loss", "val_acc", "val_top1", "val_top3", "val_top5",
+        "test_loss", "test_acc", "test_top1", "test_top3", "test_top5"
+    ]
+    
+    with open(filepath, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 class CosineAnnealingScheduler:
     """Cosine annealing learning rate scheduler.
     
