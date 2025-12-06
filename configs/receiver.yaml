@@ -2,12 +2,14 @@
 
 # モデル設定
 model:
-  input_dim: 16  # ノード特徴量の次元数 (default=16): x, y, vx, vy, height, weight, dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker, dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal, ball, team
+  input_dim: 16  # Enhanced with relative features: x, y, vx, vy, height, weight, ball_possession (7) + dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker (4) + dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal (4) + team_id (1) = 16
   hidden_dim: 128  # 隠れ層の次元数 (default=128)
   num_classes: 22  # クラス数（プレイヤー数）(default=22)
   num_layers: 3  # GATv2レイヤー数 (default=3)
   num_heads: 4  # アテンションヘッド数 (default=4)
   dropout: 0.2  # ドロップアウト率 (default=0.2, 推奨範囲: 0.1-0.3, 安定した学習のため推奨)
+  edge_dim: 5  # エッジ特徴次元 (enhanced): dx, dy, dist_ij, angle_ij, same_team (was 1: same_team only)
+  # global_dim: Receiverタスクでは使用しない (TacticAI paper baseline)
 
 # オプティマイザー設定
 optimizer:

@@ -996,6 +996,7 @@ class GATv2Network4View(nn.Module):
         readout: str = "mean",
         residual: bool = True,
         view_mixing: str = "attention",
+        edge_feature_dim: int = 1,  # TacticAI spec: edge feature dimension (default: 1 for same_team, or 9 for full features)
     ):
         super().__init__()
         
@@ -1006,6 +1007,7 @@ class GATv2Network4View(nn.Module):
         self.num_heads = num_heads
         self.dropout = dropout
         self.readout = readout
+        self.edge_feature_dim = edge_feature_dim
         self.residual = residual
         self.view_mixing = view_mixing
         
@@ -1025,12 +1027,12 @@ class GATv2Network4View(nn.Module):
                 concat=concat,
                 dropout=dropout,
                 view_mixing=view_mixing,
-                edge_feature_dim=1,  # TacticAI spec: same_team only
+                edge_feature_dim=edge_feature_dim,  # TacticAI spec: edge feature dimension (9 for full features)
                 add_self_loops=False,  # Self-loops already in edge_index (22×22 complete graph)
             )
             self.gat_layers.append(layer)
             # Add layer normalization after each GAT layer (except last)
-            # Temporarily disable LayerNorm to debug logits collapse
+            # LayerNorm helps stabilize training (enabled by default in CLRS)
             if self.use_layer_norm and i < num_layers - 1:
                 self.layer_norms.append(nn.LayerNorm(hidden_dim))
             else:
@@ -1082,10 +1084,16 @@ class GATv2Network4View(nn.Module):
             else:
                 h = h_new
             
-            # Apply layer normalization (before activation)
+            # Apply dropout and activation (before LayerNorm, following CLRS Post-LN pattern)
+            if i < len(self.gat_layers) - 1:  # No activation after last layer
+                h = F.elu(h)
+                h = self.dropout_layer(h)
+            
+            # Apply layer normalization (after activation, following CLRS Post-LN pattern)
             # LayerNorm should normalize over the feature dimension (D) for each node
             # For [B, V, N, D], we normalize over D dimension, keeping B, V, N separate
-            # Temporarily disabled to debug logits collapse
+            # LayerNorm helps stabilize training (enabled by default in CLRS)
+            # Post-LN (activation -> LayerNorm) is more common in Transformer architectures
             if self.use_layer_norm and i < len(self.gat_layers) - 1:  # No normalization after last layer
                 # Reshape to [B*V*N, D] for LayerNorm (normalizes over D for each node)
                 # This is correct: each node gets normalized independently
@@ -1093,11 +1101,6 @@ class GATv2Network4View(nn.Module):
                 h_flat = h.view(B * V * N, D)
                 h_normalized = self.layer_norms[i](h_flat)
                 h = h_normalized.view(B, V, N, D)
-            
-            # Apply dropout and activation
-            if i < len(self.gat_layers) - 1:  # No activation after last layer
-                h = F.elu(h)
-                h = self.dropout_layer(h)
         
         # Output projection
         node_embeddings = self.output_proj(h)  # [B, V=4, N, output_dim]

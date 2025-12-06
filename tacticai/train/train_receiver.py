@@ -15,7 +15,7 @@ from collections import defaultdict
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, ConcatDataset
 import numpy as np
 from tqdm import tqdm
 
@@ -32,7 +32,9 @@ from tacticai.modules.utils import save_training_history_csv
 from tacticai.modules.transforms import RandomFlipTransform
 
 
-EXPECTED_PREPROCESS_VERSION = "ck_improved_v2"
+EXPECTED_PREPROCESS_VERSION = "v3"
+# Also allow older versions for backward compatibility
+ACCEPTED_PREPROCESS_VERSIONS = {"v3", "ck_improved_v2"}
 
 AUDIT_LOGGER = logging.getLogger(__name__)
 
@@ -77,11 +79,12 @@ def _assert_dataset_version(dataset: ReceiverDataset, split_name: str) -> None:
             f"{split_name} dataset is missing preprocess_version metadata. "
             "Please regenerate the data with the latest preprocessing script."
         )
-    if versions != {EXPECTED_PREPROCESS_VERSION}:
+    # Allow multiple versions for backward compatibility
+    if not versions.issubset(ACCEPTED_PREPROCESS_VERSIONS):
         raise AssertionError(
             f"{split_name} dataset preprocess_version mismatch: found {versions}, "
-            f"expected {{{EXPECTED_PREPROCESS_VERSION}}}. "
-            "Regenerate data via SoccerData/preprocess_ck_improved.py."
+            f"expected one of {ACCEPTED_PREPROCESS_VERSIONS}. "
+            "Regenerate data via SoccerData/preprocess_ck_improved.py or SoccerData/preprocess_ck_v3.py."
         )
 
 
@@ -142,62 +145,84 @@ class ReceiverModel(nn.Module):
         super().__init__()
         model_config = config["model"]
         
-        # Create backbone with 4-view D2 equivariance
-        self.backbone = GATv2Network4View(
-            input_dim=model_config["input_dim"],
-            hidden_dim=model_config["hidden_dim"],
-            output_dim=model_config["hidden_dim"],
-            num_layers=model_config["num_layers"],
-            num_heads=model_config["num_heads"],
-            dropout=model_config["dropout"],
-            readout="mean",
-            residual=True,
-            view_mixing="attention",
-        )
+        # Get edge_dim from config (TacticAI paper baseline: 1-dim for Receiver task)
+        edge_dim = model_config.get("edge_dim", 1)
+        self.edge_dim = edge_dim
+        # Receiver task does NOT use global features (TacticAI paper baseline)
+        # global_dim may be used in other tasks (Shot, Guided generation) but not in Receiver
+        self.global_dim = 0
         
-        # Create head
+        # Create backbone with 4-view D2 equivariance
+        self.use_gnn = model_config.get("use_gnn", True)
+        if self.use_gnn:
+            self.backbone = GATv2Network4View(
+                input_dim=model_config["input_dim"],
+                hidden_dim=model_config["hidden_dim"],
+                output_dim=model_config["hidden_dim"],
+                num_layers=model_config["num_layers"],
+                num_heads=model_config["num_heads"],
+                dropout=model_config["dropout"],
+                readout="mean",
+                residual=True,
+                view_mixing="attention",
+                edge_feature_dim=edge_dim,
+            )
+        else:
+            # MLP baseline: simple linear projection
+            self.input_proj = nn.Linear(model_config["input_dim"], model_config["hidden_dim"])
+        
+        # Create head with hidden_dim input only (TacticAI paper baseline: no global features)
+        head_input_dim = model_config["hidden_dim"]
         self.head = ReceiverHead(
-            input_dim=model_config["hidden_dim"],
+            input_dim=head_input_dim,
             num_classes=model_config["num_classes"],
             hidden_dim=model_config["hidden_dim"],
             dropout=model_config["dropout"],
             num_layers=model_config.get("mlp_num_layers", 2),  # Allow configurable MLP depth
         )
         self._cand_checks_done = False
+        self._debug_first_forward = False  # Flag for debug logging
+        self._logger = None  # Will be set from outside for debugging
     
     def forward(
         self, 
         x: torch.Tensor, 
         edge_index: torch.Tensor, 
         batch: torch.Tensor,
-        edge_attr: Optional[torch.Tensor] = None,  # TacticAI spec: same_team feature
+        edge_attr: Optional[torch.Tensor] = None,  # TacticAI paper baseline: 1-dim edge features (same_team only)
         mask: Optional[torch.Tensor] = None,
         team: Optional[torch.Tensor] = None,
         ball: Optional[torch.Tensor] = None,
+        global_x: Optional[torch.Tensor] = None,  # Receiver task does NOT use global_x (TacticAI paper baseline)
     ) -> torch.Tensor:
         """Forward pass with D2 equivariance.
         
         Args:
-            x: Node features [N, input_dim]
+            x: Node features [N, input_dim] (TacticAI paper baseline: 7-dim for Receiver)
             edge_index: Edge indices [2, E]
             batch: Batch indices [N]
+            edge_attr: Edge features [E, edge_dim] (TacticAI paper baseline: 1-dim for Receiver)
             mask: Node mask [N] where 1=valid, 0=missing (optional)
             team: Team IDs [N] where 0=attacking team, 1=defending team (optional)
             ball: Ball possession [N] where 1=has ball, 0=no ball (optional)
+            global_x: Global features (ignored for Receiver task, may be used in other tasks)
             
         Returns:
             Receiver predictions - shape depends on filtering:
             - If team and ball provided: [N_attacking, num_classes] (filtered)
             - Otherwise: [N, num_classes] (all nodes)
         """
+        # TacticAI paper baseline: Receiver task does NOT use global_x
+        # global_x may be used in other tasks (Shot, Guided generation) but not in Receiver
+        
         # Process entire batch at once for maximum GPU utilization
         B = batch.max().item() + 1 if batch is not None else 1
         
         # Create 4 views for entire batch at once
-        # TacticAI spec: D2 reflection applies to coordinates and velocity vectors
+        # D2 reflection applies to coordinates, velocity vectors, and relative features
         # x, y at indices 0, 1; vx, vy at indices 2, 3
-        # dx_to_kicker, dy_to_kicker at indices 6, 7; dx_to_goal, dy_to_goal at indices 10, 11
-        # dist and angle are invariant (not flipped)
+        # dx_to_kicker, dy_to_kicker at indices 7, 8; dx_to_goal, dy_to_goal at indices 11, 12
+        # height, weight, ball_possession, dist_to_kicker, angle_to_kicker, dist_to_goal, angle_to_goal, team_id are invariant (not flipped)
         views_list = []
         for view_idx in range(len(D2_VIEWS)):
             x_view = x.clone()
@@ -207,12 +232,12 @@ class ReceiverModel(nn.Module):
             # vx, vy velocities: indices 2, 3
             if x_view.size(-1) > 3:
                 x_view = apply_view_transform(x_view, view_idx, xy_indices=(2, 3))
-            # dx_to_kicker, dy_to_kicker: indices 6, 7
-            if x_view.size(-1) > 7:
-                x_view = apply_view_transform(x_view, view_idx, xy_indices=(6, 7))
-            # dx_to_goal, dy_to_goal: indices 10, 11
-            if x_view.size(-1) > 11:
-                x_view = apply_view_transform(x_view, view_idx, xy_indices=(10, 11))
+            # dx_to_kicker, dy_to_kicker: indices 7, 8 (relative features to kicker)
+            if x_view.size(-1) > 8:
+                x_view = apply_view_transform(x_view, view_idx, xy_indices=(7, 8))
+            # dx_to_goal, dy_to_goal: indices 11, 12 (relative features to goal)
+            if x_view.size(-1) > 12:
+                x_view = apply_view_transform(x_view, view_idx, xy_indices=(11, 12))
             views_list.append(x_view)
         
         # Stack views: [4, N_total, D] -> [B, 4, N_total, D]
@@ -228,12 +253,22 @@ class ReceiverModel(nn.Module):
         
         # Use edge_index and edge_attr (already batched correctly by collate_fn)
         # edge_index contains edges for all graphs with proper offsets
-        # edge_attr contains same_team features [E, 1] (TacticAI spec)
-        # Get node embeddings from backbone: [B, 4, N_per_graph, output_dim]
-        node_emb_4view = self.backbone(x_4view, edge_index, edge_attr)  # [B, 4, N_per_graph, output_dim]
+        # edge_attr contains 1-dimensional edge features [E, 1] (TacticAI paper baseline: same_team only)
         
-        # TacticAI spec: Average over 4 views: [B, N_per_graph, output_dim]
-        H = node_emb_4view.mean(dim=1)  # [B, N_per_graph, output_dim]
+        if self.use_gnn:
+            # Get node embeddings from backbone: [B, 4, N_per_graph, output_dim]
+            node_emb_4view = self.backbone(x_4view, edge_index, edge_attr)  # [B, 4, N_per_graph, output_dim]
+            
+            # TacticAI paper baseline: Average over 4 views: [B, N_per_graph, output_dim]
+            H = node_emb_4view.mean(dim=1)  # [B, N_per_graph, output_dim]
+        else:
+            # MLP Baseline: Skip GNN, just use node features
+            # Apply projection to each view
+            # x_4view: [B, 4, N_per_graph, input_dim]
+            h_4view = self.input_proj(x_4view)  # [B, 4, N_per_graph, hidden_dim]
+            
+            # Average over views
+            H = h_4view.mean(dim=1)  # [B, N_per_graph, hidden_dim]
         
         # Apply mask if provided (element-wise multiplication, not pooling)
         if mask is not None:
@@ -244,12 +279,40 @@ class ReceiverModel(nn.Module):
             mask_expanded = mask_batched.unsqueeze(-1).expand_as(H)  # [B, N_per_graph, D]
             H = H * mask_expanded.float()
         
+        # TacticAI paper baseline: Receiver task does NOT use global features
+        # H remains as [B, N_per_graph, hidden_dim] without concatenating global_x
+        
+        # Debug: Store H for debugging candidate node embeddings
+        # This will be used in training/validation loop to check if H has variance among candidates
+        self._last_H = H  # [B, N_per_graph, hidden_dim]
+        
+        # Debug: Check H variance before head
+        if hasattr(self, '_debug_first_forward'):
+            if not self._debug_first_forward:
+                # Log H statistics for first forward pass
+                H_std = H.std(dim=1).mean().item()  # Average std across feature dimensions per node
+                H_mean = H.mean(dim=1).mean().item()  # Average mean per node
+                H_node_std = H.std(dim=0).mean().item()  # Std across nodes for each feature dimension
+                if hasattr(self, '_logger') and self._logger is not None:
+                    self._logger.info(f"[DEBUG-FORWARD] H stats before head: H_std={H_std:.6f}, H_mean={H_mean:.6f}, H_node_std={H_node_std:.6f}")
+                self._debug_first_forward = True
+        
         cand_mask = None  # Candidate masks are built downstream during training/validation
         
         # Get logits for all nodes (TacticAI spec: [B, N] format)
         # TacticAI spec: Each node outputs 1 scalar logit (no node-mean/sum aggregation)
         # ReceiverHead applies Linear(d→1) point-wise to each node
         logits = self.head(H, cand_mask=cand_mask)  # [B, N_per_graph]
+        
+        # Debug: Check logits variance after head
+        if hasattr(self, '_debug_first_forward') and self._debug_first_forward and not hasattr(self, '_debug_logits_logged'):
+            logits_std = logits.std().item()
+            logits_mean = logits.mean().item()
+            logits_per_node_std = logits.std(dim=1).mean().item()  # Std per graph
+            if hasattr(self, '_logger') and self._logger is not None:
+                self._logger.info(f"[DEBUG-FORWARD] Logits stats after head: logits_std={logits_std:.6f}, logits_mean={logits_mean:.6f}, logits_per_node_std={logits_per_node_std:.6f}")
+                self._logger.info(f"[DEBUG-FORWARD] Head weights stats: {[p.data.std().item() for p in self.head.mlp.parameters() if p.requires_grad][:3]}")
+            self._debug_logits_logged = True
         
         if cand_mask is not None:
             cand_mask = cand_mask.bool()
@@ -300,14 +363,27 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
     
     model.apply(init_weights)
     
-    # Special initialization for output layer to prevent logits collapse
-    # Initialize output layer with smaller weights to prevent explosion
+    # Special initialization for input and output layers to handle small feature variance
+    input_dim = config["model"]["input_dim"]
     for name, module in model.named_modules():
-        if isinstance(module, nn.Linear) and module.out_features == 1:
-            # Output layer: use Xavier initialization with smaller gain to prevent explosion
-            nn.init.xavier_uniform_(module.weight, gain=0.1)  # Reduced from 1.0 to prevent explosion
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
+        if isinstance(module, nn.Linear):
+            # Input layer: use larger initialization to amplify small feature differences
+            # Check if this is the first layer in the backbone (GATv2Network4View) or input_proj
+            if (hasattr(module, 'in_features') and module.in_features == input_dim) or \
+               (isinstance(module, nn.Linear) and getattr(model, 'input_proj', None) is module):
+                # First layer: amplify small input features with larger weights
+                # Balanced: high enough to amplify small features, low enough to prevent explosion
+                nn.init.xavier_uniform_(module.weight, gain=2.5)  # Balanced gain to amplify small features
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            # Output layer: use larger initialization to amplify small differences in H
+            elif hasattr(module, 'out_features') and module.out_features == 1:
+                # Output layer: use larger gain to amplify small differences in node embeddings
+                # This helps distinguish candidate nodes with similar features
+                nn.init.xavier_uniform_(module.weight, gain=3.0)  # Increased from 1.0 to amplify differences
+                if module.bias is not None:
+                    # Use larger bias range to break symmetry more effectively
+                    nn.init.uniform_(module.bias, -0.5, 0.5)  # Increased from 0.1 to break symmetry
     
     return model.to(device)
 
@@ -447,6 +523,7 @@ def train_epoch(
                     mask=data.get("mask"),
                     team=data.get("team"),
                     ball=data.get("ball"),
+                    # Receiver task does NOT use global_x (TacticAI paper baseline)
                 )
         else:
             outputs = model(
@@ -457,6 +534,7 @@ def train_epoch(
                 mask=data.get("mask"),
                 team=data.get("team"),
                 ball=data.get("ball"),
+                # Receiver task does NOT use global_x (TacticAI paper baseline)
             )
 
         outputs = outputs.float()
@@ -815,7 +893,7 @@ def validate_epoch(
             data = {k: v.to(device) for k, v in data.items()}
             targets = targets.to(device)
             
-            # Pass edge_attr, mask, team, ball if available
+            # Pass edge_attr, mask, team, ball, global_x if available
             outputs = model(
                 data["x"], 
                 data["edge_index"], 
@@ -824,6 +902,7 @@ def validate_epoch(
                 mask=data.get("mask"),
                 team=data.get("team"),
                 ball=data.get("ball"),
+                # Receiver task does NOT use global_x (TacticAI paper baseline)
             )
             
             if outputs.dtype != torch.float32:
@@ -1099,10 +1178,48 @@ def validate_epoch(
                     topk_values, topk_indices = torch.topk(logits_full, k=min(5, logits_full.size(0)))
                     topk_cand_values, topk_cand_indices = torch.topk(logits_masked, k=min(5, logits_masked.size(0)))
                     
+                    # Debug: Check node embeddings (H) variance among candidates
+                    H_debug = getattr(model, '_last_H', None)
+                    H_cand_std = None
+                    H_all_std = None
+                    x_cand_std = None
+                    x_all_std = None
+                    if H_debug is not None and H_debug.size(0) > b:
+                        H_b = H_debug[b]  # [N_per_graph, hidden_dim]
+                        H_all_std = H_b.std(dim=0).mean().item()  # Average std across feature dimensions
+                        # Get candidate node embeddings
+                        cand_mask_b = cm.view(-1)  # [N_per_graph]
+                        if cand_mask_b.sum() > 0:
+                            H_cand = H_b[cand_mask_b]  # [num_cands, hidden_dim]
+                            H_cand_std = H_cand.std(dim=0).mean().item()  # Average std across feature dimensions
+                    
+                    # Debug: Check input node features (x) variance among candidates
+                    if data.get("x") is not None and data.get("batch") is not None:
+                        x_tensor = data["x"]  # [N_total, input_dim]
+                        batch_tensor = data["batch"]  # [N_total]
+                        # Extract nodes for graph b
+                        graph_mask = (batch_tensor == b)
+                        if graph_mask.sum() > 0:
+                            x_b = x_tensor[graph_mask]  # [N_per_graph, input_dim]
+                            x_all_std = x_b.std(dim=0).mean().item()  # Average std across feature dimensions
+                            # Get candidate mask for this graph
+                            cand_mask_b = cm.view(-1)  # [N_per_graph]
+                            if cand_mask_b.sum() > 0 and cand_mask_b.size(0) == x_b.size(0):
+                                x_cand = x_b[cand_mask_b]  # [num_cands, input_dim]
+                                x_cand_std = x_cand.std(dim=0).mean().item()  # Average std across feature dimensions
+                    
+                    # Format H std values safely
+                    H_all_std_str = f"{H_all_std:.6f}" if H_all_std is not None else "N/A"
+                    H_cand_std_str = f"{H_cand_std:.6f}" if H_cand_std is not None else "N/A"
+                    x_all_std_str = f"{x_all_std:.6f}" if x_all_std is not None else "N/A"
+                    x_cand_std_str = f"{x_cand_std:.6f}" if x_cand_std is not None else "N/A"
+                    
                     logger.info(
                         f"[VAL-DEBUG] batch={batch_idx}, graph={b}, graph_id={graph_id}:\n"
                         f"  target_global={target_global}, target_in_cand={target_in_cand}, cand_mask[target]={cm[target_global].item() if target_global < cm.size(0) else 'N/A'}\n"
                         f"  cand_mask.sum()={Ncand}, cand_mask.shape={cm.shape}\n"
+                        f"  x_all_std={x_all_std_str}, x_cand_std={x_cand_std_str} (input features)\n"
+                        f"  H_all_std={H_all_std_str}, H_cand_std={H_cand_std_str} (node embeddings after GNN)\n"
                         f"  logits_full.shape={logits_full.shape}, logits_full.mean()={logits_full.mean().item():.6f}, logits_full.std()={logits_full.std().item():.6f}\n"
                         f"  logits_masked.shape={logits_masked.shape}, logits_masked.mean()={logits_masked.mean().item():.6f}, logits_masked.std()={logits_masked.std().item():.6f}\n"
                         f"  topk_full_indices={topk_indices.tolist()}, topk_full_values={topk_values.tolist()}\n"
@@ -1391,43 +1508,69 @@ def main():
             )
         else:
             # Normal training mode
-            train_dataset = ReceiverDataset(
+            train_dataset_base = ReceiverDataset(
                 config["data"]["train_path"],
                 file_format=config["data"].get("format", "parquet"),
                 phase="train",
             )
-            val_path = config["data"]["val_path"]
-            logger.info(f"[VAL-DATASET] Loading validation dataset from: {val_path}")
-            val_dataset = ReceiverDataset(
-                val_path,
-                file_format=config["data"].get("format", "parquet"),
-                phase="val",
-            )
-            logger.info(f"[VAL-DATASET] Validation dataset loaded: {len(val_dataset)} samples")
-            _assert_dataset_version(train_dataset, "train")
-            _assert_dataset_version(val_dataset, "val")
+            _assert_dataset_version(train_dataset_base, "train")
             
-            # DEBUG: Check first few validation samples
-            if len(val_dataset) > 0:
-                logger.info(f"[VAL-DATASET] Checking first validation sample...")
-                try:
-                    sample_data, sample_target = val_dataset[0]
-                    logger.info(
-                        f"[VAL-DATASET] First sample - target={sample_target.item()}, "
-                        f"x.shape={sample_data.get('x', torch.tensor([])).shape}, "
-                        f"team={'present' if 'team' in sample_data else 'missing'}, "
-                        f"ball={'present' if 'ball' in sample_data else 'missing'}, "
-                        f"cand_mask={'present' if 'cand_mask' in sample_data else 'missing'}"
-                    )
-                    if 'cand_mask' in sample_data:
-                        cand_mask = sample_data['cand_mask']
-                        target_idx = int(sample_target.item())
+            # Check if Val should be merged to Train
+            merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+            
+            if merge_val_to_train:
+                # Load Val dataset to merge with Train
+                val_path = config["data"]["val_path"]
+                logger.info(f"[MERGE-VAL] Loading validation dataset to merge with train: {val_path}")
+                val_dataset_base = ReceiverDataset(
+                    val_path,
+                    file_format=config["data"].get("format", "parquet"),
+                    phase="val",
+                )
+                logger.info(f"[MERGE-VAL] Validation dataset loaded: {len(val_dataset_base)} samples")
+                _assert_dataset_version(val_dataset_base, "val")
+                
+                # Merge Train and Val datasets
+                train_dataset = ConcatDataset([train_dataset_base, val_dataset_base])
+                logger.info(f"[MERGE-VAL] Merged train dataset: {len(train_dataset_base)} (train) + {len(val_dataset_base)} (val) = {len(train_dataset)} samples")
+                
+                # Set Val dataset to None (not used when merged)
+                val_dataset = None
+                logger.info(f"[MERGE-VAL] Val dataset set to None (using merged train dataset only)")
+            else:
+                # Normal mode: separate Train and Val
+                train_dataset = train_dataset_base
+                val_path = config["data"]["val_path"]
+                logger.info(f"[VAL-DATASET] Loading validation dataset from: {val_path}")
+                val_dataset = ReceiverDataset(
+                    val_path,
+                    file_format=config["data"].get("format", "parquet"),
+                    phase="val",
+                )
+                logger.info(f"[VAL-DATASET] Validation dataset loaded: {len(val_dataset)} samples")
+                _assert_dataset_version(val_dataset, "val")
+                
+                # DEBUG: Check first few validation samples
+                if len(val_dataset) > 0:
+                    logger.info(f"[VAL-DATASET] Checking first validation sample...")
+                    try:
+                        sample_data, sample_target = val_dataset[0]
                         logger.info(
-                            f"[VAL-DATASET] First sample cand_mask - sum={cand_mask.sum().item()}, "
-                            f"shape={cand_mask.shape}, target_in_cand={cand_mask[target_idx].item() if target_idx < cand_mask.size(0) else 'N/A'}"
+                            f"[VAL-DATASET] First sample - target={sample_target.item()}, "
+                            f"x.shape={sample_data.get('x', torch.tensor([])).shape}, "
+                            f"team={'present' if 'team' in sample_data else 'missing'}, "
+                            f"ball={'present' if 'ball' in sample_data else 'missing'}, "
+                            f"cand_mask={'present' if 'cand_mask' in sample_data else 'missing'}"
                         )
-                except Exception as e:
-                    logger.warning(f"[VAL-DATASET] Error checking first sample: {e}")
+                        if 'cand_mask' in sample_data:
+                            cand_mask = sample_data['cand_mask']
+                            target_idx = int(sample_target.item())
+                            logger.info(
+                                f"[VAL-DATASET] First sample cand_mask - sum={cand_mask.sum().item()}, "
+                                f"shape={cand_mask.shape}, target_in_cand={cand_mask[target_idx].item() if target_idx < cand_mask.size(0) else 'N/A'}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"[VAL-DATASET] Error checking first sample: {e}")
     
     # Create data loaders
     # Override shuffle for single sample mode
@@ -1442,15 +1585,39 @@ def main():
         persistent_workers=config.get("persistent_workers", False) if config.get("num_workers", 0) > 0 else False,
     )
     
-    val_loader = create_dataloader(
-        val_dataset,
-        batch_size=config["eval"]["batch_size"],
-        shuffle=False,
-        num_workers=config.get("num_workers", 0),
-        pin_memory=True if str(device).startswith("cuda") else False,  # Enable for GPU
-        prefetch_factor=config.get("prefetch_factor", 2),
-        persistent_workers=config.get("persistent_workers", False) if config.get("num_workers", 0) > 0 else False,
-    )
+    # Create Val loader (skip if Val dataset is None when merged)
+    merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+    if merge_val_to_train and val_dataset is None:
+        # Val dataset is None (merged to train), create dummy loader
+        val_loader = None
+        logger.info("[MERGE-VAL] Val loader set to None (Val merged to Train)")
+    else:
+        val_loader = create_dataloader(
+            val_dataset,
+            batch_size=config["eval"]["batch_size"],
+            shuffle=False,
+            num_workers=config.get("num_workers", 0),
+            pin_memory=True if str(device).startswith("cuda") else False,  # Enable for GPU
+            prefetch_factor=config.get("prefetch_factor", 2),
+            persistent_workers=config.get("persistent_workers", False) if config.get("num_workers", 0) > 0 else False,
+        )
+    
+    # Auto-detect input dimensions from dataset if possible
+    if len(train_dataset) > 0:
+        try:
+            sample_data, _ = train_dataset[0]
+            if "x" in sample_data:
+                input_dim = sample_data["x"].shape[-1]
+                if input_dim != config["model"].get("input_dim"):
+                    logger.info(f"Auto-detected input_dim from dataset: {input_dim} (config was {config['model'].get('input_dim')})")
+                    config["model"]["input_dim"] = input_dim
+            if "edge_attr" in sample_data:
+                edge_dim = sample_data["edge_attr"].shape[-1]
+                if edge_dim != config["model"].get("edge_dim"):
+                    logger.info(f"Auto-detected edge_dim from dataset: {edge_dim} (config was {config['model'].get('edge_dim')})")
+                    config["model"]["edge_dim"] = edge_dim
+        except Exception as e:
+            logger.warning(f"Failed to auto-detect dimensions from dataset: {e}")
     
     # Create test dataset and loader (for final evaluation)
     test_dataset = None
@@ -1478,6 +1645,9 @@ def main():
     # Create model
     model = create_model(config, device)
     logger.info(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
+    # Set logger for debug output in model forward
+    if hasattr(model, '_logger'):
+        model._logger = logger
     
     # Create optimizer and scheduler
     optimizer = create_optimizer(model, config)
@@ -1496,10 +1666,14 @@ def main():
     }
     
     # Create early stopping
-    # Disable early stopping for single sample debug mode
+    # Disable early stopping for single sample debug mode or when Val is merged to Train
+    merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
     if args.debug_overfit_single_sample:
         early_stopping_patience = 99999  # Effectively disable early stopping
         logger.info("[DEBUG-OVERFIT-SINGLE] Early stopping disabled (patience=99999)")
+    elif merge_val_to_train:
+        early_stopping_patience = 99999  # Effectively disable early stopping when Val is merged
+        logger.info("[MERGE-VAL] Early stopping disabled (Val merged to Train, no validation set)")
     else:
         early_stopping_patience = config.get("early_stopping", {}).get("patience", 10)
     
@@ -1553,17 +1727,33 @@ def main():
             grad_clip_max_norm=grad_clip_max_norm,
         )
         
-        # Validation
-        val_metrics = validate_epoch(
-            model,
-            val_loader,
-            criterion,
-            device,
-            metrics,
-            logger,
-            min_cands_eval=config.get("eval", {}).get("min_cands_eval", 1),
-            debug_single_sample=debug_logging,
-        )
+        # Validation (skip if Val is merged to Train)
+        merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+        if merge_val_to_train and (val_loader is None or val_dataset is None):
+            # Create dummy val_metrics when Val is merged to Train
+            val_metrics = {
+                "loss": 0.0,
+                "accuracy": 0.0,
+                "top1": 0.0,
+                "top3": 0.0,
+                "top5": 0.0,
+                "excluded_invalid": 0,
+                "excluded_invalid_filter": 0,
+                "invalid_team_mismatch": 0,
+                "invalid_target_not_in_cand": 0,
+            }
+            logger.info("[MERGE-VAL] Validation skipped (Val merged to Train)")
+        else:
+            val_metrics = validate_epoch(
+                model,
+                val_loader,
+                criterion,
+                device,
+                metrics,
+                logger,
+                min_cands_eval=config.get("eval", {}).get("min_cands_eval", 1),
+                debug_single_sample=debug_logging,
+            )
         
         # Update learning rate
         if scheduler is not None:
@@ -1593,15 +1783,22 @@ def main():
                 f"excluded_invalid_filter={int(train_metrics.get('excluded_invalid_filter', 0))})"
             )
             
-            logger.info(
-                f"Val   - Loss: {val_metrics['loss']:.4f}, "
-                       f"Acc: {val_metrics['accuracy']:.4f}, "
-                       f"Top-1: {val_metrics['top1']:.4f}, "
-                       f"Top-3: {val_metrics['top3']:.4f}, "
-                f"Top-5: {val_metrics['top5']:.4f} "
-                f"(excluded_invalid={int(val_metrics.get('excluded_invalid', 0))}, "
-                f"excluded_invalid_filter={int(val_metrics.get('excluded_invalid_filter', 0))})"
-            )
+            # Check if Val is merged
+            merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+            if merge_val_to_train:
+                logger.info(
+                    f"Val   - (skipped: Val merged to Train)"
+                )
+            else:
+                logger.info(
+                    f"Val   - Loss: {val_metrics['loss']:.4f}, "
+                           f"Acc: {val_metrics['accuracy']:.4f}, "
+                           f"Top-1: {val_metrics['top1']:.4f}, "
+                           f"Top-3: {val_metrics['top3']:.4f}, "
+                    f"Top-5: {val_metrics['top5']:.4f} "
+                    f"(excluded_invalid={int(val_metrics.get('excluded_invalid', 0))}, "
+                    f"excluded_invalid_filter={int(val_metrics.get('excluded_invalid_filter', 0))})"
+                )
 
         logger.info(
             "[TRAIN-AUDIT] team_mismatch=%d, target_not_in_cand=%d, excluded_invalid_filter=%d",
@@ -1610,12 +1807,15 @@ def main():
             int(train_metrics.get("excluded_invalid_filter", 0)),
         )
 
-        logger.info(
-            "[VAL-AUDIT] team_mismatch=%d, target_not_in_cand=%d, excluded_invalid_filter=%d",
-            int(val_metrics.get("invalid_team_mismatch", 0)),
-            int(val_metrics.get("invalid_target_not_in_cand", 0)),
-            int(val_metrics.get("excluded_invalid_filter", 0)),
-        )
+        # Skip VAL-AUDIT log when Val is merged
+        merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+        if not merge_val_to_train:
+            logger.info(
+                "[VAL-AUDIT] team_mismatch=%d, target_not_in_cand=%d, excluded_invalid_filter=%d",
+                int(val_metrics.get("invalid_team_mismatch", 0)),
+                int(val_metrics.get("invalid_target_not_in_cand", 0)),
+                int(val_metrics.get("excluded_invalid_filter", 0)),
+            )
         
         logger.info(f"Learning rate: {current_lr:.6f}")
         
@@ -1652,22 +1852,41 @@ def main():
         )
         
         # Save best model (based on Top-3 accuracy)
-        if val_metrics["top3"] > best_val_top3:
-            best_val_top3 = val_metrics["top3"]
-            
-            checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "receiver" / "best.ckpt"
-            save_checkpoint(
-                model, optimizer, epoch, val_metrics["loss"], val_metrics,
-                checkpoint_path, scheduler
-            )
-            logger.info(f"New best model saved with Top-3 accuracy: {best_val_top3:.4f}")
+        # When Val is merged, use Train metrics instead
+        merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+        if merge_val_to_train:
+            # Use Train Top-3 accuracy for best model when Val is merged
+            metric_for_best = train_metrics["top3"]
+            if metric_for_best > best_val_top3:
+                best_val_top3 = metric_for_best
+                checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "receiver" / "best.ckpt"
+                save_checkpoint(
+                    model, optimizer, epoch, train_metrics["loss"], train_metrics,
+                    checkpoint_path, scheduler
+                )
+                logger.info(f"New best model saved with Train Top-3 accuracy: {best_val_top3:.4f}")
+        else:
+            # Normal mode: use Val metrics
+            if val_metrics["top3"] > best_val_top3:
+                best_val_top3 = val_metrics["top3"]
+                checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "receiver" / "best.ckpt"
+                save_checkpoint(
+                    model, optimizer, epoch, val_metrics["loss"], val_metrics,
+                    checkpoint_path, scheduler
+                )
+                logger.info(f"New best model saved with Top-3 accuracy: {best_val_top3:.4f}")
         
-        # Early stopping (based on Top-3 accuracy)
-        if early_stopping(val_metrics["top3"], model):
-            logger.info(f"Early stopping at epoch {epoch+1}")
-            break
+        # Early stopping (based on Top-3 accuracy, skipped when Val is merged)
+        if not merge_val_to_train:
+            if early_stopping(val_metrics["top3"], model):
+                logger.info(f"Early stopping at epoch {epoch+1}")
+                break
     
-    logger.info(f"Training completed. Best validation Top-3 accuracy: {best_val_top3:.4f}")
+    merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+    if merge_val_to_train:
+        logger.info(f"Training completed. Best Train Top-3 accuracy: {best_val_top3:.4f} (Val merged to Train)")
+    else:
+        logger.info(f"Training completed. Best validation Top-3 accuracy: {best_val_top3:.4f}")
     
     # Final debug output for single sample mode
     if args.debug_overfit_single_sample:
@@ -1688,6 +1907,7 @@ def main():
                     mask=data.get("mask"),
                     team=data.get("team"),
                     ball=data.get("ball"),
+                    # Receiver task does NOT use global_x (TacticAI paper baseline)
                 )
                 
                 if outputs.dtype != torch.float32:

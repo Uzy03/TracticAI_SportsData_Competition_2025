@@ -268,17 +268,25 @@ class ReceiverSchema(DataSchema):
             self.graph_schema = None
     
     def get_node_features(self, data: Dict[str, Any]) -> torch.Tensor:
-        """Extract node features for receiver prediction.
+        """Extract node features for receiver prediction (enhanced with relative features: 16 dimensions).
         
         Args:
             data: Raw data dictionary containing player information
             
-        Returns:
-            Node features [N, F] where F includes positions, velocities, attributes
+            Returns:
+            Node features [N, 16] where:
+                - dim 0-1: x, y (normalized positions to [0, 1])
+                - dim 2-3: vx, vy (normalized velocities to [-1, 1] range)
+                - dim 4: height (normalized to [0, 1] range)
+                - dim 5: weight (normalized to [0, 1] range)
+                - dim 6: ball_possession (1.0 if player has ball, 0.0 otherwise)
+                - dim 7-10: dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker (relative to kicker)
+                - dim 11-14: dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal (relative to goal)
+                - dim 15: team_id (0=attacking team, 1=defending team)
         """
         features = []
         
-        # Extract positions
+        # Extract positions (x, y) - TacticAI paper baseline
         if isinstance(data, pd.DataFrame):
             positions = data[self.position_columns].values
         else:
@@ -290,53 +298,43 @@ class ReceiverSchema(DataSchema):
         normalized_positions[:, 1] = positions[:, 1] / self.field_width
         features.append(torch.tensor(normalized_positions, dtype=torch.float32))
         
-        # Extract velocities if available
+        # Extract velocities (vx, vy) - TacticAI paper baseline
         if self.velocity_columns:
             if isinstance(data, pd.DataFrame):
                 velocities = data[self.velocity_columns].values
             else:
                 velocities = np.array([data[col] for col in self.velocity_columns]).T
-            features.append(torch.tensor(velocities, dtype=torch.float32))
+            # Normalize velocities to similar scale as positions
+            # Maximum speed: typically 0-70 m/s (soccer players), normalize to [-1, 1] range (divide by 70.0)
+            # This allows both positive and negative velocities (directions)
+            max_velocity = 70.0  # m/s (typical maximum speed for soccer players)
+            normalized_velocities = velocities / max_velocity
+            features.append(torch.tensor(normalized_velocities, dtype=torch.float32))
         else:
             # Add zero velocities as placeholder
             features.append(torch.zeros(positions.shape[0], 2, dtype=torch.float32))
         
-        # Extract player attributes if available
+        # Extract player attributes (height, weight) - TacticAI paper baseline
         if self.player_attr_columns:
             if isinstance(data, pd.DataFrame):
                 attrs = data[self.player_attr_columns].values
             else:
                 attrs = np.array([data[col] for col in self.player_attr_columns]).T
-            features.append(torch.tensor(attrs, dtype=torch.float32))
+            # Normalize attributes to similar scale as positions
+            # Height: typically 1.7-2.0m, normalize to [0, 1] range (divide by 2.0)
+            # Weight: typically 60-90kg, normalize to [0, 1] range (divide by 100.0)
+            if attrs.shape[1] >= 2:
+                normalized_attrs = attrs.copy()
+                normalized_attrs[:, 0] = attrs[:, 0] / 2.0  # height: divide by 2.0m
+                normalized_attrs[:, 1] = attrs[:, 1] / 100.0  # weight: divide by 100.0kg
+                features.append(torch.tensor(normalized_attrs, dtype=torch.float32))
+            else:
+                features.append(torch.tensor(attrs, dtype=torch.float32))
         else:
             # Add default attributes (height, weight)
             features.append(torch.zeros(positions.shape[0], 2, dtype=torch.float32))
         
-        # Extract relative features to kicker (if available) - TacticAI spec: increase feature variance
-        relative_kicker_cols = ['dx_to_kicker', 'dy_to_kicker', 'dist_to_kicker', 'angle_to_kicker']
-        if all(col in data if isinstance(data, dict) else col in data.columns for col in relative_kicker_cols):
-            if isinstance(data, pd.DataFrame):
-                rel_kicker = np.array([data[col] for col in relative_kicker_cols]).T
-            else:
-                rel_kicker = np.array([data[col] for col in relative_kicker_cols]).T
-            features.append(torch.tensor(rel_kicker, dtype=torch.float32))
-        else:
-            # Add zero relative features as placeholder
-            features.append(torch.zeros(positions.shape[0], 4, dtype=torch.float32))
-        
-        # Extract relative features to goal (if available)
-        relative_goal_cols = ['dx_to_goal', 'dy_to_goal', 'dist_to_goal', 'angle_to_goal']
-        if all(col in data if isinstance(data, dict) else col in data.columns for col in relative_goal_cols):
-            if isinstance(data, pd.DataFrame):
-                rel_goal = np.array([data[col] for col in relative_goal_cols]).T
-            else:
-                rel_goal = np.array([data[col] for col in relative_goal_cols]).T
-            features.append(torch.tensor(rel_goal, dtype=torch.float32))
-        else:
-            # Add zero relative features as placeholder
-            features.append(torch.zeros(positions.shape[0], 4, dtype=torch.float32))
-        
-        # Extract ball information if available
+        # Extract ball possession (ball_possession) - TacticAI paper baseline
         if self.ball_column:
             if isinstance(data, pd.DataFrame):
                 ball_info = data[self.ball_column].values
@@ -347,17 +345,93 @@ class ReceiverSchema(DataSchema):
             # Add zero ball info as placeholder
             features.append(torch.zeros(positions.shape[0], 1, dtype=torch.float32))
         
-        # Extract team information if available
+        # Extract relative features to kicker (dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker)
+        positions_tensor = torch.tensor(positions, dtype=torch.float32)
+        num_nodes = positions_tensor.shape[0]
+        
+        # Get kicker index (same logic as get_global_features)
+        kicker_idx = None
+        ball_idx = None
+        if self.ball_column:
+            if isinstance(data, pd.DataFrame):
+                ball_info = data[self.ball_column].values
+            else:
+                ball_info = np.array(data[self.ball_column])
+            ball_info = np.array(ball_info)
+            if ball_info.sum() > 0:
+                ball_idx = int(np.argmax(ball_info))
+        
+        if "kicker_idx" in data and data["kicker_idx"] is not None:
+            kicker_idx = int(data["kicker_idx"])
+        elif ball_idx is not None:
+            kicker_idx = ball_idx
+        
+        if kicker_idx is not None and kicker_idx < num_nodes:
+            kicker_pos = positions_tensor[kicker_idx]  # [2]
+            # Compute relative position to kicker for each node
+            dx_to_kicker = positions_tensor[:, 0] - kicker_pos[0]  # [N]
+            dy_to_kicker = positions_tensor[:, 1] - kicker_pos[1]  # [N]
+            dist_to_kicker = torch.sqrt(dx_to_kicker ** 2 + dy_to_kicker ** 2 + 1e-6)  # [N] (add small epsilon to avoid zero)
+            angle_to_kicker = torch.atan2(dy_to_kicker, dx_to_kicker)  # [N] (in radians, -π to π)
+            
+            # Normalize relative features
+            # Distance: normalize by field diagonal (max distance on field)
+            max_dist = math.sqrt(self.field_length ** 2 + self.field_width ** 2)
+            dist_to_kicker = dist_to_kicker / max_dist  # Normalize to [0, 1]
+            # Angle: normalize to [-1, 1] (divide by π)
+            angle_to_kicker = angle_to_kicker / math.pi  # Normalize to [-1, 1]
+            # dx, dy: normalize by field dimensions
+            dx_to_kicker = dx_to_kicker / self.field_length  # Normalize to [-1, 1]
+            dy_to_kicker = dy_to_kicker / self.field_width   # Normalize to [-1, 1]
+            
+            relative_to_kicker = torch.stack([dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker], dim=1)  # [N, 4]
+        else:
+            # If no kicker info, use zeros
+            relative_to_kicker = torch.zeros(num_nodes, 4, dtype=torch.float32)
+        
+        features.append(relative_to_kicker)
+        
+        # Extract relative features to goal (dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal)
+        # Goal position: typically at the end of the field (x = field_length for attacking team)
+        # For corner kicks, attacking team is usually on one side
+        # Use goal at x = field_length (opponent's goal)
+        goal_x = self.field_length
+        goal_y = self.field_width / 2.0  # Center of goal (goal width is field width)
+        goal_pos = torch.tensor([goal_x, goal_y], dtype=torch.float32)
+        
+        # Compute relative position to goal for each node
+        dx_to_goal = positions_tensor[:, 0] - goal_pos[0]  # [N]
+        dy_to_goal = positions_tensor[:, 1] - goal_pos[1]  # [N]
+        dist_to_goal = torch.sqrt(dx_to_goal ** 2 + dy_to_goal ** 2 + 1e-6)  # [N]
+        angle_to_goal = torch.atan2(dy_to_goal, dx_to_goal)  # [N]
+        
+        # Normalize relative features (same as kicker)
+        max_dist = math.sqrt(self.field_length ** 2 + self.field_width ** 2)
+        dist_to_goal = dist_to_goal / max_dist  # Normalize to [0, 1]
+        angle_to_goal = angle_to_goal / math.pi  # Normalize to [-1, 1]
+        dx_to_goal = dx_to_goal / self.field_length  # Normalize to [-1, 1]
+        dy_to_goal = dy_to_goal / self.field_width   # Normalize to [-1, 1]
+        
+        relative_to_goal = torch.stack([dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal], dim=1)  # [N, 4]
+        features.append(relative_to_goal)
+        
+        # Extract team ID (0=attacking team, 1=defending team)
         if self.team_column:
             if isinstance(data, pd.DataFrame):
                 team_info = data[self.team_column].values
             else:
                 team_info = np.array(data[self.team_column])
-            features.append(torch.tensor(team_info, dtype=torch.float32).unsqueeze(1))
+            team_tensor = torch.tensor(team_info, dtype=torch.float32)
+            if team_tensor.dim() == 1:
+                team_tensor = team_tensor.unsqueeze(1)  # [N, 1]
+            features.append(team_tensor)
         else:
-            # Add zero team info as placeholder
-            features.append(torch.zeros(positions.shape[0], 1, dtype=torch.float32))
+            # Default: assume alternating teams (first 11 = attacking team, last 11 = defending team)
+            team_id_tensor = torch.zeros(num_nodes, 1, dtype=torch.float32)
+            team_id_tensor[11:] = 1.0  # Last 11 players are defending team
+            features.append(team_id_tensor)
         
+        # Total: 7 (baseline) + 4 (kicker) + 4 (goal) + 1 (team) = 16 dimensions
         return torch.cat(features, dim=1)
     
     def get_edge_index(self, data: Dict[str, Any]) -> torch.Tensor:
@@ -423,36 +497,53 @@ class ReceiverSchema(DataSchema):
         return torch.tensor(int(receiver_idx), dtype=torch.long)
     
     def get_edge_attributes(self, data: Dict[str, Any]) -> Optional[torch.Tensor]:
-        """Extract edge attributes for receiver prediction (TacticAI spec).
+        """Extract edge attributes for receiver prediction (enhanced with distance and angle).
         
-        TacticAI spec: same_team only [E, 1]
-        - same_team = 1 for same team edges and self-loops
-        - same_team = 0 for opponent edges
+        Returns 10-dimensional edge features:
+        - dx: x方向の位置差（正規化）
+        - dy: y方向の位置差（正規化）
+        - dist_ij: ノードiとjの距離（正規化）
+        - angle_ij: ノードiからjへの角度（正規化）
+        - same_team: binary indicator (1.0 if same team or self-loop, 0.0 otherwise)
+        - dvx: x方向の速度差（正規化）
+        - dvy: y方向の速度差（正規化）
+        - rel_speed: 相対速度の大きさ（正規化）
+        - from_kicker: キッカーから出るエッジかどうか (1.0/0.0)
+        - to_kicker: キッカーへ向かうエッジかどうか (1.0/0.0)
         
         Args:
             data: Raw data dictionary
             
         Returns:
-            Edge attributes tensor [E, 1] (TacticAI spec: same_team only) or None
+            Edge attributes tensor [E, 10] or None
         """
-        if not self.use_edge_attributes or self.edge_schema is None:
+        if not self.use_edge_attributes:
             return None
         
-        # Get positions
+        # Get positions (x, y) - already normalized to [0, 1] in get_node_features
         if isinstance(data, pd.DataFrame):
             positions = data[self.position_columns].values
         else:
             positions = np.array([data[col] for col in self.position_columns]).T
         
-        # Convert to meters (assuming positions are in normalized coordinates)
-        positions = torch.tensor(positions, dtype=torch.float32)
-        positions[:, 0] *= self.field_length
-        positions[:, 1] *= self.field_width
+        # Convert to tensor and denormalize to meters for distance calculations
+        positions_tensor = torch.tensor(positions, dtype=torch.float32)
+        positions_meters = positions_tensor.clone()
+        positions_meters[:, 0] *= self.field_length
+        positions_meters[:, 1] *= self.field_width
         
-        # Get edge index
-        edge_index = self.get_edge_index(data)
+        # Get velocities (vx, vy)
+        velocities = None
+        if self.velocity_columns:
+            if isinstance(data, pd.DataFrame):
+                velocities = data[self.velocity_columns].values
+            else:
+                velocities = np.array([data[col] for col in self.velocity_columns]).T
+            velocities = torch.tensor(velocities, dtype=torch.float32)
+        else:
+            velocities = torch.zeros(positions_tensor.shape[0], 2, dtype=torch.float32)
         
-        # Get team IDs if available
+        # Get team IDs
         team_ids = None
         if self.team_column:
             if isinstance(data, pd.DataFrame):
@@ -460,26 +551,94 @@ class ReceiverSchema(DataSchema):
             else:
                 team_ids = np.array(data[self.team_column])
             team_ids = torch.tensor(team_ids, dtype=torch.long)
+        else:
+            # Fallback: assume alternating teams (0-10: team 0, 11-21: team 1)
+            num_nodes = positions_tensor.shape[0]
+            team_ids = torch.arange(num_nodes, dtype=torch.long) // 11
         
-        # Compute edge attributes (TacticAI spec: same_team only)
-        edge_attrs = self.edge_schema.compute_edge_attributes(positions, edge_index, team_ids)
+        # Get edge index
+        edge_index = self.get_edge_index(data)
+        src, dst = edge_index[0], edge_index[1]
         
-        # TacticAI spec assertion: edge_index should contain 22 self-loops
-        num_nodes = self._get_num_nodes(data)
-        expected_edges = num_nodes * num_nodes  # 22×22 = 484
-        assert edge_index.size(1) == expected_edges, \
-            f"edge_index should have {expected_edges} edges (complete graph with self-loops), got {edge_index.size(1)}"
+        # Compute edge features: dx, dy, dist_ij, angle_ij, same_team
+        pos_src = positions_meters[src]  # [E, 2]
+        pos_dst = positions_meters[dst]  # [E, 2]
         
-        # TacticAI spec assertion: self-loops (i==j) should have same_team=1
-        if edge_attrs is not None:
-            src, dst = edge_index[0], edge_index[1]
-            self_loop_mask = (src == dst)
-            assert self_loop_mask.sum().item() == num_nodes, \
-                f"Expected {num_nodes} self-loops, got {self_loop_mask.sum().item()}"
-            if self_loop_mask.any():
-                self_loop_edge_attr = edge_attrs[self_loop_mask]
-                assert torch.allclose(self_loop_edge_attr, torch.ones_like(self_loop_edge_attr)), \
-                    f"Self-loops should have same_team=1, got {self_loop_edge_attr.unique()}"
+        # Position differences (dx, dy) in meters
+        dx = pos_dst[:, 0] - pos_src[:, 0]  # [E]
+        dy = pos_dst[:, 1] - pos_src[:, 1]  # [E]
+        
+        # Distance (dist_ij) in meters
+        dist_ij = torch.sqrt(dx ** 2 + dy ** 2 + 1e-6)  # [E] (add small epsilon to avoid zero)
+        
+        # Angle (angle_ij) in radians [-π, π]
+        angle_ij = torch.atan2(dy, dx)  # [E]
+        
+        # Normalize edge features
+        # dx, dy: normalize by field dimensions
+        max_dist = math.sqrt(self.field_length ** 2 + self.field_width ** 2)  # Field diagonal
+        dx_norm = dx / self.field_length  # Normalize to [-1, 1] range
+        dy_norm = dy / self.field_width   # Normalize to [-1, 1] range
+        dist_ij_norm = dist_ij / max_dist  # Normalize to [0, 1] range
+        angle_ij_norm = angle_ij / math.pi  # Normalize to [-1, 1] range
+        
+        # Same team indicator
+        same_team = (team_ids[src] == team_ids[dst]).float()  # [E]
+        # Explicitly set self-loops to 1.0
+        self_loop_mask = (src == dst)
+        same_team[self_loop_mask] = 1.0
+        
+        # Velocity differences (dvx, dvy)
+        vel_src = velocities[src]  # [E, 2]
+        vel_dst = velocities[dst]  # [E, 2]
+        dvx = vel_dst[:, 0] - vel_src[:, 0]
+        dvy = vel_dst[:, 1] - vel_src[:, 1]
+        rel_speed = torch.sqrt(dvx ** 2 + dvy ** 2 + 1e-6)
+        
+        # Normalize velocity features (relative speed ~20m/s max)
+        max_rel_speed = 20.0
+        dvx_norm = dvx / max_rel_speed
+        dvy_norm = dvy / max_rel_speed
+        rel_speed_norm = rel_speed / max_rel_speed
+        
+        # Kicker indicators
+        # Identify kicker
+        ball_idx = None
+        if self.ball_column:
+            if isinstance(data, pd.DataFrame):
+                ball_info = data[self.ball_column].values
+            else:
+                ball_info = np.array(data[self.ball_column])
+            ball_info = np.array(ball_info)
+            if ball_info.sum() > 0:
+                ball_idx = int(np.argmax(ball_info))
+        
+        kicker_idx = None
+        if "kicker_idx" in data and data["kicker_idx"] is not None:
+            kicker_idx = int(data["kicker_idx"])
+        elif ball_idx is not None:
+            kicker_idx = ball_idx
+            
+        from_kicker = torch.zeros_like(same_team)
+        to_kicker = torch.zeros_like(same_team)
+        
+        if kicker_idx is not None and kicker_idx < positions_tensor.shape[0]:
+            from_kicker[src == kicker_idx] = 1.0
+            to_kicker[dst == kicker_idx] = 1.0
+        
+        # Stack all edge features: [E, 10]
+        edge_attrs = torch.stack([
+            dx_norm,        # [E]
+            dy_norm,        # [E]
+            dist_ij_norm,   # [E]
+            angle_ij_norm,  # [E]
+            same_team,      # [E]
+            dvx_norm,       # [E]
+            dvy_norm,       # [E]
+            rel_speed_norm, # [E]
+            from_kicker,    # [E]
+            to_kicker       # [E]
+        ], dim=1)  # [E, 10]
         
         return edge_attrs
     
@@ -522,6 +681,94 @@ class ReceiverSchema(DataSchema):
         )
         
         return graph_attrs
+    
+    def get_global_features(self, data: Dict[str, Any]) -> Optional[torch.Tensor]:
+        """Extract global features for receiver prediction (TacticAI spec).
+        
+        Returns 8-dimensional global features:
+        - ball_x, ball_y, ball_vx, ball_vy: ball position and velocity
+        - kicker_x, kicker_y, kicker_vx, kicker_vy: kicker position and velocity
+        
+        Args:
+            data: Raw data dictionary
+            
+        Returns:
+            Global features tensor [8] or None
+        """
+        # Get positions (x, y)
+        if isinstance(data, pd.DataFrame):
+            positions = data[self.position_columns].values
+        else:
+            positions = np.array([data[col] for col in self.position_columns]).T
+        
+        positions_tensor = torch.tensor(positions, dtype=torch.float32)
+        num_nodes = positions_tensor.shape[0]
+        
+        # Get velocities (vx, vy)
+        velocities = None
+        if self.velocity_columns:
+            if isinstance(data, pd.DataFrame):
+                velocities = data[self.velocity_columns].values
+            else:
+                velocities = np.array([data[col] for col in self.velocity_columns]).T
+            velocities = torch.tensor(velocities, dtype=torch.float32)
+        else:
+            velocities = torch.zeros(num_nodes, 2, dtype=torch.float32)
+        
+        # Get ball information
+        ball_idx = None
+        if self.ball_column:
+            if isinstance(data, pd.DataFrame):
+                ball_info = data[self.ball_column].values
+            else:
+                ball_info = np.array(data[self.ball_column])
+            ball_info = np.array(ball_info)
+            if ball_info.sum() > 0:
+                ball_idx = int(np.argmax(ball_info))
+        
+        # Get kicker index
+        # Priority: 1) data["kicker_idx"] if present, 2) ball_idx (ball owner = kicker)
+        kicker_idx = None
+        if "kicker_idx" in data and data["kicker_idx"] is not None:
+            # Use explicit kicker index from sample dict
+            kicker_idx = int(data["kicker_idx"])
+        elif ball_idx is not None:
+            # Fallback: ball owner node index = kicker index
+            kicker_idx = ball_idx
+        
+        # Extract ball features (use kicker's position/velocity if ball info not available)
+        if ball_idx is not None and ball_idx < num_nodes:
+            ball_x = positions_tensor[ball_idx, 0].item()
+            ball_y = positions_tensor[ball_idx, 1].item()
+            ball_vx = velocities[ball_idx, 0].item()
+            ball_vy = velocities[ball_idx, 1].item()
+        elif kicker_idx is not None and kicker_idx < num_nodes:
+            # Fallback to kicker's position if ball info not available
+            ball_x = positions_tensor[kicker_idx, 0].item()
+            ball_y = positions_tensor[kicker_idx, 1].item()
+            ball_vx = velocities[kicker_idx, 0].item()
+            ball_vy = velocities[kicker_idx, 1].item()
+        else:
+            # Default to zero if no ball/kicker info
+            ball_x = ball_y = ball_vx = ball_vy = 0.0
+        
+        # Extract kicker features
+        if kicker_idx is not None and kicker_idx < num_nodes:
+            kicker_x = positions_tensor[kicker_idx, 0].item()
+            kicker_y = positions_tensor[kicker_idx, 1].item()
+            kicker_vx = velocities[kicker_idx, 0].item()
+            kicker_vy = velocities[kicker_idx, 1].item()
+        else:
+            # Default to zero if no kicker info
+            kicker_x = kicker_y = kicker_vx = kicker_vy = 0.0
+        
+        # Stack global features: [8]
+        global_features = torch.tensor([
+            ball_x, ball_y, ball_vx, ball_vy,
+            kicker_x, kicker_y, kicker_vx, kicker_vy
+        ], dtype=torch.float32)
+        
+        return global_features
     
     def _get_num_nodes(self, data: Dict[str, Any]) -> int:
         """Get number of nodes from data."""
