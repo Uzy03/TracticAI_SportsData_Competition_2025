@@ -860,6 +860,7 @@ class GATv2Network(nn.Module):
         dropout: float = 0.2,
         readout: str = "mean",
         residual: bool = True,
+        edge_feature_dim: int = 0,
     ):
         super().__init__()
         
@@ -871,6 +872,7 @@ class GATv2Network(nn.Module):
         self.dropout = dropout
         self.readout = readout
         self.residual = residual
+        self.edge_feature_dim = edge_feature_dim
         
         # Input projection
         self.input_proj = nn.Linear(input_dim, hidden_dim)
@@ -885,6 +887,8 @@ class GATv2Network(nn.Module):
                 heads=num_heads,
                 concat=concat,
                 dropout=dropout,
+                edge_feature_dim=edge_feature_dim,
+                use_edge_features=(edge_feature_dim > 0),
             )
             self.gat_layers.append(layer)
         
