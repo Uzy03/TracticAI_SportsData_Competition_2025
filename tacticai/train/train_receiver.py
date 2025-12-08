@@ -276,8 +276,23 @@ class ReceiverModel(nn.Module):
                 # Get node embeddings from backbone: [B, 4, N_per_graph, output_dim]
                 node_emb_4view = self.backbone(x_4view, edge_index, edge_attr)  # [B, 4, N_per_graph, output_dim]
                 
+                # Debug: Check for numerical instability before averaging
+                if torch.isnan(node_emb_4view).any() or torch.isinf(node_emb_4view).any():
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(f"[D2-DEBUG] NaN/Inf in node_emb_4view before averaging! stats: mean={node_emb_4view.mean().item():.6f}, std={node_emb_4view.std().item():.6f}, max={node_emb_4view.max().item():.6f}, min={node_emb_4view.min().item():.6f}")
+                    logger.error(f"[D2-DEBUG] node_emb_4view shape: {node_emb_4view.shape}, per-view stats:")
+                    for v in range(4):
+                        logger.error(f"  View {v}: mean={node_emb_4view[:, v, :, :].mean().item():.6f}, std={node_emb_4view[:, v, :, :].std().item():.6f}, max={node_emb_4view[:, v, :, :].max().item():.6f}, min={node_emb_4view[:, v, :, :].min().item():.6f}")
+                
                 # TacticAI paper baseline: Average over 4 views: [B, N_per_graph, output_dim]
                 H = node_emb_4view.mean(dim=1)  # [B, N_per_graph, output_dim]
+                
+                # Debug: Check after averaging
+                if torch.isnan(H).any() or torch.isinf(H).any():
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(f"[D2-DEBUG] NaN/Inf in H after averaging! stats: mean={H.mean().item():.6f}, std={H.std().item():.6f}, max={H.max().item():.6f}, min={H.min().item():.6f}")
             else:
                 # MLP Baseline: Skip GNN, just use node features
                 # Apply projection to each view
