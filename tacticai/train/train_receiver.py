@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader, Subset, ConcatDataset
 import numpy as np
 from tqdm import tqdm
 
-from tacticai.models import GATv2Network4View, ReceiverHead
+from tacticai.models import GATv2Network, GATv2Network4View, ReceiverHead
 from tacticai.models.mlp_heads import mask_logits
 from tacticai.modules.view_ops import apply_view_transform, D2_VIEWS
 from tacticai.dataio import ReceiverDataset, create_dataloader, create_dummy_dataset
@@ -139,11 +139,15 @@ def build_candidate_mask(
 
 
 class ReceiverModel(nn.Module):
-    """Complete receiver prediction model with D2 equivariance."""
+    """Complete receiver prediction model with optional D2 equivariance."""
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
         model_config = config["model"]
+        
+        # Get D2 equivariance setting from config (default: True for backward compatibility)
+        d2_config = config.get("d2", {})
+        self.use_d2_equivariance = d2_config.get("enabled", True)
         
         # Get edge_dim from config (TacticAI paper baseline: 1-dim for Receiver task)
         edge_dim = model_config.get("edge_dim", 1)
@@ -152,21 +156,36 @@ class ReceiverModel(nn.Module):
         # global_dim may be used in other tasks (Shot, Guided generation) but not in Receiver
         self.global_dim = 0
         
-        # Create backbone with 4-view D2 equivariance
+        # Create backbone (with or without D2 equivariance)
         self.use_gnn = model_config.get("use_gnn", True)
         if self.use_gnn:
-            self.backbone = GATv2Network4View(
-                input_dim=model_config["input_dim"],
-                hidden_dim=model_config["hidden_dim"],
-                output_dim=model_config["hidden_dim"],
-                num_layers=model_config["num_layers"],
-                num_heads=model_config["num_heads"],
-                dropout=model_config["dropout"],
-                readout="mean",
-                residual=True,
-                view_mixing="attention",
-                edge_feature_dim=edge_dim,
-            )
+            if self.use_d2_equivariance:
+                # Use 4-view D2 equivariance backbone
+                self.backbone = GATv2Network4View(
+                    input_dim=model_config["input_dim"],
+                    hidden_dim=model_config["hidden_dim"],
+                    output_dim=model_config["hidden_dim"],
+                    num_layers=model_config["num_layers"],
+                    num_heads=model_config["num_heads"],
+                    dropout=model_config["dropout"],
+                    readout="mean",
+                    residual=True,
+                    view_mixing="attention",
+                    edge_feature_dim=edge_dim,
+                )
+            else:
+                # Use standard GATv2 backbone (no D2 equivariance)
+                self.backbone = GATv2Network(
+                    input_dim=model_config["input_dim"],
+                    hidden_dim=model_config["hidden_dim"],
+                    output_dim=model_config["hidden_dim"],
+                    num_layers=model_config["num_layers"],
+                    num_heads=model_config["num_heads"],
+                    dropout=model_config["dropout"],
+                    readout="mean",
+                    residual=True,
+                    edge_feature_dim=edge_dim,
+                )
         else:
             # MLP baseline: simple linear projection
             self.input_proj = nn.Linear(model_config["input_dim"], model_config["hidden_dim"])
@@ -195,7 +214,7 @@ class ReceiverModel(nn.Module):
         ball: Optional[torch.Tensor] = None,
         global_x: Optional[torch.Tensor] = None,  # Receiver task does NOT use global_x (TacticAI paper baseline)
     ) -> torch.Tensor:
-        """Forward pass with D2 equivariance.
+        """Forward pass with optional D2 equivariance.
         
         Args:
             x: Node features [N, input_dim] (TacticAI paper baseline: 7-dim for Receiver)
@@ -218,57 +237,93 @@ class ReceiverModel(nn.Module):
         # Process entire batch at once for maximum GPU utilization
         B = batch.max().item() + 1 if batch is not None else 1
         
-        # Create 4 views for entire batch at once
-        # D2 reflection applies to coordinates, velocity vectors, and relative features
-        # x, y at indices 0, 1; vx, vy at indices 2, 3
-        # dx_to_kicker, dy_to_kicker at indices 7, 8; dx_to_goal, dy_to_goal at indices 11, 12
-        # height, weight, ball_possession, dist_to_kicker, angle_to_kicker, dist_to_goal, angle_to_goal, team_id are invariant (not flipped)
-        views_list = []
-        for view_idx in range(len(D2_VIEWS)):
-            x_view = x.clone()
-            # Apply D2 reflection to coordinate-like features
-            # x, y coordinates: indices 0, 1
-            x_view = apply_view_transform(x_view, view_idx, xy_indices=(0, 1))
-            # vx, vy velocities: indices 2, 3
-            if x_view.size(-1) > 3:
-                x_view = apply_view_transform(x_view, view_idx, xy_indices=(2, 3))
-            # dx_to_kicker, dy_to_kicker: indices 7, 8 (relative features to kicker)
-            if x_view.size(-1) > 8:
-                x_view = apply_view_transform(x_view, view_idx, xy_indices=(7, 8))
-            # dx_to_goal, dy_to_goal: indices 11, 12 (relative features to goal)
-            if x_view.size(-1) > 12:
-                x_view = apply_view_transform(x_view, view_idx, xy_indices=(11, 12))
-            views_list.append(x_view)
-        
-        # Stack views: [4, N_total, D] -> [B, 4, N_total, D]
-        # Note: N_total is the total number of nodes across all graphs in the batch
-        x_views = torch.stack(views_list, dim=0)  # [4, N_total, D]
-        N_total = x.size(0)
-        x_4view = x_views.view(4, N_total, -1).permute(1, 0, 2).unsqueeze(0)  # [1, 4, N_total, D]
-        # Expand to [B, 4, N_total, D] - each graph in batch uses same views
-        # Actually, we need to reshape properly: each graph should have its own views
-        # Reshape: [4, N_total, D] -> [4, B, N_per_graph, D] -> [B, 4, N_per_graph, D]
-        num_nodes_per_graph = N_total // B if B > 1 else N_total
-        x_4view = x_views.view(4, B, num_nodes_per_graph, -1).permute(1, 0, 2, 3)  # [B, 4, N_per_graph, D]
-        
-        # Use edge_index and edge_attr (already batched correctly by collate_fn)
-        # edge_index contains edges for all graphs with proper offsets
-        # edge_attr contains 1-dimensional edge features [E, 1] (TacticAI paper baseline: same_team only)
-        
-        if self.use_gnn:
-            # Get node embeddings from backbone: [B, 4, N_per_graph, output_dim]
-            node_emb_4view = self.backbone(x_4view, edge_index, edge_attr)  # [B, 4, N_per_graph, output_dim]
+        if self.use_d2_equivariance:
+            # D2 equivariance mode: Create 4 views and use GATv2Network4View
+            # D2 reflection applies to coordinates, velocity vectors, and relative features
+            # x, y at indices 0, 1; vx, vy at indices 2, 3
+            # dx_to_kicker, dy_to_kicker at indices 7, 8; dx_to_goal, dy_to_goal at indices 11, 12
+            # height, weight, ball_possession, dist_to_kicker, angle_to_kicker, dist_to_goal, angle_to_goal, team_id are invariant (not flipped)
+            views_list = []
+            for view_idx in range(len(D2_VIEWS)):
+                x_view = x.clone()
+                # Apply D2 reflection to coordinate-like features
+                # x, y coordinates: indices 0, 1
+                x_view = apply_view_transform(x_view, view_idx, xy_indices=(0, 1))
+                # vx, vy velocities: indices 2, 3
+                if x_view.size(-1) > 3:
+                    x_view = apply_view_transform(x_view, view_idx, xy_indices=(2, 3))
+                # dx_to_kicker, dy_to_kicker: indices 7, 8 (relative features to kicker)
+                if x_view.size(-1) > 8:
+                    x_view = apply_view_transform(x_view, view_idx, xy_indices=(7, 8))
+                # dx_to_goal, dy_to_goal: indices 11, 12 (relative features to goal)
+                if x_view.size(-1) > 12:
+                    x_view = apply_view_transform(x_view, view_idx, xy_indices=(11, 12))
+                views_list.append(x_view)
             
-            # TacticAI paper baseline: Average over 4 views: [B, N_per_graph, output_dim]
-            H = node_emb_4view.mean(dim=1)  # [B, N_per_graph, output_dim]
+            # Stack views: [4, N_total, D] -> [B, 4, N_total, D]
+            # Note: N_total is the total number of nodes across all graphs in the batch
+            x_views = torch.stack(views_list, dim=0)  # [4, N_total, D]
+            N_total = x.size(0)
+            # Reshape: [4, N_total, D] -> [4, B, N_per_graph, D] -> [B, 4, N_per_graph, D]
+            num_nodes_per_graph = N_total // B if B > 1 else N_total
+            x_4view = x_views.view(4, B, num_nodes_per_graph, -1).permute(1, 0, 2, 3)  # [B, 4, N_per_graph, D]
+            
+            # Use edge_index and edge_attr (already batched correctly by collate_fn)
+            # edge_index contains edges for all graphs with proper offsets
+            # edge_attr contains 1-dimensional edge features [E, 1] (TacticAI paper baseline: same_team only)
+            
+            if self.use_gnn:
+                # Get node embeddings from backbone: [B, 4, N_per_graph, output_dim]
+                node_emb_4view = self.backbone(x_4view, edge_index, edge_attr)  # [B, 4, N_per_graph, output_dim]
+                
+                # Debug: Check for numerical instability before averaging
+                if torch.isnan(node_emb_4view).any() or torch.isinf(node_emb_4view).any():
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(f"[D2-DEBUG] NaN/Inf in node_emb_4view before averaging! stats: mean={node_emb_4view.mean().item():.6f}, std={node_emb_4view.std().item():.6f}, max={node_emb_4view.max().item():.6f}, min={node_emb_4view.min().item():.6f}")
+                    logger.error(f"[D2-DEBUG] node_emb_4view shape: {node_emb_4view.shape}, per-view stats:")
+                    for v in range(4):
+                        logger.error(f"  View {v}: mean={node_emb_4view[:, v, :, :].mean().item():.6f}, std={node_emb_4view[:, v, :, :].std().item():.6f}, max={node_emb_4view[:, v, :, :].max().item():.6f}, min={node_emb_4view[:, v, :, :].min().item():.6f}")
+                
+                # TacticAI paper baseline: Average over 4 views: [B, N_per_graph, output_dim]
+                H = node_emb_4view.mean(dim=1)  # [B, N_per_graph, output_dim]
+                
+                # Debug: Check after averaging
+                if torch.isnan(H).any() or torch.isinf(H).any():
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(f"[D2-DEBUG] NaN/Inf in H after averaging! stats: mean={H.mean().item():.6f}, std={H.std().item():.6f}, max={H.max().item():.6f}, min={H.min().item():.6f}")
+            else:
+                # MLP Baseline: Skip GNN, just use node features
+                # Apply projection to each view
+                # x_4view: [B, 4, N_per_graph, input_dim]
+                h_4view = self.input_proj(x_4view)  # [B, 4, N_per_graph, hidden_dim]
+                
+                # Average over 4 views: [B, N_per_graph, hidden_dim]
+                H = h_4view.mean(dim=1)  # [B, N_per_graph, hidden_dim]
         else:
-            # MLP Baseline: Skip GNN, just use node features
-            # Apply projection to each view
-            # x_4view: [B, 4, N_per_graph, input_dim]
-            h_4view = self.input_proj(x_4view)  # [B, 4, N_per_graph, hidden_dim]
-            
-            # Average over views
-            H = h_4view.mean(dim=1)  # [B, N_per_graph, hidden_dim]
+            # Standard mode: No D2 equivariance, use GATv2Network directly
+            if self.use_gnn:
+                # Get node embeddings from backbone: [N, output_dim]
+                H = self.backbone(x, edge_index, edge_attr)  # [N, output_dim]
+                
+                # Reshape to [B, N_per_graph, output_dim] for batch processing
+                N_total = x.size(0)
+                num_nodes_per_graph = N_total // B if B > 1 else N_total
+                H = H.view(B, num_nodes_per_graph, -1)  # [B, N_per_graph, output_dim]
+            else:
+                # MLP Baseline: Skip GNN, just use node features
+                # Apply projection: [N, input_dim] -> [N, hidden_dim]
+                h = self.input_proj(x)  # [N, hidden_dim]
+                
+                # Reshape to [B, N_per_graph, hidden_dim] for batch processing
+                N_total = x.size(0)
+                num_nodes_per_graph = N_total // B if B > 1 else N_total
+                H = h.view(B, num_nodes_per_graph, -1)  # [B, N_per_graph, hidden_dim]
+        
+        # Calculate num_nodes_per_graph for mask processing
+        N_total = x.size(0)
+        num_nodes_per_graph = N_total // B if B > 1 else N_total
         
         # Apply mask if provided (element-wise multiplication, not pooling)
         if mask is not None:
@@ -1391,7 +1446,14 @@ def main():
     logger.info(f"Configuration: {config}")
     resolved_config_path = Path(args.config).resolve()
     logger.info(f"Resolved config path: {resolved_config_path}")
-    assert config["d2"]["group_pool"] is False, "STOP: group_pool must be False but True was loaded."
+    # Check D2 configuration
+    d2_config = config.get("d2", {})
+    use_d2 = d2_config.get("enabled", True)
+    if use_d2:
+        # When D2 is enabled, group_pool should be False (ReceiverModel handles D2 internally)
+        if d2_config.get("group_pool", False):
+            logger.warning("group_pool is True but ReceiverModel handles D2 internally. group_pool will be ignored.")
+    # Note: group_pool is a legacy option and is not used when ReceiverModel handles D2 internally
     
     # Create datasets
     if args.debug_overfit_single_sample:

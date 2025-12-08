@@ -589,6 +589,16 @@ class GATv2Layer4View(nn.Module):
         att_input = F.leaky_relu(h_sum, negative_slope=self.negative_slope)  # [E, heads, out_features]
         att_scores = (self.att * att_input).sum(dim=-1)  # [E, heads]
         
+        # Debug: Check for numerical instability in attention scores
+        if torch.isnan(att_scores).any() or torch.isinf(att_scores).any():
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"[D2-DEBUG] NaN/Inf in att_scores (_compute_attention_single)! stats: mean={att_scores.mean().item():.6f}, std={att_scores.std().item():.6f}, max={att_scores.max().item():.6f}, min={att_scores.min().item():.6f}")
+        elif att_scores.abs().max().item() > 50.0:  # Large attention scores can cause overflow in exp()
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"[D2-DEBUG] Large attention scores detected (_compute_attention_single)! max_abs={att_scores.abs().max().item():.6f}, mean={att_scores.mean().item():.6f}, std={att_scores.std().item():.6f}")
+        
         return att_scores
     
     def _aggregate_single(
@@ -860,6 +870,7 @@ class GATv2Network(nn.Module):
         dropout: float = 0.2,
         readout: str = "mean",
         residual: bool = True,
+        edge_feature_dim: int = 0,
     ):
         super().__init__()
         
@@ -871,6 +882,7 @@ class GATv2Network(nn.Module):
         self.dropout = dropout
         self.readout = readout
         self.residual = residual
+        self.edge_feature_dim = edge_feature_dim
         
         # Input projection
         self.input_proj = nn.Linear(input_dim, hidden_dim)
@@ -885,6 +897,8 @@ class GATv2Network(nn.Module):
                 heads=num_heads,
                 concat=concat,
                 dropout=dropout,
+                edge_feature_dim=edge_feature_dim,
+                use_edge_features=(edge_feature_dim > 0),
             )
             self.gat_layers.append(layer)
         
@@ -1076,7 +1090,22 @@ class GATv2Network4View(nn.Module):
         
         # GATv2 layers with residual connections and layer normalization
         for i, layer in enumerate(self.gat_layers):
+            # Debug: Log before layer (every 10 epochs for first layer, or when values are large)
+            if i == 0 and hasattr(self, '_epoch_counter'):
+                epoch = getattr(self, '_epoch_counter', 0)
+                if epoch >= 29 and epoch <= 31:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    h_stats = h.mean().item(), h.std().item(), h.abs().max().item(), h.abs().min().item()
+                    logger.warning(f"[D2-DEBUG-EPOCH{epoch}] Before layer {i}: h stats - mean={h_stats[0]:.6f}, std={h_stats[1]:.6f}, max_abs={h_stats[2]:.6f}, min_abs={h_stats[3]:.6f}")
+            
             h_new = layer(h, edge_index, edge_attr)
+            
+            # Debug: Check for numerical instability
+            if torch.isnan(h_new).any() or torch.isinf(h_new).any():
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"[D2-DEBUG] Layer {i}: NaN/Inf detected in h_new! h_new stats: mean={h_new.mean().item():.6f}, std={h_new.std().item():.6f}, max={h_new.max().item():.6f}, min={h_new.min().item():.6f}")
             
             # Residual connection (except first layer)
             if self.residual and i > 0 and h_new.size(-1) == h.size(-1):
@@ -1084,10 +1113,22 @@ class GATv2Network4View(nn.Module):
             else:
                 h = h_new
             
+            # Debug: Check after residual
+            if torch.isnan(h).any() or torch.isinf(h).any():
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"[D2-DEBUG] Layer {i}: NaN/Inf detected after residual! h stats: mean={h.mean().item():.6f}, std={h.std().item():.6f}, max={h.max().item():.6f}, min={h.min().item():.6f}")
+            
             # Apply dropout and activation (before LayerNorm, following CLRS Post-LN pattern)
             if i < len(self.gat_layers) - 1:  # No activation after last layer
                 h = F.elu(h)
                 h = self.dropout_layer(h)
+            
+            # Debug: Check after activation
+            if torch.isnan(h).any() or torch.isinf(h).any():
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"[D2-DEBUG] Layer {i}: NaN/Inf detected after activation! h stats: mean={h.mean().item():.6f}, std={h.std().item():.6f}, max={h.max().item():.6f}, min={h.min().item():.6f}")
             
             # Apply layer normalization (after activation, following CLRS Post-LN pattern)
             # LayerNorm should normalize over the feature dimension (D) for each node
@@ -1101,9 +1142,33 @@ class GATv2Network4View(nn.Module):
                 h_flat = h.view(B * V * N, D)
                 h_normalized = self.layer_norms[i](h_flat)
                 h = h_normalized.view(B, V, N, D)
+                
+                # Debug: Check after LayerNorm
+                if torch.isnan(h).any() or torch.isinf(h).any():
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(f"[D2-DEBUG] Layer {i}: NaN/Inf detected after LayerNorm! h stats: mean={h.mean().item():.6f}, std={h.std().item():.6f}, max={h.max().item():.6f}, min={h.min().item():.6f}")
+        
+        # Debug: Log before output projection (every 10 epochs)
+        if hasattr(self, '_epoch_counter'):
+            epoch = getattr(self, '_epoch_counter', 0)
+            if epoch >= 29 and epoch <= 31:
+                import logging
+                logger = logging.getLogger(__name__)
+                h_stats = h.mean().item(), h.std().item(), h.abs().max().item(), h.abs().min().item()
+                logger.warning(f"[D2-DEBUG-EPOCH{epoch}] Before output_proj: h stats - mean={h_stats[0]:.6f}, std={h_stats[1]:.6f}, max_abs={h_stats[2]:.6f}, min_abs={h_stats[3]:.6f}")
         
         # Output projection
         node_embeddings = self.output_proj(h)  # [B, V=4, N, output_dim]
+        
+        # Debug: Log after output projection (every 10 epochs)
+        if hasattr(self, '_epoch_counter'):
+            epoch = getattr(self, '_epoch_counter', 0)
+            if epoch >= 29 and epoch <= 31:
+                import logging
+                logger = logging.getLogger(__name__)
+                emb_stats = node_embeddings.mean().item(), node_embeddings.std().item(), node_embeddings.abs().max().item(), node_embeddings.abs().min().item()
+                logger.warning(f"[D2-DEBUG-EPOCH{epoch}] After output_proj: node_emb stats - mean={emb_stats[0]:.6f}, std={emb_stats[1]:.6f}, max_abs={emb_stats[2]:.6f}, min_abs={emb_stats[3]:.6f}")
         
         # Global readout if batch is provided
         if batch is not None:
