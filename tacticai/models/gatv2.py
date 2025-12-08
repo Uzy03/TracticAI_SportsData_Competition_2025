@@ -1090,6 +1090,15 @@ class GATv2Network4View(nn.Module):
         
         # GATv2 layers with residual connections and layer normalization
         for i, layer in enumerate(self.gat_layers):
+            # Debug: Log before layer (every 10 epochs for first layer, or when values are large)
+            if i == 0 and hasattr(self, '_epoch_counter'):
+                epoch = getattr(self, '_epoch_counter', 0)
+                if epoch >= 29 and epoch <= 31:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    h_stats = h.mean().item(), h.std().item(), h.abs().max().item(), h.abs().min().item()
+                    logger.warning(f"[D2-DEBUG-EPOCH{epoch}] Before layer {i}: h stats - mean={h_stats[0]:.6f}, std={h_stats[1]:.6f}, max_abs={h_stats[2]:.6f}, min_abs={h_stats[3]:.6f}")
+            
             h_new = layer(h, edge_index, edge_attr)
             
             # Debug: Check for numerical instability
@@ -1140,8 +1149,26 @@ class GATv2Network4View(nn.Module):
                     logger = logging.getLogger(__name__)
                     logger.error(f"[D2-DEBUG] Layer {i}: NaN/Inf detected after LayerNorm! h stats: mean={h.mean().item():.6f}, std={h.std().item():.6f}, max={h.max().item():.6f}, min={h.min().item():.6f}")
         
+        # Debug: Log before output projection (every 10 epochs)
+        if hasattr(self, '_epoch_counter'):
+            epoch = getattr(self, '_epoch_counter', 0)
+            if epoch >= 29 and epoch <= 31:
+                import logging
+                logger = logging.getLogger(__name__)
+                h_stats = h.mean().item(), h.std().item(), h.abs().max().item(), h.abs().min().item()
+                logger.warning(f"[D2-DEBUG-EPOCH{epoch}] Before output_proj: h stats - mean={h_stats[0]:.6f}, std={h_stats[1]:.6f}, max_abs={h_stats[2]:.6f}, min_abs={h_stats[3]:.6f}")
+        
         # Output projection
         node_embeddings = self.output_proj(h)  # [B, V=4, N, output_dim]
+        
+        # Debug: Log after output projection (every 10 epochs)
+        if hasattr(self, '_epoch_counter'):
+            epoch = getattr(self, '_epoch_counter', 0)
+            if epoch >= 29 and epoch <= 31:
+                import logging
+                logger = logging.getLogger(__name__)
+                emb_stats = node_embeddings.mean().item(), node_embeddings.std().item(), node_embeddings.abs().max().item(), node_embeddings.abs().min().item()
+                logger.warning(f"[D2-DEBUG-EPOCH{epoch}] After output_proj: node_emb stats - mean={emb_stats[0]:.6f}, std={emb_stats[1]:.6f}, max_abs={emb_stats[2]:.6f}, min_abs={emb_stats[3]:.6f}")
         
         # Global readout if batch is provided
         if batch is not None:

@@ -26,7 +26,8 @@ train:
   epochs: 50  # 最大エポック数 (default=100) - 以前の良い結果の設定に合わせて50に変更
   amp: false  # Automatic Mixed Precisionの使用 (default=false) - 以前の良い結果の設定に合わせてfalseに変更
   grad_clip:
-    enabled: false  # 勾配クリッピングの有効化 (default=true) - 以前の良い結果の設定に合わせてfalseに変更（以前のログにはgrad_clipの設定がなかった）
+    enabled: true
+    max_norm: 1.0  # Clip gradients to prevent explosion  # 勾配クリッピングの有効化 (default=true) - 以前の良い結果の設定に合わせてfalseに変更（以前のログにはgrad_clipの設定がなかった）
 
 data:
   train_path: data/processed_ck/receiver_train/data.pickle  # 訓練データのパス - 以前の良い結果の設定に合わせてprocessed_ckに変更
