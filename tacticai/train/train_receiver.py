@@ -761,22 +761,33 @@ def train_epoch(
                     f"outputs.size(1)={outputs.size(1)} vs cm.size(0)={cm.size(0)}"
                 )
             
+            # DEBUG: Log before indexing
+            if b == 0:  # Only log first graph to avoid spam
+                logger = logging.getLogger("tacticai")
+                logger.info(
+                    f"[TRAIN-DEBUG] Graph {b} BEFORE indexing: "
+                    f"outputs[b].size()={outputs[b].size()}, cm.size()={cm.size()}, "
+                    f"cm.sum()={Ncand}, outputs.size()={outputs.size()}"
+                )
+            
             logits_b = outputs[b][cm] if Ncand > 0 else outputs[b]
             
             # CRITICAL: Verify logits_b size matches Ncand BEFORE appending to graph_outputs
             actual_logits_size = logits_b.numel()
             if actual_logits_size != Ncand:
                 logger = logging.getLogger("tacticai")
+                cm_true_indices = cm.nonzero(as_tuple=True)[0].tolist() if cm.any() else []
                 logger.error(
                     f"[TRAIN-ASSERT-FAIL] Graph {b}: logits_b size mismatch BEFORE append! "
                     f"outputs[b].size()={outputs[b].size()}, outputs[b][cm].size()={logits_b.size()}, "
                     f"logits_b.numel()={actual_logits_size}, cm.size()={cm.size()}, cm.sum()={Ncand}, "
-                    f"cm.true_indices={cm.nonzero(as_tuple=True)[0].tolist()[:10]}..."
+                    f"cm.true_indices={cm_true_indices}, outputs.size(1)={outputs.size(1)}"
                 )
                 raise AssertionError(
                     f"Graph {b}: logits_b size mismatch! "
                     f"logits_b.numel()={actual_logits_size} vs Ncand={Ncand}, "
-                    f"outputs[b].size()={outputs[b].size()}, cm.size()={cm.size()}"
+                    f"outputs[b].size()={outputs[b].size()}, cm.size()={cm.size()}, "
+                    f"outputs.size(1)={outputs.size(1)}"
                 )
             
             target_global = int(target[b].item())
@@ -846,7 +857,7 @@ def train_epoch(
 
         batch_loss_sum = 0.0
         graphs_in_batch = 0
-        for logits_b, target_b, Ncand_b in zip(graph_outputs, graph_targets, cand_counts):
+        for graph_idx, (logits_b, target_b, Ncand_b) in enumerate(zip(graph_outputs, graph_targets, cand_counts)):
             if logits_b.numel() == 0:
                 continue
             if logits_b.ndim not in (1, 2):
@@ -869,9 +880,19 @@ def train_epoch(
             if actual_logits_size != Ncand_b:
                 logger = logging.getLogger("tacticai")
                 logger.error(
-                    f"[TRAIN-ASSERT-FAIL] Graph {graphs_in_batch}: logits size mismatch! "
-                    f"logits_shape={lb.shape}, actual_size={actual_logits_size}, expected_Ncand={Ncand_b}"
+                    f"[TRAIN-ASSERT-FAIL] Graph {graphs_in_batch} (graph_idx={graph_idx}): logits size mismatch! "
+                    f"logits_b.shape={logits_b.shape}, lb.shape={lb.shape}, actual_size={actual_logits_size}, "
+                    f"expected_Ncand={Ncand_b}, logits_b.numel()={logits_b.numel()}, "
+                    f"len(graph_outputs)={len(graph_outputs)}, len(cand_counts)={len(cand_counts)}"
                 )
+                # Try to find which original batch index this corresponds to
+                if graph_idx < len(cand_mask):
+                    cm_debug = cand_mask[graph_idx]
+                    logger.error(
+                        f"[TRAIN-ASSERT-FAIL] Debug info for graph_idx={graph_idx}: "
+                        f"cand_mask[graph_idx].size()={cm_debug.size()}, cand_mask[graph_idx].sum()={cm_debug.sum().item()}, "
+                        f"outputs[graph_idx].size()={outputs[graph_idx].size() if graph_idx < outputs.size(0) else 'N/A'}"
+                    )
                 raise AssertionError(
                     f"Graph {graphs_in_batch}: logits size mismatch! "
                     f"logits_shape={lb.shape}, actual_size={actual_logits_size}, expected_Ncand={Ncand_b}"
