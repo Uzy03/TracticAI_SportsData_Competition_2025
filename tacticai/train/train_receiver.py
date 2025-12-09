@@ -762,6 +762,23 @@ def train_epoch(
                 )
             
             logits_b = outputs[b][cm] if Ncand > 0 else outputs[b]
+            
+            # CRITICAL: Verify logits_b size matches Ncand BEFORE appending to graph_outputs
+            actual_logits_size = logits_b.numel()
+            if actual_logits_size != Ncand:
+                logger = logging.getLogger("tacticai")
+                logger.error(
+                    f"[TRAIN-ASSERT-FAIL] Graph {b}: logits_b size mismatch BEFORE append! "
+                    f"outputs[b].size()={outputs[b].size()}, outputs[b][cm].size()={logits_b.size()}, "
+                    f"logits_b.numel()={actual_logits_size}, cm.size()={cm.size()}, cm.sum()={Ncand}, "
+                    f"cm.true_indices={cm.nonzero(as_tuple=True)[0].tolist()[:10]}..."
+                )
+                raise AssertionError(
+                    f"Graph {b}: logits_b size mismatch! "
+                    f"logits_b.numel()={actual_logits_size} vs Ncand={Ncand}, "
+                    f"outputs[b].size()={outputs[b].size()}, cm.size()={cm.size()}"
+                )
+            
             target_global = int(target[b].item())
 
             cand_indices = torch.arange(outputs.size(1), device=outputs.device)[cm]
