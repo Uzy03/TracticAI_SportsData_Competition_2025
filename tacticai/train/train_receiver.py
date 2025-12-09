@@ -1279,6 +1279,7 @@ def validate_epoch(
 
             graph_outputs: list[torch.Tensor] = []
             graph_targets: list[torch.Tensor] = []
+            batch_cand_counts: list[int] = []  # Local cand_counts for this batch only
 
             for b in range(B):
                 cm = cand_mask[b]
@@ -1404,13 +1405,14 @@ def validate_epoch(
 
                 graph_outputs.append(logits_b.unsqueeze(0))
                 graph_targets.append(torch.tensor([cand_target_idx], device=outputs.device))
-                cand_counts.append(Ncand)
+                batch_cand_counts.append(Ncand)
+                cand_counts.append(Ncand)  # epoch-level stats
             # === end build ===
             
             # Compute loss per graph (TacticAI spec: softmax over candidates)
             batch_loss_sum = 0.0
             graphs_in_batch = 0
-            for logits_b, target_b, Ncand_b in zip(graph_outputs, graph_targets, cand_counts):
+            for logits_b, target_b, Ncand_b in zip(graph_outputs, graph_targets, batch_cand_counts):
                 if logits_b.numel() == 0:
                     continue
                     
