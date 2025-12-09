@@ -596,6 +596,19 @@ def train_epoch(
 
         batch_size = data["batch"].max().item() + 1
         nodes_per_graph = outputs.numel() // max(1, batch_size)
+        
+        # CRITICAL: Verify outputs can be reshaped correctly
+        if outputs.numel() % batch_size != 0:
+            logger = logging.getLogger("tacticai")
+            logger.error(
+                f"[TRAIN-ASSERT-FAIL] outputs.numel()={outputs.numel()} is not divisible by batch_size={batch_size}! "
+                f"outputs.shape={outputs.shape}, cannot reshape to [batch_size, nodes_per_graph]"
+            )
+            raise AssertionError(
+                f"outputs.numel()={outputs.numel()} is not divisible by batch_size={batch_size}! "
+                f"outputs.shape={outputs.shape}"
+            )
+        
         outputs = outputs.view(batch_size, nodes_per_graph)
 
         team_tensor = data.get("team")
@@ -734,6 +747,20 @@ def train_epoch(
         for b in range(B):
             cm = cand_mask[b]
             Ncand = int(cm.sum().item())
+            
+            # CRITICAL: Verify outputs[b] and cm have compatible sizes
+            if outputs.size(1) != cm.size(0):
+                logger = logging.getLogger("tacticai")
+                logger.error(
+                    f"[TRAIN-ASSERT-FAIL] Graph {b}: outputs size mismatch! "
+                    f"outputs[b].size()={outputs[b].size()}, outputs.size(1)={outputs.size(1)}, "
+                    f"cm.size(0)={cm.size(0)}, batch_size={B}, nodes_per_graph={outputs.size(1)}"
+                )
+                raise AssertionError(
+                    f"Graph {b}: outputs[b] and cand_mask[b] size mismatch! "
+                    f"outputs.size(1)={outputs.size(1)} vs cm.size(0)={cm.size(0)}"
+                )
+            
             logits_b = outputs[b][cm] if Ncand > 0 else outputs[b]
             target_global = int(target[b].item())
 
