@@ -743,6 +743,7 @@ def train_epoch(
 
         graph_outputs: list[torch.Tensor] = []
         graph_targets: list[torch.Tensor] = []
+        batch_cand_counts: list[int] = []  # Local cand_counts for this batch only
 
         for b in range(B):
             cm = cand_mask[b]
@@ -852,12 +853,13 @@ def train_epoch(
 
             graph_outputs.append(logits_b.unsqueeze(0))
             graph_targets.append(torch.tensor([cand_target_idx], device=outputs.device))
-            cand_counts.append(Ncand)
+            batch_cand_counts.append(Ncand)
+            cand_counts.append(Ncand)  # Also append to epoch-level cand_counts for statistics
         # === end build ===
 
         batch_loss_sum = 0.0
         graphs_in_batch = 0
-        for graph_idx, (logits_b, target_b, Ncand_b) in enumerate(zip(graph_outputs, graph_targets, cand_counts)):
+        for graph_idx, (logits_b, target_b, Ncand_b) in enumerate(zip(graph_outputs, graph_targets, batch_cand_counts)):
             if logits_b.numel() == 0:
                 continue
             if logits_b.ndim not in (1, 2):
