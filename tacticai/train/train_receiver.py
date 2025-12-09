@@ -596,6 +596,19 @@ def train_epoch(
 
         batch_size = data["batch"].max().item() + 1
         nodes_per_graph = outputs.numel() // max(1, batch_size)
+        
+        # CRITICAL: Verify outputs can be reshaped correctly
+        if outputs.numel() % batch_size != 0:
+            logger = logging.getLogger("tacticai")
+            logger.error(
+                f"[TRAIN-ASSERT-FAIL] outputs.numel()={outputs.numel()} is not divisible by batch_size={batch_size}! "
+                f"outputs.shape={outputs.shape}, cannot reshape to [batch_size, nodes_per_graph]"
+            )
+            raise AssertionError(
+                f"outputs.numel()={outputs.numel()} is not divisible by batch_size={batch_size}! "
+                f"outputs.shape={outputs.shape}"
+            )
+        
         outputs = outputs.view(batch_size, nodes_per_graph)
 
         team_tensor = data.get("team")
@@ -730,18 +743,60 @@ def train_epoch(
 
         graph_outputs: list[torch.Tensor] = []
         graph_targets: list[torch.Tensor] = []
+        batch_cand_counts: list[int] = []  # Local cand_counts for this batch only
 
         for b in range(B):
             cm = cand_mask[b]
             Ncand = int(cm.sum().item())
+            
+            # CRITICAL: Verify outputs[b] and cm have compatible sizes
+            if outputs.size(1) != cm.size(0):
+                logger = logging.getLogger("tacticai")
+                logger.error(
+                    f"[TRAIN-ASSERT-FAIL] Graph {b}: outputs size mismatch! "
+                    f"outputs[b].size()={outputs[b].size()}, outputs.size(1)={outputs.size(1)}, "
+                    f"cm.size(0)={cm.size(0)}, batch_size={B}, nodes_per_graph={outputs.size(1)}"
+                )
+                raise AssertionError(
+                    f"Graph {b}: outputs[b] and cand_mask[b] size mismatch! "
+                    f"outputs.size(1)={outputs.size(1)} vs cm.size(0)={cm.size(0)}"
+                )
+            
+            # DEBUG: Log before indexing
+            if b == 0:  # Only log first graph to avoid spam
+                logger = logging.getLogger("tacticai")
+                logger.info(
+                    f"[TRAIN-DEBUG] Graph {b} BEFORE indexing: "
+                    f"outputs[b].size()={outputs[b].size()}, cm.size()={cm.size()}, "
+                    f"cm.sum()={Ncand}, outputs.size()={outputs.size()}"
+                )
+            
             logits_b = outputs[b][cm] if Ncand > 0 else outputs[b]
+            
+            # CRITICAL: Verify logits_b size matches Ncand BEFORE appending to graph_outputs
+            actual_logits_size = logits_b.numel()
+            if actual_logits_size != Ncand:
+                logger = logging.getLogger("tacticai")
+                cm_true_indices = cm.nonzero(as_tuple=True)[0].tolist() if cm.any() else []
+                logger.error(
+                    f"[TRAIN-ASSERT-FAIL] Graph {b}: logits_b size mismatch BEFORE append! "
+                    f"outputs[b].size()={outputs[b].size()}, outputs[b][cm].size()={logits_b.size()}, "
+                    f"logits_b.numel()={actual_logits_size}, cm.size()={cm.size()}, cm.sum()={Ncand}, "
+                    f"cm.true_indices={cm_true_indices}, outputs.size(1)={outputs.size(1)}"
+                )
+                raise AssertionError(
+                    f"Graph {b}: logits_b size mismatch! "
+                    f"logits_b.numel()={actual_logits_size} vs Ncand={Ncand}, "
+                    f"outputs[b].size()={outputs[b].size()}, cm.size()={cm.size()}, "
+                    f"outputs.size(1)={outputs.size(1)}"
+                )
+            
             target_global = int(target[b].item())
 
             cand_indices = torch.arange(outputs.size(1), device=outputs.device)[cm]
-            if (cand_indices == target_global).any():
-                cand_target_idx = int((cand_indices == target_global).nonzero(as_tuple=True)[0].item())
-            else:
-                cand_target_idx = 0
+            
+            # CRITICAL: Verify target_global is in cand_mask
+            if target_global >= cm.size(0) or not cm[target_global].item():
                 target_team_repr = "NA"
                 kicker_team_repr = "NA"
                 if team_labels is not None and 0 <= target_global < team_labels.size(1):
@@ -749,20 +804,41 @@ def train_epoch(
                 if kicker_team is not None and b < kicker_team.size(0):
                     kicker_team_repr = int(kicker_team[b].item())
                 
-                # DEBUG: Log warning for single sample mode
-                if debug_single_sample:
-                    logger = logging.getLogger(__name__)
-                    logger.warning(
-                        f"[TRAIN-DEBUG-SINGLE] WARN: target {target_global} not in candidates for graph {b} "
-                        f"(target_team={target_team_repr}, kicker_team={kicker_team_repr}, "
-                        f"cand_true_sum={int(cm.sum().item())}, cand_indices={cand_indices.tolist()})"
-                    )
-                else:
-                    print(
-                        f"[WARN] target {target_global} not in candidates for graph {b} "
-                        f"(target_team={target_team_repr}, kicker_team={kicker_team_repr}, "
-                        f"cand_true_sum={int(cm.sum().item())})"
-                    )
+                logger = logging.getLogger("tacticai")
+                logger.error(
+                    f"[TRAIN-ASSERT-FAIL] Graph {b}: target_global={target_global} not in cand_mask! "
+                    f"cand_mask.sum()={Ncand}, cand_indices={cand_indices.tolist()}, "
+                    f"target_team={target_team_repr}, kicker_team={kicker_team_repr}"
+                )
+                # Skip this graph to avoid incorrect loss calculation
+                continue
+            
+            # Convert absolute target ID to local candidate ID
+            target_in_cand_mask = bool((cand_indices == target_global).any().item())
+            if not target_in_cand_mask:
+                logger = logging.getLogger("tacticai")
+                logger.error(
+                    f"[TRAIN-ASSERT-FAIL] Graph {b}: target_global={target_global} must be in cand_indices={cand_indices.tolist()}, "
+                    f"cand_mask.sum()={Ncand}"
+                )
+                raise AssertionError(
+                    f"Graph {b}: target_global={target_global} must be in cand_indices={cand_indices.tolist()}, "
+                    f"cand_mask.sum()={Ncand}"
+                )
+            
+            cand_target_idx = int((cand_indices == target_global).nonzero(as_tuple=True)[0].item())
+            
+            # CRITICAL: Verify cand_target_idx is within valid range
+            if not (0 <= cand_target_idx < Ncand):
+                logger = logging.getLogger("tacticai")
+                logger.error(
+                    f"[TRAIN-ASSERT-FAIL] Graph {b}: cand_target_idx={cand_target_idx} must be in [0, {Ncand}), "
+                    f"target_global={target_global}, cand_indices={cand_indices.tolist()}"
+                )
+                raise AssertionError(
+                    f"Graph {b}: cand_target_idx={cand_target_idx} must be in [0, {Ncand}), "
+                    f"target_global={target_global}, cand_indices={cand_indices.tolist()}"
+                )
             
             # DEBUG: Log cand_target_idx calculation for single sample mode
             if debug_single_sample and b == 0:
@@ -770,18 +846,20 @@ def train_epoch(
                 logger.info(
                     f"[TRAIN-DEBUG-SINGLE] Graph {b} target mapping:\n"
                     f"  target_global={target_global}, cand_indices={cand_indices.tolist()}\n"
-                    f"  target_in_cand={(cand_indices == target_global).any().item()}\n"
-                    f"  cand_target_idx={cand_target_idx}, Ncand={Ncand}"
+                    f"  target_in_cand={target_in_cand_mask}\n"
+                    f"  cand_target_idx={cand_target_idx}, Ncand={Ncand}\n"
+                    f"  VERIFIED: 0 <= {cand_target_idx} < {Ncand}"
                 )
 
             graph_outputs.append(logits_b.unsqueeze(0))
             graph_targets.append(torch.tensor([cand_target_idx], device=outputs.device))
-            cand_counts.append(Ncand)
+            batch_cand_counts.append(Ncand)
+            cand_counts.append(Ncand)  # Also append to epoch-level cand_counts for statistics
         # === end build ===
 
         batch_loss_sum = 0.0
         graphs_in_batch = 0
-        for logits_b, target_b in zip(graph_outputs, graph_targets):
+        for graph_idx, (logits_b, target_b, Ncand_b) in enumerate(zip(graph_outputs, graph_targets, batch_cand_counts)):
             if logits_b.numel() == 0:
                 continue
             if logits_b.ndim not in (1, 2):
@@ -798,16 +876,54 @@ def train_epoch(
             pred_top1 = torch.argmax(lb, dim=1)
             target_idx = int(target_tensor.item())
             
+            # CRITICAL: Verify target_idx (local candidate ID) is within valid range
+            # Also verify that logits_b size matches Ncand_b
+            actual_logits_size = lb.size(-1) if lb.ndim >= 1 else lb.numel()
+            if actual_logits_size != Ncand_b:
+                logger = logging.getLogger("tacticai")
+                logger.error(
+                    f"[TRAIN-ASSERT-FAIL] Graph {graphs_in_batch} (graph_idx={graph_idx}): logits size mismatch! "
+                    f"logits_b.shape={logits_b.shape}, lb.shape={lb.shape}, actual_size={actual_logits_size}, "
+                    f"expected_Ncand={Ncand_b}, logits_b.numel()={logits_b.numel()}, "
+                    f"len(graph_outputs)={len(graph_outputs)}, len(cand_counts)={len(cand_counts)}"
+                )
+                # Try to find which original batch index this corresponds to
+                if graph_idx < len(cand_mask):
+                    cm_debug = cand_mask[graph_idx]
+                    logger.error(
+                        f"[TRAIN-ASSERT-FAIL] Debug info for graph_idx={graph_idx}: "
+                        f"cand_mask[graph_idx].size()={cm_debug.size()}, cand_mask[graph_idx].sum()={cm_debug.sum().item()}, "
+                        f"outputs[graph_idx].size()={outputs[graph_idx].size() if graph_idx < outputs.size(0) else 'N/A'}"
+                    )
+                raise AssertionError(
+                    f"Graph {graphs_in_batch}: logits size mismatch! "
+                    f"logits_shape={lb.shape}, actual_size={actual_logits_size}, expected_Ncand={Ncand_b}"
+                )
+            
+            if not (0 <= target_idx < Ncand_b):
+                logger = logging.getLogger("tacticai")
+                logger.error(
+                    f"[TRAIN-ASSERT-FAIL] Training loss calculation (graph {graphs_in_batch}): "
+                    f"target_idx={target_idx} must be in [0, {Ncand_b}), "
+                    f"logits_shape={lb.shape}, actual_logits_size={actual_logits_size}"
+                )
+                raise AssertionError(
+                    f"Training loss calculation (graph {graphs_in_batch}): "
+                    f"target_idx={target_idx} must be in [0, {Ncand_b}), "
+                    f"logits_shape={lb.shape}, actual_logits_size={actual_logits_size}"
+                )
+            
             # DEBUG: Detailed logging for single sample mode
             if debug_single_sample and graphs_in_batch == 0:
-                logger = logging.getLogger(__name__)
+                logger = logging.getLogger("tacticai")
                 logger.info(
                     f"[TRAIN-DEBUG-SINGLE] Graph {graphs_in_batch}:\n"
                     f"  logits_b.shape={lb.shape}, logits_b={lb.tolist()}\n"
                     f"  logits_b.mean()={lb.mean().item():.6f}, logits_b.std()={lb.std().item():.6f}\n"
                     f"  pred_top1={pred_top1.item()}, target_idx={target_idx}\n"
                     f"  match={pred_top1.item() == target_idx}\n"
-                    f"  cand_target_idx={target_idx}, Ncand={Ncand}"
+                    f"  cand_target_idx={target_idx}, Ncand={Ncand_b}\n"
+                    f"  VERIFIED: 0 <= {target_idx} < {Ncand_b}"
                 )
             
             acc_correct += int(pred_top1.item() == target_idx)
@@ -1163,6 +1279,7 @@ def validate_epoch(
 
             graph_outputs: list[torch.Tensor] = []
             graph_targets: list[torch.Tensor] = []
+            batch_cand_counts: list[int] = []  # Local cand_counts for this batch only
 
             for b in range(B):
                 cm = cand_mask[b]
@@ -1188,43 +1305,47 @@ def validate_epoch(
                     )
 
                 cand_indices = torch.arange(outputs.size(1), device=outputs.device)[cm]
-                if (cand_indices == target_global).any():
-                    cand_target_idx = int((cand_indices == target_global).nonzero(as_tuple=True)[0].item())
-                else:
-                    cand_target_idx = 0
-                    target_team_repr = "NA"
-                    kicker_team_repr = "NA"
-                    if team_labels is not None and 0 <= target_global < team_labels.size(1):
-                        target_team_repr = int(team_labels[b, target_global].item())
-                        tt = target_team_repr
-                    else:
-                        tt = None
-                    if kicker_team is not None and b < kicker_team.size(0):
-                        kicker_team_repr = int(kicker_team[b].item())
-                        kt = kicker_team_repr
-                    else:
-                        kt = None
-
-                    if tt is not None and kt is not None and tt != kt:
-                        stats["invalid_team_mismatch"] += 1
-                        if logger is not None and (int(stats["invalid_team_mismatch"]) % 50) == 1:
-                            AUDIT_LOGGER.warning(
-                                f"[AUDIT] team_mismatch: g={b}, tgt={target_global}, kicker_team={kt}, "
-                                f"target_team={tt}, cand_true_sum={int(cm.sum().item())} (val)"
-                            )
-                    else:
-                        stats["invalid_target_not_in_cand"] += 1
-                        if logger is not None and (int(stats["invalid_target_not_in_cand"]) % 50) == 1:
-                            AUDIT_LOGGER.warning(
-                                f"[AUDIT] target_not_in_cand: g={b}, tgt={target_global}, kicker_team={kt}, "
-                                f"cand_true_sum={int(cm.sum().item())} (val)"
-                            )
-
-                    print(
-                        f"[WARN] target {target_global} not in candidates for graph {b} (val) "
-                        f"(target_team={target_team_repr}, kicker_team={kicker_team_repr}, "
-                        f"cand_true_sum={int(cm.sum().item())})"
+                
+                # CRITICAL: Verify target_global is in cand_indices (already checked above, but double-check)
+                target_in_cand_mask_verify = bool((cand_indices == target_global).any().item())
+                if not target_in_cand_mask_verify:
+                    logger = logging.getLogger("tacticai")
+                    logger.error(
+                        f"[VAL-ASSERT-FAIL] Graph {b} (graph_id={graph_id}): target_global={target_global} not in cand_indices! "
+                        f"cand_mask.sum()={Ncand}, cand_indices={cand_indices.tolist()}, "
+                        f"but cand_mask[target] was True (inconsistency detected)"
                     )
+                    raise AssertionError(
+                        f"Graph {b} (graph_id={graph_id}): target_global={target_global} must be in cand_indices={cand_indices.tolist()}, "
+                        f"cand_mask.sum()={Ncand}"
+                    )
+                
+                cand_target_idx = int((cand_indices == target_global).nonzero(as_tuple=True)[0].item())
+                
+                # CRITICAL: Verify cand_target_idx is within valid range
+                if not (0 <= cand_target_idx < Ncand):
+                    logger = logging.getLogger("tacticai")
+                    logger.error(
+                        f"[VAL-ASSERT-FAIL] Graph {b} (graph_id={graph_id}): cand_target_idx={cand_target_idx} must be in [0, {Ncand}), "
+                        f"target_global={target_global}, cand_indices={cand_indices.tolist()}"
+                    )
+                    raise AssertionError(
+                        f"Graph {b} (graph_id={graph_id}): cand_target_idx={cand_target_idx} must be in [0, {Ncand}), "
+                        f"target_global={target_global}, cand_indices={cand_indices.tolist()}"
+                    )
+                
+                target_team_repr = "NA"
+                kicker_team_repr = "NA"
+                if team_labels is not None and 0 <= target_global < team_labels.size(1):
+                    target_team_repr = int(team_labels[b, target_global].item())
+                    tt = target_team_repr
+                else:
+                    tt = None
+                if kicker_team is not None and b < kicker_team.size(0):
+                    kicker_team_repr = int(kicker_team[b].item())
+                    kt = kicker_team_repr
+                else:
+                    kt = None
 
                 # DEBUG: Output detailed information for first batch, first sample
                 if batch_idx == 0 and b == 0 and logger is not None:
@@ -1284,13 +1405,14 @@ def validate_epoch(
 
                 graph_outputs.append(logits_b.unsqueeze(0))
                 graph_targets.append(torch.tensor([cand_target_idx], device=outputs.device))
-                cand_counts.append(Ncand)
+                batch_cand_counts.append(Ncand)
+                cand_counts.append(Ncand)  # epoch-level stats
             # === end build ===
             
             # Compute loss per graph (TacticAI spec: softmax over candidates)
             batch_loss_sum = 0.0
             graphs_in_batch = 0
-            for logits_b, target_b in zip(graph_outputs, graph_targets):
+            for logits_b, target_b, Ncand_b in zip(graph_outputs, graph_targets, batch_cand_counts):
                 if logits_b.numel() == 0:
                     continue
                     
@@ -1308,6 +1430,33 @@ def validate_epoch(
                 pred_top1 = torch.argmax(lb, dim=1)
                 target_idx = int(target_tensor.item())
                 
+                # CRITICAL: Verify target_idx (local candidate ID) is within valid range
+                # Also verify that logits_b size matches Ncand_b
+                actual_logits_size = lb.size(-1) if lb.ndim >= 1 else lb.numel()
+                if actual_logits_size != Ncand_b:
+                    logger = logging.getLogger("tacticai")
+                    logger.error(
+                        f"[VAL-ASSERT-FAIL] Batch {batch_idx}, graph {graphs_in_batch}: logits size mismatch! "
+                        f"logits_shape={lb.shape}, actual_size={actual_logits_size}, expected_Ncand={Ncand_b}"
+                    )
+                    raise AssertionError(
+                        f"Batch {batch_idx}, graph {graphs_in_batch}: logits size mismatch! "
+                        f"logits_shape={lb.shape}, actual_size={actual_logits_size}, expected_Ncand={Ncand_b}"
+                    )
+                
+                if not (0 <= target_idx < Ncand_b):
+                    logger = logging.getLogger("tacticai")
+                    logger.error(
+                        f"[VAL-ASSERT-FAIL] Validation loss calculation (batch={batch_idx}, graph={graphs_in_batch}): "
+                        f"target_idx={target_idx} must be in [0, {Ncand_b}), "
+                        f"logits_shape={lb.shape}, actual_logits_size={actual_logits_size}"
+                    )
+                    raise AssertionError(
+                        f"Validation loss calculation (batch={batch_idx}, graph={graphs_in_batch}): "
+                        f"target_idx={target_idx} must be in [0, {Ncand_b}), "
+                        f"logits_shape={lb.shape}, actual_logits_size={actual_logits_size}"
+                    )
+                
                 # DEBUG: Detailed logging for single sample mode
                 if debug_single_sample and graphs_in_batch == 0 and logger is not None:
                     logger.info(
@@ -1315,7 +1464,9 @@ def validate_epoch(
                         f"  logits_b.shape={lb.shape}, logits_b={lb.tolist()}\n"
                         f"  logits_b.mean()={lb.mean().item():.6f}, logits_b.std()={lb.std().item():.6f}\n"
                         f"  pred_top1={pred_top1.item()}, target_idx={target_idx}\n"
-                        f"  match={pred_top1.item() == target_idx}"
+                        f"  match={pred_top1.item() == target_idx}\n"
+                        f"  cand_target_idx={target_idx}, Ncand={Ncand_b}\n"
+                        f"  VERIFIED: 0 <= {target_idx} < {Ncand_b}"
                     )
                 
                 acc_correct += int(pred_top1.item() == target_idx)
