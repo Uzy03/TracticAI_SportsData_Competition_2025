@@ -802,7 +802,7 @@ def train_epoch(
 
         batch_loss_sum = 0.0
         graphs_in_batch = 0
-        for logits_b, target_b in zip(graph_outputs, graph_targets):
+        for logits_b, target_b, Ncand_b in zip(graph_outputs, graph_targets, cand_counts):
             if logits_b.numel() == 0:
                 continue
             if logits_b.ndim not in (1, 2):
@@ -820,28 +820,43 @@ def train_epoch(
             target_idx = int(target_tensor.item())
             
             # CRITICAL: Verify target_idx (local candidate ID) is within valid range
-            if not (0 <= target_idx < Ncand):
+            # Also verify that logits_b size matches Ncand_b
+            actual_logits_size = lb.size(-1) if lb.ndim >= 1 else lb.numel()
+            if actual_logits_size != Ncand_b:
                 logger = logging.getLogger("tacticai")
                 logger.error(
-                    f"[TRAIN-ASSERT-FAIL] Training loss calculation: target_idx={target_idx} must be in [0, {Ncand}), "
-                    f"logits_shape={lb.shape}"
+                    f"[TRAIN-ASSERT-FAIL] Graph {graphs_in_batch}: logits size mismatch! "
+                    f"logits_shape={lb.shape}, actual_size={actual_logits_size}, expected_Ncand={Ncand_b}"
                 )
                 raise AssertionError(
-                    f"Training loss calculation: target_idx={target_idx} must be in [0, {Ncand}), "
-                    f"logits_shape={lb.shape}"
+                    f"Graph {graphs_in_batch}: logits size mismatch! "
+                    f"logits_shape={lb.shape}, actual_size={actual_logits_size}, expected_Ncand={Ncand_b}"
+                )
+            
+            if not (0 <= target_idx < Ncand_b):
+                logger = logging.getLogger("tacticai")
+                logger.error(
+                    f"[TRAIN-ASSERT-FAIL] Training loss calculation (graph {graphs_in_batch}): "
+                    f"target_idx={target_idx} must be in [0, {Ncand_b}), "
+                    f"logits_shape={lb.shape}, actual_logits_size={actual_logits_size}"
+                )
+                raise AssertionError(
+                    f"Training loss calculation (graph {graphs_in_batch}): "
+                    f"target_idx={target_idx} must be in [0, {Ncand_b}), "
+                    f"logits_shape={lb.shape}, actual_logits_size={actual_logits_size}"
                 )
             
             # DEBUG: Detailed logging for single sample mode
             if debug_single_sample and graphs_in_batch == 0:
-                logger = logging.getLogger(__name__)
+                logger = logging.getLogger("tacticai")
                 logger.info(
                     f"[TRAIN-DEBUG-SINGLE] Graph {graphs_in_batch}:\n"
                     f"  logits_b.shape={lb.shape}, logits_b={lb.tolist()}\n"
                     f"  logits_b.mean()={lb.mean().item():.6f}, logits_b.std()={lb.std().item():.6f}\n"
                     f"  pred_top1={pred_top1.item()}, target_idx={target_idx}\n"
                     f"  match={pred_top1.item() == target_idx}\n"
-                    f"  cand_target_idx={target_idx}, Ncand={Ncand}\n"
-                    f"  VERIFIED: 0 <= {target_idx} < {Ncand}"
+                    f"  cand_target_idx={target_idx}, Ncand={Ncand_b}\n"
+                    f"  VERIFIED: 0 <= {target_idx} < {Ncand_b}"
                 )
             
             acc_correct += int(pred_top1.item() == target_idx)
@@ -1328,7 +1343,7 @@ def validate_epoch(
             # Compute loss per graph (TacticAI spec: softmax over candidates)
             batch_loss_sum = 0.0
             graphs_in_batch = 0
-            for logits_b, target_b in zip(graph_outputs, graph_targets):
+            for logits_b, target_b, Ncand_b in zip(graph_outputs, graph_targets, cand_counts):
                 if logits_b.numel() == 0:
                     continue
                     
@@ -1347,15 +1362,30 @@ def validate_epoch(
                 target_idx = int(target_tensor.item())
                 
                 # CRITICAL: Verify target_idx (local candidate ID) is within valid range
-                if not (0 <= target_idx < Ncand):
+                # Also verify that logits_b size matches Ncand_b
+                actual_logits_size = lb.size(-1) if lb.ndim >= 1 else lb.numel()
+                if actual_logits_size != Ncand_b:
                     logger = logging.getLogger("tacticai")
                     logger.error(
-                        f"[VAL-ASSERT-FAIL] Validation loss calculation (batch={batch_idx}, graph={g}): "
-                        f"target_idx={target_idx} must be in [0, {Ncand}), logits_shape={lb.shape}"
+                        f"[VAL-ASSERT-FAIL] Batch {batch_idx}, graph {graphs_in_batch}: logits size mismatch! "
+                        f"logits_shape={lb.shape}, actual_size={actual_logits_size}, expected_Ncand={Ncand_b}"
                     )
                     raise AssertionError(
-                        f"Validation loss calculation (batch={batch_idx}, graph={g}): "
-                        f"target_idx={target_idx} must be in [0, {Ncand}), logits_shape={lb.shape}"
+                        f"Batch {batch_idx}, graph {graphs_in_batch}: logits size mismatch! "
+                        f"logits_shape={lb.shape}, actual_size={actual_logits_size}, expected_Ncand={Ncand_b}"
+                    )
+                
+                if not (0 <= target_idx < Ncand_b):
+                    logger = logging.getLogger("tacticai")
+                    logger.error(
+                        f"[VAL-ASSERT-FAIL] Validation loss calculation (batch={batch_idx}, graph={graphs_in_batch}): "
+                        f"target_idx={target_idx} must be in [0, {Ncand_b}), "
+                        f"logits_shape={lb.shape}, actual_logits_size={actual_logits_size}"
+                    )
+                    raise AssertionError(
+                        f"Validation loss calculation (batch={batch_idx}, graph={graphs_in_batch}): "
+                        f"target_idx={target_idx} must be in [0, {Ncand_b}), "
+                        f"logits_shape={lb.shape}, actual_logits_size={actual_logits_size}"
                     )
                 
                 # DEBUG: Detailed logging for single sample mode
@@ -1366,7 +1396,8 @@ def validate_epoch(
                         f"  logits_b.mean()={lb.mean().item():.6f}, logits_b.std()={lb.std().item():.6f}\n"
                         f"  pred_top1={pred_top1.item()}, target_idx={target_idx}\n"
                         f"  match={pred_top1.item() == target_idx}\n"
-                        f"  VERIFIED: 0 <= {target_idx} < {Ncand}"
+                        f"  cand_target_idx={target_idx}, Ncand={Ncand_b}\n"
+                        f"  VERIFIED: 0 <= {target_idx} < {Ncand_b}"
                     )
                 
                 acc_correct += int(pred_top1.item() == target_idx)
