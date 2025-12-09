@@ -748,7 +748,7 @@ def train_epoch(
                 if kicker_team is not None and b < kicker_team.size(0):
                     kicker_team_repr = int(kicker_team[b].item())
                 
-                logger = logging.getLogger(__name__)
+                logger = logging.getLogger("tacticai")
                 logger.error(
                     f"[TRAIN-ASSERT-FAIL] Graph {b}: target_global={target_global} not in cand_mask! "
                     f"cand_mask.sum()={Ncand}, cand_indices={cand_indices.tolist()}, "
@@ -759,18 +759,30 @@ def train_epoch(
             
             # Convert absolute target ID to local candidate ID
             target_in_cand_mask = bool((cand_indices == target_global).any().item())
-            assert target_in_cand_mask, (
-                f"Graph {b}: target_global={target_global} must be in cand_indices={cand_indices.tolist()}, "
-                f"cand_mask.sum()={Ncand}"
-            )
+            if not target_in_cand_mask:
+                logger = logging.getLogger("tacticai")
+                logger.error(
+                    f"[TRAIN-ASSERT-FAIL] Graph {b}: target_global={target_global} must be in cand_indices={cand_indices.tolist()}, "
+                    f"cand_mask.sum()={Ncand}"
+                )
+                raise AssertionError(
+                    f"Graph {b}: target_global={target_global} must be in cand_indices={cand_indices.tolist()}, "
+                    f"cand_mask.sum()={Ncand}"
+                )
             
             cand_target_idx = int((cand_indices == target_global).nonzero(as_tuple=True)[0].item())
             
             # CRITICAL: Verify cand_target_idx is within valid range
-            assert 0 <= cand_target_idx < Ncand, (
-                f"Graph {b}: cand_target_idx={cand_target_idx} must be in [0, {Ncand}), "
-                f"target_global={target_global}, cand_indices={cand_indices.tolist()}"
-            )
+            if not (0 <= cand_target_idx < Ncand):
+                logger = logging.getLogger("tacticai")
+                logger.error(
+                    f"[TRAIN-ASSERT-FAIL] Graph {b}: cand_target_idx={cand_target_idx} must be in [0, {Ncand}), "
+                    f"target_global={target_global}, cand_indices={cand_indices.tolist()}"
+                )
+                raise AssertionError(
+                    f"Graph {b}: cand_target_idx={cand_target_idx} must be in [0, {Ncand}), "
+                    f"target_global={target_global}, cand_indices={cand_indices.tolist()}"
+                )
             
             # DEBUG: Log cand_target_idx calculation for single sample mode
             if debug_single_sample and b == 0:
@@ -808,10 +820,16 @@ def train_epoch(
             target_idx = int(target_tensor.item())
             
             # CRITICAL: Verify target_idx (local candidate ID) is within valid range
-            assert 0 <= target_idx < Ncand, (
-                f"Training loss calculation: target_idx={target_idx} must be in [0, {Ncand}), "
-                f"logits_shape={lb.shape}"
-            )
+            if not (0 <= target_idx < Ncand):
+                logger = logging.getLogger("tacticai")
+                logger.error(
+                    f"[TRAIN-ASSERT-FAIL] Training loss calculation: target_idx={target_idx} must be in [0, {Ncand}), "
+                    f"logits_shape={lb.shape}"
+                )
+                raise AssertionError(
+                    f"Training loss calculation: target_idx={target_idx} must be in [0, {Ncand}), "
+                    f"logits_shape={lb.shape}"
+                )
             
             # DEBUG: Detailed logging for single sample mode
             if debug_single_sample and graphs_in_batch == 0:
@@ -1208,7 +1226,7 @@ def validate_epoch(
                 # CRITICAL: Verify target_global is in cand_indices (already checked above, but double-check)
                 target_in_cand_mask_verify = bool((cand_indices == target_global).any().item())
                 if not target_in_cand_mask_verify:
-                    logger = logging.getLogger(__name__)
+                    logger = logging.getLogger("tacticai")
                     logger.error(
                         f"[VAL-ASSERT-FAIL] Graph {b} (graph_id={graph_id}): target_global={target_global} not in cand_indices! "
                         f"cand_mask.sum()={Ncand}, cand_indices={cand_indices.tolist()}, "
@@ -1222,10 +1240,16 @@ def validate_epoch(
                 cand_target_idx = int((cand_indices == target_global).nonzero(as_tuple=True)[0].item())
                 
                 # CRITICAL: Verify cand_target_idx is within valid range
-                assert 0 <= cand_target_idx < Ncand, (
-                    f"Graph {b} (graph_id={graph_id}): cand_target_idx={cand_target_idx} must be in [0, {Ncand}), "
-                    f"target_global={target_global}, cand_indices={cand_indices.tolist()}"
-                )
+                if not (0 <= cand_target_idx < Ncand):
+                    logger = logging.getLogger("tacticai")
+                    logger.error(
+                        f"[VAL-ASSERT-FAIL] Graph {b} (graph_id={graph_id}): cand_target_idx={cand_target_idx} must be in [0, {Ncand}), "
+                        f"target_global={target_global}, cand_indices={cand_indices.tolist()}"
+                    )
+                    raise AssertionError(
+                        f"Graph {b} (graph_id={graph_id}): cand_target_idx={cand_target_idx} must be in [0, {Ncand}), "
+                        f"target_global={target_global}, cand_indices={cand_indices.tolist()}"
+                    )
                 
                 target_team_repr = "NA"
                 kicker_team_repr = "NA"
@@ -1323,10 +1347,16 @@ def validate_epoch(
                 target_idx = int(target_tensor.item())
                 
                 # CRITICAL: Verify target_idx (local candidate ID) is within valid range
-                assert 0 <= target_idx < Ncand, (
-                    f"Validation loss calculation (batch={batch_idx}, graph={g}): "
-                    f"target_idx={target_idx} must be in [0, {Ncand}), logits_shape={lb.shape}"
-                )
+                if not (0 <= target_idx < Ncand):
+                    logger = logging.getLogger("tacticai")
+                    logger.error(
+                        f"[VAL-ASSERT-FAIL] Validation loss calculation (batch={batch_idx}, graph={g}): "
+                        f"target_idx={target_idx} must be in [0, {Ncand}), logits_shape={lb.shape}"
+                    )
+                    raise AssertionError(
+                        f"Validation loss calculation (batch={batch_idx}, graph={g}): "
+                        f"target_idx={target_idx} must be in [0, {Ncand}), logits_shape={lb.shape}"
+                    )
                 
                 # DEBUG: Detailed logging for single sample mode
                 if debug_single_sample and graphs_in_batch == 0 and logger is not None:
