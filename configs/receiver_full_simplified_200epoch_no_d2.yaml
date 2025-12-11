@@ -28,6 +28,8 @@ train:
   grad_clip:
     enabled: true
     max_norm: 1.0  # Clip gradients to prevent explosion - D2無効時は通常の設定で問題なし（200エポック学習用）
+  save_backbone: true  # バックボーンのみを保存するか (default=true) - 転移学習用
+  backbone_save_path: null  # バックボーン保存パス (nullの場合は自動生成、D2有無に応じてbackbone_d2.ckptまたはbackbone_no_d2.ckpt)
 
 data:
   train_path: data/processed_ck/receiver_train/data.pickle  # 訓練データのパス - 以前の良い結果の設定に合わせてprocessed_ckに変更

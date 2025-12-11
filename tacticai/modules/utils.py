@@ -105,6 +105,60 @@ def save_checkpoint(
     torch.save(checkpoint, filepath)
 
 
+def save_backbone_checkpoint(
+    model: nn.Module,
+    metadata: Dict[str, Any],
+    filepath: Union[str, Path],
+    source_checkpoint: Optional[str] = None,
+    epoch: Optional[int] = None,
+    metrics: Optional[Dict[str, float]] = None,
+) -> None:
+    """Save backbone only checkpoint for transfer learning.
+    
+    Args:
+        model: ReceiverModel instance with backbone attribute
+        metadata: Model configuration metadata
+        filepath: Path to save backbone checkpoint
+        source_checkpoint: Path to original full checkpoint (optional)
+        epoch: Epoch number of source checkpoint (optional)
+        metrics: Performance metrics of source checkpoint (optional)
+    
+    Raises:
+        AttributeError: If model does not have backbone attribute
+    """
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Check if model has backbone attribute
+    if not hasattr(model, 'backbone'):
+        raise AttributeError(
+            f"Model does not have 'backbone' attribute. "
+            f"Model type: {type(model).__name__}"
+        )
+    
+    # Extract backbone state dict
+    backbone_state_dict = model.backbone.state_dict()
+    
+    # Build checkpoint dictionary
+    backbone_checkpoint = {
+        "backbone_state_dict": backbone_state_dict,
+        "metadata": metadata,
+    }
+    
+    # Add optional checkpoint info
+    if source_checkpoint is not None or epoch is not None or metrics is not None:
+        checkpoint_info = {}
+        if source_checkpoint is not None:
+            checkpoint_info["source_checkpoint"] = source_checkpoint
+        if epoch is not None:
+            checkpoint_info["epoch"] = epoch
+        if metrics is not None:
+            checkpoint_info["metrics"] = metrics
+        backbone_checkpoint["checkpoint_info"] = checkpoint_info
+    
+    torch.save(backbone_checkpoint, filepath)
+
+
 def load_checkpoint(
     filepath: Union[str, Path],
     model: Optional[nn.Module] = None,

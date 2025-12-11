@@ -28,7 +28,7 @@ from tacticai.modules import (
     set_seed, get_device, save_checkpoint, setup_logging,
     CosineAnnealingScheduler, EarlyStopping, save_training_history,
 )
-from tacticai.modules.utils import save_training_history_csv
+from tacticai.modules.utils import save_training_history_csv, save_backbone_checkpoint
 from tacticai.modules.transforms import RandomFlipTransform
 
 
@@ -441,6 +441,32 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
                     nn.init.uniform_(module.bias, -0.5, 0.5)  # Increased from 0.1 to break symmetry
     
     return model.to(device)
+
+
+def _extract_backbone_metadata(model: ReceiverModel, config: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract metadata for backbone checkpoint.
+    
+    Args:
+        model: ReceiverModel instance
+        config: Configuration dictionary
+        
+    Returns:
+        Dictionary containing metadata for backbone checkpoint
+    """
+    model_config = config["model"]
+    d2_config = config.get("d2", {})
+    
+    metadata = {
+        "input_dim": model_config["input_dim"],
+        "hidden_dim": model_config["hidden_dim"],
+        "num_layers": model_config["num_layers"],
+        "num_heads": model_config["num_heads"],
+        "dropout": model_config["dropout"],
+        "edge_dim": model_config.get("edge_dim", 1),
+        "use_d2_equivariance": d2_config.get("enabled", False),
+        "backbone_type": "GATv2Network4View" if model.use_d2_equivariance else "GATv2Network",
+    }
+    return metadata
 
 
 def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimizer:
@@ -2078,6 +2104,28 @@ def main():
                     checkpoint_path, scheduler
                 )
                 logger.info(f"New best model saved with Train Top-3 accuracy: {best_val_top3:.4f}")
+                
+                # Save backbone checkpoint if enabled
+                if config.get("train", {}).get("save_backbone", False):
+                    backbone_path = config.get("train", {}).get("backbone_save_path")
+                    if backbone_path is None:
+                        # Generate default path based on D2 equivariance setting
+                        use_d2 = config.get("d2", {}).get("enabled", False)
+                        backbone_filename = "backbone_d2.ckpt" if use_d2 else "backbone_no_d2.ckpt"
+                        backbone_path = Path(config.get("checkpoint_dir", "checkpoints")) / "receiver" / backbone_filename
+                    else:
+                        backbone_path = Path(backbone_path)
+                    
+                    metadata = _extract_backbone_metadata(model, config)
+                    save_backbone_checkpoint(
+                        model=model,
+                        metadata=metadata,
+                        filepath=backbone_path,
+                        source_checkpoint=str(checkpoint_path),
+                        epoch=epoch,
+                        metrics=train_metrics,
+                    )
+                    logger.info(f"Backbone saved to {backbone_path} (D2 equivariance: {metadata['use_d2_equivariance']})")
         else:
             # Normal mode: use Val metrics
             if val_metrics["top3"] > best_val_top3:
@@ -2088,6 +2136,28 @@ def main():
                     checkpoint_path, scheduler
                 )
                 logger.info(f"New best model saved with Top-3 accuracy: {best_val_top3:.4f}")
+                
+                # Save backbone checkpoint if enabled
+                if config.get("train", {}).get("save_backbone", False):
+                    backbone_path = config.get("train", {}).get("backbone_save_path")
+                    if backbone_path is None:
+                        # Generate default path based on D2 equivariance setting
+                        use_d2 = config.get("d2", {}).get("enabled", False)
+                        backbone_filename = "backbone_d2.ckpt" if use_d2 else "backbone_no_d2.ckpt"
+                        backbone_path = Path(config.get("checkpoint_dir", "checkpoints")) / "receiver" / backbone_filename
+                    else:
+                        backbone_path = Path(backbone_path)
+                    
+                    metadata = _extract_backbone_metadata(model, config)
+                    save_backbone_checkpoint(
+                        model=model,
+                        metadata=metadata,
+                        filepath=backbone_path,
+                        source_checkpoint=str(checkpoint_path),
+                        epoch=epoch,
+                        metrics=val_metrics,
+                    )
+                    logger.info(f"Backbone saved to {backbone_path} (D2 equivariance: {metadata['use_d2_equivariance']})")
         
         # Early stopping (based on Top-3 accuracy, skipped when Val is merged)
         if not merge_val_to_train:
