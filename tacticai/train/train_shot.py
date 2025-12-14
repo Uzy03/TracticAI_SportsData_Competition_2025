@@ -90,7 +90,7 @@ class ShotModelWithReceiver(nn.Module):
                 hidden_dim=model_config["hidden_dim"],
                 num_classes=22,  # 22 players
                 dropout=0.0,  # No dropout for inference
-            )
+            ).to(device)
             # Extract receiver head weights from checkpoint
             receiver_head_state = {}
             for k, v in receiver_checkpoint.get("model_state_dict", {}).items():
@@ -110,7 +110,7 @@ class ShotModelWithReceiver(nn.Module):
             hidden_dim=model_config["hidden_dim"],
             dropout=model_config["dropout"],
             use_context=False,  # ノード埋め込みのみを使用（設計図に基づく）
-        )
+        ).to(device)
     
     def forward(
         self,
