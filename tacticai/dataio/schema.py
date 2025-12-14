@@ -820,54 +820,37 @@ class ShotSchema(DataSchema):
         self.field_width = field_width
     
     def get_node_features(self, data: Dict[str, Any]) -> torch.Tensor:
-        """Extract node features for shot prediction.
+        """Extract node features for shot prediction (16 dimensions, same as ReceiverSchema).
+        
+        Uses the same feature extraction as ReceiverSchema to match pretrained backbone.
         
         Args:
             data: Raw data dictionary containing player information
             
         Returns:
-            Node features [N, F]
+            Node features [N, 16] where:
+                - dim 0-1: x, y (normalized positions to [0, 1])
+                - dim 2-3: vx, vy (normalized velocities to [-1, 1] range)
+                - dim 4: height (normalized to [0, 1] range)
+                - dim 5: weight (normalized to [0, 1] range)
+                - dim 6: ball_possession (1.0 if player has ball, 0.0 otherwise)
+                - dim 7-10: dx_to_kicker, dy_to_kicker, dist_to_kicker, angle_to_kicker (relative to kicker)
+                - dim 11-14: dx_to_goal, dy_to_goal, dist_to_goal, angle_to_goal (relative to goal)
+                - dim 15: team_id (0=attacking team, 1=defending team)
         """
-        # Extract positions
-        try:
-            positions = np.array([data[col] for col in self.position_columns]).T
-        except Exception as e:
-            print(f"Error in get_node_features: {e}")
-            print(f"data type: {type(data)}")
-            print(f"data keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
-            print(f"position_columns: {self.position_columns}")
-            raise
-        
-        # Extract velocities
-        velocities = np.array([data[col] for col in self.velocity_columns]).T
-        
-        # Extract player attributes
-        if self.player_attr_columns:
-            player_attrs = np.array([data[col] for col in self.player_attr_columns]).T
-        else:
-            # Default attributes (height, weight)
-            player_attrs = np.zeros((positions.shape[0], 2))
-        
-        # Extract team information
-        team = np.array(data[self.team_column])
-        
-        # Extract ball information
-        ball = np.array(data[self.ball_column])
-        
-        # Normalize positions to [-1, 1]
-        positions[:, 0] = 2 * positions[:, 0] / self.field_length - 1
-        positions[:, 1] = 2 * positions[:, 1] / self.field_width - 1
-        
-        # Combine all features
-        features = np.column_stack([
-            positions,      # [N, 2] - x, y positions
-            velocities,     # [N, 2] - vx, vy velocities
-            player_attrs,   # [N, 2] - height, weight
-            team,           # [N, 1] - team_id
-            ball,           # [N, 1] - is_ball
-        ])
-        
-        return torch.tensor(features, dtype=torch.float32)
+        # Use ReceiverSchema to extract features (same as pretrained backbone)
+        receiver_schema = ReceiverSchema(
+            position_columns=self.position_columns,
+            velocity_columns=self.velocity_columns,
+            player_attr_columns=self.player_attr_columns,
+            team_column=self.team_column,
+            ball_column=self.ball_column,
+            field_length=self.field_length,
+            field_width=self.field_width,
+            use_edge_attributes=False,  # Edge attributes are handled separately
+            use_graph_attributes=False,  # Graph attributes are not needed here
+        )
+        return receiver_schema.get_node_features(data)
     
     def get_edge_index(self, data: Dict[str, Any]) -> torch.Tensor:
         """Extract edge connectivity (complete graph).
