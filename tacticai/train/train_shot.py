@@ -185,12 +185,9 @@ class ShotModelWithReceiver(nn.Module):
             elif self.receiver_head is not None:
                 # Use pretrained receiver model
                 # H: [B, N_per_graph, hidden_dim]
-                # ReceiverHead expects [B, N, hidden_dim] or [B*N, hidden_dim] and returns [B*N] (per-node scores)
-                B, N, D = H.shape
                 # ReceiverHead can handle [B, N, D] directly (see NodeScoreHead.forward)
                 receiver_logits_per_node = self.receiver_head(H)  # [B, N] - each node's score
                 # Apply softmax across nodes to get probability distribution over nodes (players)
-                # receiver_logits_per_node: [B, N] where N=22 (players)
                 receiver_probs = F.softmax(receiver_logits_per_node, dim=1)  # [B, 22]
             else:
                 # Uniform distribution
@@ -201,20 +198,16 @@ class ShotModelWithReceiver(nn.Module):
         shot_probs_per_node = torch.sigmoid(shot_logits_per_node)  # [B, N_per_graph]
         
         # Aggregate with receiver probabilities: Σ σ(s_i) × p_i
-        # shot_probs_per_node: [B, N_per_graph], receiver_probs: [B, N] or [B, 22]
-        # Ensure dimensions match
+        # shot_probs_per_node: [B, N_per_graph], receiver_probs: [B, 22]
         if receiver_probs.size(1) == shot_probs_per_node.size(1):
-            # Perfect match: direct element-wise multiplication and sum
             shot_prob = (shot_probs_per_node * receiver_probs).sum(dim=1, keepdim=True)  # [B, 1]
         elif receiver_probs.size(1) == 22 and shot_probs_per_node.size(1) == 22:
-            # Both are 22 (all players)
             shot_prob = (shot_probs_per_node * receiver_probs).sum(dim=1, keepdim=True)  # [B, 1]
         else:
             # Dimension mismatch: use mean pooling as fallback
             shot_prob = shot_probs_per_node.mean(dim=1, keepdim=True)  # [B, 1]
         
         # Convert probability to logit for loss computation
-        # Use logit = log(p / (1-p)) with numerical stability
         epsilon = 1e-8
         shot_prob_clamped = torch.clamp(shot_prob, epsilon, 1.0 - epsilon)
         shot_logit = torch.log(shot_prob_clamped / (1.0 - shot_prob_clamped))
@@ -236,20 +229,8 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
     Returns:
         Shot prediction model
     """
-    # Check if pretrained section exists (backbone_path can be null for auto-selection)
-    pretrained_config = config.get("pretrained", {})
-    if pretrained_config:
-        # Use ShotModelWithReceiver (handles pretrained backbone loading)
-        model = ShotModelWithReceiver(config, device)
-    else:
-        # Fallback to old ShotModel for backward compatibility
-        # Note: ShotModel is an alias for ShotModelWithReceiver, but requires device
-        # For now, always use ShotModelWithReceiver
-        model = ShotModelWithReceiver(config, device)
-    
-    # Note: D2 equivariance is handled internally in ShotModelWithReceiver
-    # No need for GroupPoolingWrapper
-    
+    # Always use ShotModelWithReceiver for consistency
+    model = ShotModelWithReceiver(config, device)
     return model
 
 
@@ -268,41 +249,32 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
     
     # Check if different learning rates are specified for backbone and head
     if pretrained_config.get("lr_backbone") is not None and pretrained_config.get("lr_head") is not None:
-        # Use different learning rates for backbone and head
-        if hasattr(model, 'backbone') and hasattr(model, 'shot_head'):
-            # Separate parameter groups
-            backbone_params = list(model.backbone.parameters())
-            head_params = list(model.shot_head.parameters())
-            
-            if opt_config["type"] == "adam":
-                optimizer = optim.Adam([
-                    {'params': backbone_params, 'lr': pretrained_config["lr_backbone"]},
-                    {'params': head_params, 'lr': pretrained_config["lr_head"]},
-                ], weight_decay=opt_config.get("weight_decay", 1e-4))
-            elif opt_config["type"] == "adamw":
-                optimizer = optim.AdamW([
-                    {'params': backbone_params, 'lr': pretrained_config["lr_backbone"]},
-                    {'params': head_params, 'lr': pretrained_config["lr_head"]},
-                ], weight_decay=opt_config.get("weight_decay", 1e-4))
-            else:
-                raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
-            return optimizer
-    
-    # Default: use same learning rate for all parameters
-    if opt_config["type"] == "adam":
-        optimizer = optim.Adam(
-            model.parameters(),
-            lr=opt_config["lr"],
-            weight_decay=opt_config.get("weight_decay", 1e-4),
-        )
-    elif opt_config["type"] == "adamw":
-        optimizer = optim.AdamW(
-            model.parameters(),
-            lr=opt_config["lr"],
-            weight_decay=opt_config.get("weight_decay", 1e-4),
-        )
+        # Separate learning rates for backbone and head
+        backbone_params = list(model.backbone.parameters())
+        head_params = list(model.shot_head.parameters())
+        
+        param_groups = [
+            {"params": backbone_params, "lr": pretrained_config["lr_backbone"]},
+            {"params": head_params, "lr": pretrained_config["lr_head"]},
+        ]
+        
+        if opt_config["type"] == "adam":
+            optimizer = optim.Adam(
+                param_groups,
+                weight_decay=opt_config.get("weight_decay", 0.0),
+            )
+        else:
+            raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
     else:
-        raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
+        # Use single learning rate for all parameters
+        if opt_config["type"] == "adam":
+            optimizer = optim.Adam(
+                model.parameters(),
+                lr=opt_config["lr"],
+                weight_decay=opt_config.get("weight_decay", 0.0),
+            )
+        else:
+            raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
     
     return optimizer
 
@@ -344,6 +316,8 @@ def train_epoch(
     device: torch.device,
     metrics: Dict[str, Any],
     use_amp: bool = False,
+    grad_clip_enabled: bool = False,
+    grad_clip_max_norm: float = 1.0,
 ) -> Dict[str, float]:
     """Train model for one epoch.
     
@@ -355,6 +329,8 @@ def train_epoch(
         device: Device to train on
         metrics: Metric functions
         use_amp: Whether to use automatic mixed precision
+        grad_clip_enabled: Whether to enable gradient clipping
+        grad_clip_max_norm: Maximum gradient norm for clipping
         
     Returns:
         Dictionary of training metrics
@@ -364,32 +340,17 @@ def train_epoch(
     total_loss = 0.0
     all_predictions = []
     all_targets = []
-    
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    num_samples = 0
     
     import logging
     logger = logging.getLogger("tacticai")
     
-    num_batches = len(dataloader)
-    log_interval = max(1, num_batches // 10)  # Log every 10% of batches
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
     
-    import time
     for batch_idx, (data, targets) in enumerate(dataloader):
-        if batch_idx == 0:
-            logger.info(f"Starting training epoch: {num_batches} batches")
-            t0 = time.time()
-        
-        if batch_idx % log_interval == 0:
-            logger.info(f"  Batch {batch_idx}/{num_batches} ({(batch_idx/num_batches)*100:.1f}%)")
-        
-        t1 = time.time()
         # Move data to device
         data = {k: v.to(device) for k, v in data.items()}
         targets = targets.to(device)
-        t2 = time.time()
-        
-        if batch_idx == 0:
-            logger.info(f"  Batch {batch_idx}: Data loading took {t1-t0:.2f}s, Device transfer took {t2-t1:.2f}s")
         
         optimizer.zero_grad()
         
@@ -399,8 +360,6 @@ def train_epoch(
         # Extract GT receiver if available (for training)
         use_gt_receiver = data.get("receiver_id") is not None
         gt_receiver = data.get("receiver_id", None)
-        
-        t3 = time.time()
         
         if use_amp and scaler is not None:
             with torch.cuda.amp.autocast():
@@ -412,9 +371,13 @@ def train_epoch(
                     use_gt_receiver=use_gt_receiver,
                     gt_receiver=gt_receiver,
                 )
+                # outputs: [B, 1], targets: [B] or [B, 1]
                 loss = criterion(outputs, targets.unsqueeze(1) if targets.dim() == 1 else targets)
             
             scaler.scale(loss).backward()
+            if grad_clip_enabled:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
             scaler.step(optimizer)
             scaler.update()
         else:
@@ -426,54 +389,38 @@ def train_epoch(
                 use_gt_receiver=use_gt_receiver,
                 gt_receiver=gt_receiver,
             )
+            # outputs: [B, 1], targets: [B] or [B, 1]
             loss = criterion(outputs, targets.unsqueeze(1) if targets.dim() == 1 else targets)
-        
-        t4 = time.time()
-        
-        if batch_idx == 0:
-            logger.info(f"  Batch {batch_idx}: Forward pass took {t4-t3:.2f}s")
-        
-        if use_amp and scaler is not None:
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
+            
             loss.backward()
+            if grad_clip_enabled:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
             optimizer.step()
         
-        t5 = time.time()
-        if batch_idx == 0:
-            logger.info(f"  Batch {batch_idx}: Backward pass took {t5-t4:.2f}s, Total batch time: {t5-t1:.2f}s")
+        batch_size = targets.size(0)
+        total_loss += loss.item() * batch_size
+        num_samples += batch_size
         
-        total_loss += loss.item()
-        
-        # Collect predictions and targets for metrics
+        # Collect predictions and targets for metrics (keep on GPU for efficiency)
         with torch.no_grad():
-            all_predictions.append(outputs.cpu())
-            all_targets.append(targets.cpu())
+            all_predictions.append(outputs.detach())
+            all_targets.append(targets.detach())
+    
+    # Compute metrics on GPU (more efficient than CPU)
+    with torch.no_grad():
+        all_predictions = torch.cat(all_predictions, dim=0)
+        all_targets = torch.cat(all_targets, dim=0)
         
-        # Log progress periodically
-        if (batch_idx + 1) % log_interval == 0 or (batch_idx + 1) == num_batches:
-            logger.info(f"  Batch {batch_idx+1}/{num_batches} completed, loss={loss.item():.4f}, avg_loss={total_loss/(batch_idx+1):.4f}")
+        # Compute AUC
+        auc_roc, auc_pr = metrics["auc"](all_predictions, all_targets, compute_auc_pr=True)
         
-        # Log progress periodically
-        if (batch_idx + 1) % log_interval == 0 or (batch_idx + 1) == num_batches:
-            logger.info(f"  Batch {batch_idx+1}/{num_batches} completed, loss={loss.item():.4f}, avg_loss={total_loss/(batch_idx+1):.4f}")
-    
-    # Compute metrics
-    all_predictions = torch.cat(all_predictions, dim=0)
-    all_targets = torch.cat(all_targets, dim=0)
-    
-    # Compute AUC
-    auc_roc, auc_pr = metrics["auc"](all_predictions, all_targets, compute_auc_pr=True)
-    
-    epoch_metrics = {
-        "loss": total_loss / len(dataloader),
-        "auc_roc": auc_roc.item(),
-        "auc_pr": auc_pr.item(),
-        "accuracy": metrics["accuracy"](all_predictions, all_targets).item(),
-        "f1": metrics["f1"](all_predictions, all_targets).item(),
-    }
+        epoch_metrics = {
+            "loss": total_loss / num_samples,
+            "auc_roc": auc_roc.item(),
+            "auc_pr": auc_pr.item(),
+            "accuracy": metrics["accuracy"](all_predictions, all_targets).item(),
+            "f1": metrics["f1"](all_predictions, all_targets).item(),
+        }
     
     return epoch_metrics
 
@@ -485,9 +432,6 @@ def validate_epoch(
     device: torch.device,
     metrics: Dict[str, Any],
 ) -> Dict[str, float]:
-    """Validate model for one epoch."""
-    import logging
-    logger = logging.getLogger("tacticai")
     """Validate model for one epoch.
     
     Args:
@@ -505,17 +449,10 @@ def validate_epoch(
     total_loss = 0.0
     all_predictions = []
     all_targets = []
+    num_samples = 0
     
     with torch.no_grad():
-        num_batches = len(dataloader)
-        log_interval = max(1, num_batches // 10)  # Log every 10% of batches
-        
-        for batch_idx, (data, targets) in enumerate(dataloader):
-            if batch_idx == 0:
-                logger.info(f"Starting validation: {num_batches} batches")
-            
-            if batch_idx % log_interval == 0:
-                logger.info(f"  Val batch {batch_idx}/{num_batches} ({(batch_idx/num_batches)*100:.1f}%)")
+        for data, targets in dataloader:
             # Move data to device
             data = {k: v.to(device) for k, v in data.items()}
             targets = targets.to(device)
@@ -530,14 +467,18 @@ def validate_epoch(
                 batch=data["batch"],
                 use_gt_receiver=False,  # ValidationではReceiver予測を使用
             )
+            # outputs: [B, 1], targets: [B] or [B, 1]
             loss = criterion(outputs, targets.unsqueeze(1) if targets.dim() == 1 else targets)
             
-            total_loss += loss.item()
+            batch_size = targets.size(0)
+            total_loss += loss.item() * batch_size
+            num_samples += batch_size
             
-            all_predictions.append(outputs.cpu())
-            all_targets.append(targets.cpu())
+            # Collect predictions and targets for metrics (keep on GPU)
+            all_predictions.append(outputs)
+            all_targets.append(targets)
     
-    # Compute metrics
+    # Compute metrics on GPU
     all_predictions = torch.cat(all_predictions, dim=0)
     all_targets = torch.cat(all_targets, dim=0)
     
@@ -545,7 +486,7 @@ def validate_epoch(
     auc_roc, auc_pr = metrics["auc"](all_predictions, all_targets, compute_auc_pr=True)
     
     epoch_metrics = {
-        "loss": total_loss / len(dataloader),
+        "loss": total_loss / num_samples,
         "auc_roc": auc_roc.item(),
         "auc_pr": auc_pr.item(),
         "accuracy": metrics["accuracy"](all_predictions, all_targets).item(),
@@ -576,7 +517,7 @@ def main():
     # Generate timestamp for output files
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Setup logging with timestamped filename (save to runs/shot/)
+    # Setup logging with timestamped filename
     log_dir = Path(config.get("log_dir", "runs")) / "shot"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_filename = f"training_{timestamp}.log"
@@ -599,11 +540,11 @@ def main():
     else:
         train_dataset = ShotDataset(
             config["data"]["train_path"],
-            file_format=config["data"].get("format", "parquet")
+            file_format=config["data"].get("format", "pickle")
         )
         val_dataset = ShotDataset(
             config["data"]["val_path"],
-            file_format=config["data"].get("format", "parquet")
+            file_format=config["data"].get("format", "pickle")
         )
     
     # Create data loaders
@@ -664,13 +605,20 @@ def main():
         best_val_auc = checkpoint.get("metrics", {}).get("auc_roc", 0.0)
         logger.info(f"Resumed from epoch {start_epoch}")
     
+    # Gradient clipping settings
+    grad_clip_config = config.get("train", {}).get("grad_clip", {})
+    grad_clip_enabled = grad_clip_config.get("enabled", False)
+    grad_clip_max_norm = grad_clip_config.get("max_norm", 1.0)
+    
     for epoch in range(start_epoch, config["train"]["epochs"]):
         logger.info(f"Epoch {epoch+1}/{config['train']['epochs']}")
         
         # Training
         train_metrics = train_epoch(
             model, train_loader, optimizer, criterion, device, metrics,
-            use_amp=config.get("train", {}).get("amp", False)
+            use_amp=config.get("train", {}).get("amp", False),
+            grad_clip_enabled=grad_clip_enabled,
+            grad_clip_max_norm=grad_clip_max_norm,
         )
         
         # Validation
@@ -710,6 +658,7 @@ def main():
             best_val_auc = val_metrics["auc_roc"]
             
             checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "shot" / "best.ckpt"
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
             save_checkpoint(
                 model, optimizer, epoch, val_metrics["loss"], val_metrics,
                 checkpoint_path, scheduler
@@ -724,7 +673,6 @@ def main():
     logger.info(f"Training completed. Best validation AUC-ROC: {best_val_auc:.4f}")
     
     # Save training history (CSV format, same as receiver prediction)
-    # Save to runs/shot/ directory
     csv_filename = f"training_history_{timestamp}.csv"
     csv_dir = Path(config.get("log_dir", "runs")) / "shot"
     csv_dir.mkdir(parents=True, exist_ok=True)
