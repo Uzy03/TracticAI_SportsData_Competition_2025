@@ -184,17 +184,13 @@ class ShotModelWithReceiver(nn.Module):
             elif self.receiver_head is not None:
                 # Use pretrained receiver model
                 # H: [B, N_per_graph, hidden_dim]
-                # ReceiverHead expects [B*N, hidden_dim] and returns [B*N, 22]
+                # ReceiverHead expects [B, N, hidden_dim] or [B*N, hidden_dim] and returns [B*N] (per-node scores)
                 B, N, D = H.shape
-                H_flat = H.view(-1, D)  # [B*N, hidden_dim]
-                receiver_logits_flat = self.receiver_head(H_flat)  # [B*N, 22]
-                receiver_logits = receiver_logits_flat.view(B, N, 22)  # [B, N, 22]
-                # ReceiverHead outputs per-node logits [B, N, 22]
-                # Each node has logits for all 22 players
-                # We need to aggregate across nodes to get a single probability distribution
-                # Use mean pooling (simple and works well)
-                receiver_logits_mean = receiver_logits.mean(dim=1)  # [B, 22]
-                receiver_probs = F.softmax(receiver_logits_mean, dim=1)  # [B, 22]
+                # ReceiverHead can handle [B, N, D] directly (see NodeScoreHead.forward)
+                receiver_logits_per_node = self.receiver_head(H)  # [B, N] - each node's score
+                # Apply softmax across nodes to get probability distribution over nodes (players)
+                # receiver_logits_per_node: [B, N] where N=22 (players)
+                receiver_probs = F.softmax(receiver_logits_per_node, dim=1)  # [B, 22]
             else:
                 # Uniform distribution
                 receiver_probs = torch.ones(B, 22, device=H.device) / 22
