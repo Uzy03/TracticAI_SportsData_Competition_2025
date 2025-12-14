@@ -422,14 +422,20 @@ class ShotDataset(TacticAIDataset):
         elif self.file_format == "pickle":
             with open(file_path, 'rb') as f:
                 data = pickle.load(f)
-                # If it's already a list, return it
-                if isinstance(data, list):
-                    return data
-                # If it's a dict, it should be a single sample, wrap it in a list
+                # Same logic as ReceiverDataset: handle dict with "samples" key
+                samples: List[Dict[str, Any]]
+                if isinstance(data, dict) and "samples" in data:
+                    # Format: {"preprocess_version": ..., "samples": [...]}
+                    samples = data.get("samples", [])
+                elif isinstance(data, list):
+                    # Format: [...]
+                    samples = data
                 elif isinstance(data, dict):
-                    return [data]
+                    # Format: single sample dict, wrap it
+                    samples = [data]
                 else:
-                    return [data]
+                    samples = [data]
+                return samples
         else:
             raise ValueError(f"Unsupported file format: {self.file_format}")
     

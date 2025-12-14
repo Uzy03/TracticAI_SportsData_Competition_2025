@@ -344,8 +344,14 @@ def train_epoch(
     
     scaler = torch.cuda.amp.GradScaler() if use_amp else None
     
+    import time
+    import logging
+    logger = logging.getLogger("tacticai")
+    
     progress_bar = tqdm(dataloader, desc="Training")
     for batch_idx, (data, targets) in enumerate(progress_bar):
+        batch_start_time = time.time()
+        
         # Move data to device
         data = {k: v.to(device) for k, v in data.items()}
         targets = targets.to(device)
@@ -359,6 +365,7 @@ def train_epoch(
         use_gt_receiver = data.get("receiver_id") is not None
         gt_receiver = data.get("receiver_id", None)
         
+        forward_start = time.time()
         if use_amp and scaler is not None:
             with torch.cuda.amp.autocast():
                 outputs = model(
@@ -395,6 +402,10 @@ def train_epoch(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
             optimizer.step()
         
+        batch_end_time = time.time()
+        batch_time = batch_end_time - batch_start_time
+        forward_time = batch_end_time - forward_start
+        
         batch_size = targets.size(0)
         total_loss += loss.item() * batch_size
         num_samples += batch_size
@@ -404,8 +415,12 @@ def train_epoch(
             all_predictions.append(outputs.detach())
             all_targets.append(targets.detach())
         
+        # Log timing for first few batches
+        if batch_idx < 3:
+            logger.info(f"Batch {batch_idx}: forward={forward_time:.2f}s, total={batch_time:.2f}s")
+        
         # Update progress bar
-        progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
+        progress_bar.set_postfix({"loss": f"{loss.item():.4f}", "t": f"{batch_time:.1f}s"})
     
     # Compute metrics on GPU (more efficient than CPU)
     with torch.no_grad():

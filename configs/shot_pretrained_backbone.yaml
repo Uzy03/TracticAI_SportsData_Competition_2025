@@ -46,10 +46,11 @@ train:
   amp: false  # Automatic mixed precision
 
 # Data configuration
+# Uses same data source as receiver prediction (data/processed_ck)
 data:
-  train_path: "data/processed/shot_train/data.pickle"
-  val_path: "data/processed/shot_val/data.pickle"
-  test_path: "data/processed/shot_test/data.pickle"
+  train_path: "data/processed_ck/shot_train/data.pickle"
+  val_path: "data/processed_ck/shot_val/data.pickle"
+  test_path: "data/processed_ck/shot_test/data.pickle"
   format: "pickle"
 
 # Loss configuration
