@@ -21,7 +21,7 @@ from tacticai.dataio import ShotDataset, create_dataloader, create_dummy_dataset
 from tacticai.modules import (
     BCELoss, AUC, F1Score, Accuracy,
     set_seed, get_device, save_checkpoint, setup_logging,
-    CosineAnnealingScheduler, EarlyStopping, save_training_history,
+    CosineAnnealingScheduler, EarlyStopping,
 )
 from tacticai.modules.utils import load_backbone_from_checkpoint, save_training_history_csv
 from tacticai.modules.transforms import RandomFlipTransform
@@ -523,19 +523,23 @@ def main():
     # Setup device
     device = get_device(config.get("device", "auto"))
     
-    # Setup logging
+    # Generate timestamp for output files
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Setup logging with timestamped filename (save to runs/shot/)
+    log_dir = Path(config.get("log_dir", "runs")) / "shot"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_filename = f"training_{timestamp}.log"
     logger = setup_logging(
-        config.get("log_dir", "runs"),
-        config.get("log_level", "INFO")
+        log_dir,
+        config.get("log_level", "INFO"),
+        log_file=log_filename
     )
     
     logger.info(f"Training shot prediction model on {device}")
     logger.info(f"Configuration: {config}")
     resolved_config_path = Path(args.config).resolve()
     logger.info(f"Resolved config path: {resolved_config_path}")
-    
-    # Generate timestamp for output files
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Create datasets
     if args.debug_overfit:
@@ -669,24 +673,19 @@ def main():
     
     logger.info(f"Training completed. Best validation AUC-ROC: {best_val_auc:.4f}")
     
-    # Save training history (JSON format)
-    history_path = Path(config.get("log_dir", "runs")) / f"shot_training_history_{timestamp}.json"
-    save_training_history(
-        {"train": train_history, "val": val_history},
-        history_path
-    )
-    logger.info(f"Training history (JSON) saved to {history_path}")
-    
-    # Save training history (CSV format, similar to receiver prediction)
+    # Save training history (CSV format, same as receiver prediction)
+    # Save to runs/shot/ directory
     csv_filename = f"training_history_{timestamp}.csv"
-    csv_path = Path(config.get("log_dir", "runs")) / csv_filename
+    csv_dir = Path(config.get("log_dir", "runs")) / "shot"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = csv_dir / csv_filename
     save_training_history_csv(
         train_history,
         val_history,
         test_history=None,  # Test metrics can be added later if needed
         filepath=csv_path
     )
-    logger.info(f"Training history (CSV) saved to {csv_path}")
+    logger.info(f"Training history saved to {csv_path}")
 
 
 if __name__ == "__main__":
