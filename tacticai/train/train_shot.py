@@ -7,6 +7,7 @@ import argparse
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
+from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -22,7 +23,7 @@ from tacticai.modules import (
     set_seed, get_device, save_checkpoint, setup_logging,
     CosineAnnealingScheduler, EarlyStopping, save_training_history,
 )
-from tacticai.modules.utils import load_backbone_from_checkpoint
+from tacticai.modules.utils import load_backbone_from_checkpoint, save_training_history_csv
 from tacticai.modules.transforms import RandomFlipTransform
 from tacticai.modules.view_ops import apply_view_transform, D2_VIEWS
 import torch.nn.functional as F
@@ -530,6 +531,11 @@ def main():
     
     logger.info(f"Training shot prediction model on {device}")
     logger.info(f"Configuration: {config}")
+    resolved_config_path = Path(args.config).resolve()
+    logger.info(f"Resolved config path: {resolved_config_path}")
+    
+    # Generate timestamp for output files
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Create datasets
     if args.debug_overfit:
@@ -627,19 +633,18 @@ def main():
             current_lr = optimizer.param_groups[0]['lr']
         
         # Log metrics
-        logger.info(f"Train - Loss: {train_metrics['loss']:.4f}, "
-                   f"AUC-ROC: {train_metrics['auc_roc']:.4f}, "
-                   f"AUC-PR: {train_metrics['auc_pr']:.4f}, "
-                   f"Acc: {train_metrics['accuracy']:.4f}, "
-                   f"F1: {train_metrics['f1']:.4f}")
-        
-        logger.info(f"Val   - Loss: {val_metrics['loss']:.4f}, "
-                   f"AUC-ROC: {val_metrics['auc_roc']:.4f}, "
-                   f"AUC-PR: {val_metrics['auc_pr']:.4f}, "
-                   f"Acc: {val_metrics['accuracy']:.4f}, "
-                   f"F1: {val_metrics['f1']:.4f}")
-        
-        logger.info(f"Learning rate: {current_lr:.6f}")
+        logger.info(f"Epoch {epoch+1}/{config['train']['epochs']} - "
+                   f"Train: Loss={train_metrics['loss']:.4f}, "
+                   f"AUC-ROC={train_metrics['auc_roc']:.4f}, "
+                   f"AUC-PR={train_metrics['auc_pr']:.4f}, "
+                   f"Acc={train_metrics['accuracy']:.4f}, "
+                   f"F1={train_metrics['f1']:.4f} | "
+                   f"Val: Loss={val_metrics['loss']:.4f}, "
+                   f"AUC-ROC={val_metrics['auc_roc']:.4f}, "
+                   f"AUC-PR={val_metrics['auc_pr']:.4f}, "
+                   f"Acc={val_metrics['accuracy']:.4f}, "
+                   f"F1={val_metrics['f1']:.4f} | "
+                   f"LR={current_lr:.6f}")
         
         # Update history
         for key in train_history:
@@ -664,12 +669,24 @@ def main():
     
     logger.info(f"Training completed. Best validation AUC-ROC: {best_val_auc:.4f}")
     
-    # Save training history
-    history_path = Path(config.get("log_dir", "runs")) / "shot_training_history.json"
+    # Save training history (JSON format)
+    history_path = Path(config.get("log_dir", "runs")) / f"shot_training_history_{timestamp}.json"
     save_training_history(
         {"train": train_history, "val": val_history},
         history_path
     )
+    logger.info(f"Training history (JSON) saved to {history_path}")
+    
+    # Save training history (CSV format, similar to receiver prediction)
+    csv_filename = f"training_history_{timestamp}.csv"
+    csv_path = Path(config.get("log_dir", "runs")) / csv_filename
+    save_training_history_csv(
+        train_history,
+        val_history,
+        test_history=None,  # Test metrics can be added later if needed
+        filepath=csv_path
+    )
+    logger.info(f"Training history (CSV) saved to {csv_path}")
 
 
 if __name__ == "__main__":
