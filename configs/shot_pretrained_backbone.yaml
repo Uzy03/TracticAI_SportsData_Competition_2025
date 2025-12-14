@@ -1,4 +1,12 @@
-# Configuration for shot prediction task with pretrained receiver backbone
+# Configuration for shot prediction task using pretrained receiver backbone
+# 
+# 学習内容:
+# - Pretrained receiver backbone: Fine-tuning（デフォルトでは学習される）
+# - Pretrained receiver head: 凍結（推論時のみ使用、学習されない）
+# - Shot head: 新規作成して学習
+#
+# 受け手とシュートを同時に学習するのではなく、受け手予測で学習された
+# エンコーダ（バックボーン）を使って、シュート予測ヘッドのみを学習します。
 
 # Pretrained model configuration
 pretrained:
