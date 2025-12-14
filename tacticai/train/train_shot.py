@@ -367,8 +367,18 @@ def train_epoch(
     
     scaler = torch.cuda.amp.GradScaler() if use_amp else None
     
-    # progress_bar = tqdm(dataloader, desc="Training")
+    import logging
+    logger = logging.getLogger("tacticai")
+    
+    num_batches = len(dataloader)
+    log_interval = max(1, num_batches // 10)  # Log every 10% of batches
+    
     for batch_idx, (data, targets) in enumerate(dataloader):
+        if batch_idx == 0:
+            logger.info(f"Starting training epoch: {num_batches} batches")
+        
+        if batch_idx % log_interval == 0:
+            logger.info(f"  Batch {batch_idx}/{num_batches} ({(batch_idx/num_batches)*100:.1f}%)")
         # Move data to device
         data = {k: v.to(device) for k, v in data.items()}
         targets = targets.to(device)
@@ -418,8 +428,13 @@ def train_epoch(
             all_predictions.append(outputs.cpu())
             all_targets.append(targets.cpu())
         
-        # Update progress bar (commented out since tqdm is commented out)
-        # progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
+        # Log progress periodically
+        if (batch_idx + 1) % log_interval == 0 or (batch_idx + 1) == num_batches:
+            logger.info(f"  Batch {batch_idx+1}/{num_batches} completed, loss={loss.item():.4f}, avg_loss={total_loss/(batch_idx+1):.4f}")
+        
+        # Log progress periodically
+        if (batch_idx + 1) % log_interval == 0 or (batch_idx + 1) == num_batches:
+            logger.info(f"  Batch {batch_idx+1}/{num_batches} completed, loss={loss.item():.4f}, avg_loss={total_loss/(batch_idx+1):.4f}")
     
     # Compute metrics
     all_predictions = torch.cat(all_predictions, dim=0)
@@ -446,6 +461,9 @@ def validate_epoch(
     device: torch.device,
     metrics: Dict[str, Any],
 ) -> Dict[str, float]:
+    """Validate model for one epoch."""
+    import logging
+    logger = logging.getLogger("tacticai")
     """Validate model for one epoch.
     
     Args:
@@ -465,7 +483,15 @@ def validate_epoch(
     all_targets = []
     
     with torch.no_grad():
-        for data, targets in tqdm(dataloader, desc="Validation"):
+        num_batches = len(dataloader)
+        log_interval = max(1, num_batches // 10)  # Log every 10% of batches
+        
+        for batch_idx, (data, targets) in enumerate(dataloader):
+            if batch_idx == 0:
+                logger.info(f"Starting validation: {num_batches} batches")
+            
+            if batch_idx % log_interval == 0:
+                logger.info(f"  Val batch {batch_idx}/{num_batches} ({(batch_idx/num_batches)*100:.1f}%)")
             # Move data to device
             data = {k: v.to(device) for k, v in data.items()}
             targets = targets.to(device)
