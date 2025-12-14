@@ -239,13 +239,16 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
     Returns:
         Shot prediction model
     """
-    # Check if pretrained backbone is specified
-    if config.get("pretrained", {}).get("backbone_path"):
+    # Check if pretrained section exists (backbone_path can be null for auto-selection)
+    pretrained_config = config.get("pretrained", {})
+    if pretrained_config:
+        # Use ShotModelWithReceiver (handles pretrained backbone loading)
         model = ShotModelWithReceiver(config, device)
     else:
         # Fallback to old ShotModel for backward compatibility
-        model = ShotModel(config)
-        model = model.to(device)
+        # Note: ShotModel is an alias for ShotModelWithReceiver, but requires device
+        # For now, always use ShotModelWithReceiver
+        model = ShotModelWithReceiver(config, device)
     
     # Note: D2 equivariance is handled internally in ShotModelWithReceiver
     # No need for GroupPoolingWrapper
