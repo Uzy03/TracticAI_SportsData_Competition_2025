@@ -92,7 +92,7 @@ eval:
 # System configuration
 device: "auto"
 seed: 42
-num_workers: 4
+num_workers: 0  # Set to 0 to avoid multiprocessing issues (same as receiver prediction)
 log_level: "INFO"
 log_dir: "runs"
 checkpoint_dir: "checkpoints"

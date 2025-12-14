@@ -342,12 +342,10 @@ def train_epoch(
     all_targets = []
     num_samples = 0
     
-    import logging
-    logger = logging.getLogger("tacticai")
-    
     scaler = torch.cuda.amp.GradScaler() if use_amp else None
     
-    for batch_idx, (data, targets) in enumerate(dataloader):
+    progress_bar = tqdm(dataloader, desc="Training")
+    for batch_idx, (data, targets) in enumerate(progress_bar):
         # Move data to device
         data = {k: v.to(device) for k, v in data.items()}
         targets = targets.to(device)
@@ -405,6 +403,9 @@ def train_epoch(
         with torch.no_grad():
             all_predictions.append(outputs.detach())
             all_targets.append(targets.detach())
+        
+        # Update progress bar
+        progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
     
     # Compute metrics on GPU (more efficient than CPU)
     with torch.no_grad():
@@ -452,7 +453,8 @@ def validate_epoch(
     num_samples = 0
     
     with torch.no_grad():
-        for data, targets in dataloader:
+        progress_bar = tqdm(dataloader, desc="Validation")
+        for data, targets in progress_bar:
             # Move data to device
             data = {k: v.to(device) for k, v in data.items()}
             targets = targets.to(device)
@@ -477,6 +479,9 @@ def validate_epoch(
             # Collect predictions and targets for metrics (keep on GPU)
             all_predictions.append(outputs)
             all_targets.append(targets)
+            
+            # Update progress bar
+            progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
     
     # Compute metrics on GPU
     all_predictions = torch.cat(all_predictions, dim=0)
