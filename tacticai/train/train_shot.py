@@ -11,7 +11,7 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 import numpy as np
 from tqdm import tqdm
 
@@ -553,19 +553,42 @@ def main():
     logger.info(f"Resolved config path: {resolved_config_path}")
     
     # Create datasets
+    merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+    
     if args.debug_overfit:
         # Use small dataset for overfit test
         train_dataset = create_dummy_dataset("shot", num_samples=10, num_players=22)
         val_dataset = create_dummy_dataset("shot", num_samples=5, num_players=22)
     else:
-        train_dataset = ShotDataset(
+        train_dataset_base = ShotDataset(
             config["data"]["train_path"],
             file_format=config["data"].get("format", "pickle")
         )
-        val_dataset = ShotDataset(
-            config["data"]["val_path"],
-            file_format=config["data"].get("format", "pickle")
-        )
+        
+        if merge_val_to_train:
+            # Load Val dataset to merge with Train
+            val_path = config["data"]["val_path"]
+            logger.info(f"[MERGE-VAL] Loading validation dataset to merge with train: {val_path}")
+            val_dataset_base = ShotDataset(
+                val_path,
+                file_format=config["data"].get("format", "pickle")
+            )
+            logger.info(f"[MERGE-VAL] Validation dataset loaded: {len(val_dataset_base)} samples")
+            
+            # Merge Train and Val datasets
+            train_dataset = ConcatDataset([train_dataset_base, val_dataset_base])
+            logger.info(f"[MERGE-VAL] Merged train dataset: {len(train_dataset_base)} (train) + {len(val_dataset_base)} (val) = {len(train_dataset)} samples")
+            
+            # Set Val dataset to None (not used when merged)
+            val_dataset = None
+            logger.info(f"[MERGE-VAL] Val dataset set to None (using merged train dataset only)")
+        else:
+            # Normal mode: separate Train and Val
+            train_dataset = train_dataset_base
+            val_dataset = ShotDataset(
+                config["data"]["val_path"],
+                file_format=config["data"].get("format", "pickle")
+            )
     
     # Create data loaders
     train_loader = create_dataloader(
@@ -605,8 +628,15 @@ def main():
     }
     
     # Create early stopping
+    merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+    if merge_val_to_train:
+        early_stopping_patience = 99999  # Effectively disable early stopping when Val is merged
+        logger.info("[MERGE-VAL] Early stopping disabled (Val merged to Train, no validation set)")
+    else:
+        early_stopping_patience = config.get("early_stopping", {}).get("patience", 10)
+    
     early_stopping = EarlyStopping(
-        patience=config.get("early_stopping", {}).get("patience", 10),
+        patience=early_stopping_patience,
         mode="max",
         restore_best_weights=True,
     )
@@ -641,8 +671,20 @@ def main():
             grad_clip_max_norm=grad_clip_max_norm,
         )
         
-        # Validation
-        val_metrics = validate_epoch(model, val_loader, criterion, device, metrics)
+        # Validation (skip if Val is merged to Train)
+        merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+        if merge_val_to_train and (val_loader is None or val_dataset is None):
+            # Create dummy val_metrics when Val is merged to Train
+            val_metrics = {
+                "loss": 0.0,
+                "auc_roc": 0.0,
+                "auc_pr": 0.0,
+                "accuracy": 0.0,
+                "f1": 0.0,
+            }
+            logger.info("[MERGE-VAL] Validation skipped (Val merged to Train)")
+        else:
+            val_metrics = validate_epoch(model, val_loader, criterion, device, metrics)
         
         # Update learning rate
         if scheduler is not None:
@@ -655,18 +697,29 @@ def main():
             current_lr = optimizer.param_groups[0]['lr']
         
         # Log metrics
-        logger.info(f"Epoch {epoch+1}/{config['train']['epochs']} - "
-                   f"Train: Loss={train_metrics['loss']:.4f}, "
-                   f"AUC-ROC={train_metrics['auc_roc']:.4f}, "
-                   f"AUC-PR={train_metrics['auc_pr']:.4f}, "
-                   f"Acc={train_metrics['accuracy']:.4f}, "
-                   f"F1={train_metrics['f1']:.4f} | "
-                   f"Val: Loss={val_metrics['loss']:.4f}, "
-                   f"AUC-ROC={val_metrics['auc_roc']:.4f}, "
-                   f"AUC-PR={val_metrics['auc_pr']:.4f}, "
-                   f"Acc={val_metrics['accuracy']:.4f}, "
-                   f"F1={val_metrics['f1']:.4f} | "
-                   f"LR={current_lr:.6f}")
+        merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+        if merge_val_to_train:
+            logger.info(f"Epoch {epoch+1}/{config['train']['epochs']} - "
+                       f"Train: Loss={train_metrics['loss']:.4f}, "
+                       f"AUC-ROC={train_metrics['auc_roc']:.4f}, "
+                       f"AUC-PR={train_metrics['auc_pr']:.4f}, "
+                       f"Acc={train_metrics['accuracy']:.4f}, "
+                       f"F1={train_metrics['f1']:.4f} | "
+                       f"Val: (skipped: Val merged to Train) | "
+                       f"LR={current_lr:.6f}")
+        else:
+            logger.info(f"Epoch {epoch+1}/{config['train']['epochs']} - "
+                       f"Train: Loss={train_metrics['loss']:.4f}, "
+                       f"AUC-ROC={train_metrics['auc_roc']:.4f}, "
+                       f"AUC-PR={train_metrics['auc_pr']:.4f}, "
+                       f"Acc={train_metrics['accuracy']:.4f}, "
+                       f"F1={train_metrics['f1']:.4f} | "
+                       f"Val: Loss={val_metrics['loss']:.4f}, "
+                       f"AUC-ROC={val_metrics['auc_roc']:.4f}, "
+                       f"AUC-PR={val_metrics['auc_pr']:.4f}, "
+                       f"Acc={val_metrics['accuracy']:.4f}, "
+                       f"F1={val_metrics['f1']:.4f} | "
+                       f"LR={current_lr:.6f}")
         
         # Update history
         for key in train_history:
@@ -674,23 +727,43 @@ def main():
             val_history[key].append(val_metrics[key])
         
         # Save best model
-        if val_metrics["auc_roc"] > best_val_auc:
-            best_val_auc = val_metrics["auc_roc"]
-            
-            checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "shot" / "best.ckpt"
-            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-            save_checkpoint(
-                model, optimizer, epoch, val_metrics["loss"], val_metrics,
-                checkpoint_path, scheduler
-            )
-            logger.info(f"New best model saved with AUC-ROC: {best_val_auc:.4f}")
+        merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+        if merge_val_to_train:
+            # Use Train AUC-ROC for best model when Val is merged
+            metric_for_best = train_metrics["auc_roc"]
+            if metric_for_best > best_val_auc:
+                best_val_auc = metric_for_best
+                checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "shot" / "best.ckpt"
+                checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                save_checkpoint(
+                    model, optimizer, epoch, train_metrics["loss"], train_metrics,
+                    checkpoint_path, scheduler
+                )
+                logger.info(f"New best model saved with Train AUC-ROC: {best_val_auc:.4f}")
+        else:
+            # Normal mode: use Val AUC-ROC
+            if val_metrics["auc_roc"] > best_val_auc:
+                best_val_auc = val_metrics["auc_roc"]
+                checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "shot" / "best.ckpt"
+                checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                save_checkpoint(
+                    model, optimizer, epoch, val_metrics["loss"], val_metrics,
+                    checkpoint_path, scheduler
+                )
+                logger.info(f"New best model saved with AUC-ROC: {best_val_auc:.4f}")
         
-        # Early stopping
-        if early_stopping(val_metrics["auc_roc"], model):
-            logger.info(f"Early stopping at epoch {epoch+1}")
-            break
+        # Early stopping (skip if Val is merged to Train)
+        merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+        if not merge_val_to_train:
+            if early_stopping(val_metrics["auc_roc"], model):
+                logger.info(f"Early stopping at epoch {epoch+1}")
+                break
     
-    logger.info(f"Training completed. Best validation AUC-ROC: {best_val_auc:.4f}")
+    merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+    if merge_val_to_train:
+        logger.info(f"Training completed. Best Train AUC-ROC: {best_val_auc:.4f} (Val merged to Train)")
+    else:
+        logger.info(f"Training completed. Best validation AUC-ROC: {best_val_auc:.4f}")
     
     # Save training history (CSV format, same as receiver prediction)
     csv_filename = f"training_history_{timestamp}.csv"
