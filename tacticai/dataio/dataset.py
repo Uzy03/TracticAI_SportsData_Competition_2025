@@ -485,6 +485,7 @@ class ShotDataset(TacticAIDataset):
             print(f"Schema __eq__: {self.schema.__class__.__eq__}")
             raise
         edge_index = self.schema.get_edge_index(sample)
+        edge_attr = self.schema.get_edge_attributes(sample)  # Get edge attributes if available
         target = self.schema.get_targets(sample)
         
         # Create batch tensor (all nodes belong to same graph)
@@ -495,6 +496,10 @@ class ShotDataset(TacticAIDataset):
             "edge_index": edge_index,
             "batch": batch,
         }
+        
+        # Add edge_attr if available
+        if edge_attr is not None:
+            input_data["edge_attr"] = edge_attr
         
         # Apply transforms
         input_data, target = self._apply_transforms(input_data, target)

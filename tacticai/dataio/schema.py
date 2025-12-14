@@ -906,6 +906,30 @@ class ShotSchema(DataSchema):
         
         return torch.tensor(shot_occurred, dtype=torch.float32).unsqueeze(0)
 
+    def get_edge_attributes(self, data: Dict[str, Any]) -> Optional[torch.Tensor]:
+        """Extract edge attributes for shot prediction (same as receiver schema).
+        
+        Uses ReceiverSchema to compute edge attributes.
+        
+        Args:
+            data: Raw data dictionary
+            
+        Returns:
+            Edge attributes tensor [E, edge_dim] or None
+        """
+        # Use ReceiverSchema to compute edge attributes
+        receiver_schema = ReceiverSchema(
+            position_columns=self.position_columns,
+            velocity_columns=self.velocity_columns,
+            player_attr_columns=self.player_attr_columns,
+            team_column=self.team_column,
+            ball_column=self.ball_column,
+            field_length=self.field_length,
+            field_width=self.field_width,
+            use_edge_attributes=True,
+        )
+        return receiver_schema.get_edge_attributes(data)
+    
     def get_receiver_target(self, data: Dict[str, Any]) -> torch.Tensor:
         """Extract receiver target if available."""
         if not self.receiver_column:

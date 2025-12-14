@@ -195,6 +195,77 @@ def load_checkpoint(
     return checkpoint
 
 
+def load_backbone_from_checkpoint(
+    checkpoint_path: Union[str, Path],
+    device: Optional[torch.device] = None,
+) -> Tuple[nn.Module, Dict[str, Any]]:
+    """Load pretrained backbone from checkpoint.
+    
+    Args:
+        checkpoint_path: Path to backbone checkpoint file
+        device: Device to load checkpoint on (default: cpu)
+        
+    Returns:
+        Tuple of (backbone_model, metadata)
+    """
+    if device is None:
+        device = torch.device("cpu")
+    
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Backbone checkpoint not found: {checkpoint_path}")
+    
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    if "metadata" not in checkpoint:
+        raise ValueError(f"Checkpoint does not contain metadata: {checkpoint_path}")
+    
+    metadata = checkpoint["metadata"]
+    
+    # Import models here to avoid circular imports
+    from tacticai.models import GATv2Network, GATv2Network4View
+    
+    use_d2 = metadata.get("use_d2_equivariance", False)
+    backbone_type = metadata.get("backbone_type", "GATv2Network" if not use_d2 else "GATv2Network4View")
+    
+    # Create backbone model
+    if backbone_type == "GATv2Network4View" or use_d2:
+        backbone = GATv2Network4View(
+            input_dim=metadata["input_dim"],
+            hidden_dim=metadata["hidden_dim"],
+            output_dim=metadata["hidden_dim"],
+            num_layers=metadata["num_layers"],
+            num_heads=metadata["num_heads"],
+            dropout=metadata["dropout"],
+            readout=None,  # Shot予測ではノード埋め込みが必要
+            residual=True,
+            view_mixing="attention",
+            edge_feature_dim=metadata.get("edge_dim", 1),
+        )
+    else:
+        backbone = GATv2Network(
+            input_dim=metadata["input_dim"],
+            hidden_dim=metadata["hidden_dim"],
+            output_dim=metadata["hidden_dim"],
+            num_layers=metadata["num_layers"],
+            num_heads=metadata["num_heads"],
+            dropout=metadata["dropout"],
+            readout=None,  # Shot予測ではノード埋め込みが必要
+            residual=True,
+            edge_feature_dim=metadata.get("edge_dim", 1),
+        )
+    
+    # Load state dict
+    if "backbone_state_dict" in checkpoint:
+        backbone.load_state_dict(checkpoint["backbone_state_dict"])
+    else:
+        raise ValueError(f"Checkpoint does not contain backbone_state_dict: {checkpoint_path}")
+    
+    backbone = backbone.to(device)
+    
+    return backbone, metadata
+
+
 def setup_logging(
     log_dir: Union[str, Path],
     log_level: str = "INFO",

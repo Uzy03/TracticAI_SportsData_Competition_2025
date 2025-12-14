@@ -6,7 +6,7 @@ This script trains a GATv2 model to predict shot occurrence in football matches.
 import argparse
 import yaml
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,14 +14,18 @@ from torch.utils.data import DataLoader
 import numpy as np
 from tqdm import tqdm
 
-from tacticai.models import GATv2Network, ShotHead
+from tacticai.models import GATv2Network, GATv2Network4View, ShotHead, ReceiverHead
+from tacticai.models.mlp_heads import ShotHeadNodeBased
 from tacticai.dataio import ShotDataset, create_dataloader, create_dummy_dataset
 from tacticai.modules import (
     BCELoss, AUC, F1Score, Accuracy,
     set_seed, get_device, save_checkpoint, setup_logging,
     CosineAnnealingScheduler, EarlyStopping, save_training_history,
 )
+from tacticai.modules.utils import load_backbone_from_checkpoint
 from tacticai.modules.transforms import RandomFlipTransform
+from tacticai.modules.view_ops import apply_view_transform, D2_VIEWS
+import torch.nn.functional as F
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -38,52 +42,191 @@ def load_config(config_path: str) -> Dict[str, Any]:
     return config
 
 
-class ShotModel(nn.Module):
-    """Complete shot prediction model."""
+class ShotModelWithReceiver(nn.Module):
+    """Shot prediction model with pretrained backbone and receiver conditioning.
     
-    def __init__(self, config: Dict[str, Any]):
+    Uses pretrained receiver prediction backbone and receiver head for conditional shot prediction.
+    Implements P(shot) = Σ P(shot | receiver=i) · P(receiver=i)
+    """
+    
+    def __init__(self, config: Dict[str, Any], device: torch.device):
         super().__init__()
+        self.config = config
+        self.device = device
+        
+        # Get D2 equivariance setting
+        d2_config = config.get("d2", {})
+        self.use_d2_equivariance = d2_config.get("enabled", False)
+        
+        pretrained_config = config.get("pretrained", {})
         model_config = config["model"]
         
-        # Create backbone
-        self.backbone = GATv2Network(
-            input_dim=model_config["input_dim"],
-            hidden_dim=model_config["hidden_dim"],
-            output_dim=model_config["hidden_dim"],
-            num_layers=model_config["num_layers"],
-            num_heads=model_config["num_heads"],
-            dropout=model_config["dropout"],
-            readout="mean",
-            residual=True,
-        )
+        # Load pretrained backbone
+        backbone_path = pretrained_config.get("backbone_path")
+        if backbone_path is None:
+            # Auto-select backbone checkpoint based on D2 setting
+            checkpoint_dir = config.get("checkpoint_dir", "checkpoints")
+            if self.use_d2_equivariance:
+                backbone_path = f"{checkpoint_dir}/receiver/backbone_d2.ckpt"
+            else:
+                backbone_path = f"{checkpoint_dir}/receiver/backbone_no_d2.ckpt"
         
-        # Create head
-        self.head = ShotHead(
+        self.backbone, backbone_metadata = load_backbone_from_checkpoint(backbone_path, device)
+        # Backbone will be fine-tuned (not frozen) based on config
+        if pretrained_config.get("freeze_backbone", False):
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+        
+        # Load pretrained receiver head (frozen, for inference)
+        use_receiver_for_conditioning = pretrained_config.get("use_receiver_for_conditioning", True)
+        if use_receiver_for_conditioning:
+            receiver_checkpoint_path = pretrained_config.get("receiver_checkpoint_path")
+            if receiver_checkpoint_path is None:
+                raise ValueError("pretrained.receiver_checkpoint_path must be specified when use_receiver_for_conditioning is True")
+            
+            receiver_checkpoint = torch.load(receiver_checkpoint_path, map_location=device)
+            self.receiver_head = ReceiverHead(
+                input_dim=model_config["hidden_dim"],
+                hidden_dim=model_config["hidden_dim"],
+                num_classes=22,  # 22 players
+                dropout=0.0,  # No dropout for inference
+            )
+            # Extract receiver head weights from checkpoint
+            receiver_head_state = {}
+            for k, v in receiver_checkpoint.get("model_state_dict", {}).items():
+                if k.startswith("head."):
+                    new_key = k.replace("head.", "")
+                    receiver_head_state[new_key] = v
+            
+            if receiver_head_state:
+                self.receiver_head.load_state_dict(receiver_head_state)
+            self.receiver_head.requires_grad_(False)  # Freeze receiver head
+        else:
+            self.receiver_head = None
+        
+        # Shot prediction head (trainable)
+        self.shot_head = ShotHeadNodeBased(
             input_dim=model_config["hidden_dim"],
             hidden_dim=model_config["hidden_dim"],
             dropout=model_config["dropout"],
+            use_context=False,  # ノード埋め込みのみを使用（設計図に基づく）
         )
     
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_attr: Optional[torch.Tensor] = None,
+        batch: Optional[torch.Tensor] = None,
+        receiver_probs: Optional[torch.Tensor] = None,
+        use_gt_receiver: bool = False,
+        gt_receiver: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Forward pass.
         
         Args:
-            x: Node features
-            edge_index: Edge indices
-            batch: Batch indices
+            x: Node features [N, input_dim]
+            edge_index: Edge indices [2, E]
+            edge_attr: Edge features [E, edge_dim] (optional)
+            batch: Batch indices [N] (optional)
+            receiver_probs: Receiver probability distribution [B, 22] (optional, precomputed)
+            use_gt_receiver: Whether to use GT receiver (training mode)
+            gt_receiver: GT receiver IDs [B] (optional, for training)
             
         Returns:
-            Shot predictions
+            Shot probability logit [B, 1]
         """
-        # Get graph embeddings from backbone
-        outputs = self.backbone(x, edge_index, batch=batch)
-        if isinstance(outputs, tuple):
-            _, graph_embeddings = outputs
+        # Process batch dimension
+        if batch is not None:
+            B = batch.max().item() + 1
         else:
-            graph_embeddings = outputs
+            B = 1
         
-        # Apply head
-        return self.head(graph_embeddings)
+        # Get node embeddings from backbone
+        if self.use_d2_equivariance:
+            # D2 equivariance: Create 4 views and use GATv2Network4View
+            views_list = []
+            for view_idx in range(len(D2_VIEWS)):
+                x_view = x.clone()
+                # Apply D2 reflection to coordinate-like features
+                x_view = apply_view_transform(x_view, view_idx, xy_indices=(0, 1))  # x, y
+                if x_view.size(-1) > 3:
+                    x_view = apply_view_transform(x_view, view_idx, xy_indices=(2, 3))  # vx, vy
+                if x_view.size(-1) > 8:
+                    x_view = apply_view_transform(x_view, view_idx, xy_indices=(7, 8))  # dx_to_kicker, dy_to_kicker
+                if x_view.size(-1) > 12:
+                    x_view = apply_view_transform(x_view, view_idx, xy_indices=(11, 12))  # dx_to_goal, dy_to_goal
+                views_list.append(x_view)
+            
+            # Stack views: [4, N, D] -> [B, 4, N_per_graph, D]
+            x_views = torch.stack(views_list, dim=0)  # [4, N, D]
+            N_total = x.size(0)
+            num_nodes_per_graph = N_total // B if B > 1 else N_total
+            x_4view = x_views.view(4, B, num_nodes_per_graph, -1).permute(1, 0, 2, 3)  # [B, 4, N_per_graph, D]
+            
+            # Get node embeddings: [B, N_per_graph, hidden_dim]
+            node_emb_4view = self.backbone(x_4view, edge_index, edge_attr)  # [B, 4, N_per_graph, hidden_dim]
+            H = node_emb_4view.mean(dim=1)  # Average over 4 views: [B, N_per_graph, hidden_dim]
+        else:
+            # Standard mode: No D2 equivariance
+            N_total = x.size(0)
+            num_nodes_per_graph = N_total // B if B > 1 else N_total
+            H = self.backbone(x, edge_index, edge_attr)  # [N, hidden_dim] or [B, N_per_graph, hidden_dim]
+            if H.dim() == 2:
+                # Reshape to [B, N_per_graph, hidden_dim]
+                H = H.view(B, num_nodes_per_graph, -1)
+        
+        # Get receiver probabilities
+        if receiver_probs is None:
+            if use_gt_receiver and gt_receiver is not None:
+                # Use GT receiver (one-hot distribution)
+                receiver_probs = F.one_hot(gt_receiver, num_classes=22).float()  # [B, 22]
+            elif self.receiver_head is not None:
+                # Use pretrained receiver model
+                # H: [B, N_per_graph, hidden_dim]
+                # ReceiverHead expects [B*N, hidden_dim] and returns [B*N, 22]
+                B, N, D = H.shape
+                H_flat = H.view(-1, D)  # [B*N, hidden_dim]
+                receiver_logits_flat = self.receiver_head(H_flat)  # [B*N, 22]
+                receiver_logits = receiver_logits_flat.view(B, N, 22)  # [B, N, 22]
+                # ReceiverHead outputs per-node logits [B, N, 22]
+                # Each node has logits for all 22 players
+                # We need to aggregate across nodes to get a single probability distribution
+                # Use mean pooling (simple and works well)
+                receiver_logits_mean = receiver_logits.mean(dim=1)  # [B, 22]
+                receiver_probs = F.softmax(receiver_logits_mean, dim=1)  # [B, 22]
+            else:
+                # Uniform distribution
+                receiver_probs = torch.ones(B, 22, device=H.device) / 22
+        
+        # Shot prediction per node
+        shot_logits_per_node = self.shot_head(H)  # [B, N_per_graph]
+        shot_probs_per_node = torch.sigmoid(shot_logits_per_node)  # [B, N_per_graph]
+        
+        # Aggregate with receiver probabilities: Σ σ(s_i) × p_i
+        # shot_probs_per_node: [B, N_per_graph], receiver_probs: [B, N] or [B, 22]
+        # Ensure dimensions match
+        if receiver_probs.size(1) == shot_probs_per_node.size(1):
+            # Perfect match: direct element-wise multiplication and sum
+            shot_prob = (shot_probs_per_node * receiver_probs).sum(dim=1, keepdim=True)  # [B, 1]
+        elif receiver_probs.size(1) == 22 and shot_probs_per_node.size(1) == 22:
+            # Both are 22 (all players)
+            shot_prob = (shot_probs_per_node * receiver_probs).sum(dim=1, keepdim=True)  # [B, 1]
+        else:
+            # Dimension mismatch: use mean pooling as fallback
+            shot_prob = shot_probs_per_node.mean(dim=1, keepdim=True)  # [B, 1]
+        
+        # Convert probability to logit for loss computation
+        # Use logit = log(p / (1-p)) with numerical stability
+        epsilon = 1e-8
+        shot_prob_clamped = torch.clamp(shot_prob, epsilon, 1.0 - epsilon)
+        shot_logit = torch.log(shot_prob_clamped / (1.0 - shot_prob_clamped))
+        
+        return shot_logit
+
+
+# Backward compatibility alias
+ShotModel = ShotModelWithReceiver
 
 
 def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
@@ -96,14 +239,18 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
     Returns:
         Shot prediction model
     """
-    model = ShotModel(config)
+    # Check if pretrained backbone is specified
+    if config.get("pretrained", {}).get("backbone_path"):
+        model = ShotModelWithReceiver(config, device)
+    else:
+        # Fallback to old ShotModel for backward compatibility
+        model = ShotModel(config)
+        model = model.to(device)
     
-    # Apply D2 group pooling if enabled
-    if config.get("d2", {}).get("group_pool", False):
-        from tacticai.modules.transforms import GroupPoolingWrapper
-        model = GroupPoolingWrapper(model, average_logits=True)
+    # Note: D2 equivariance is handled internally in ShotModelWithReceiver
+    # No need for GroupPoolingWrapper
     
-    return model.to(device)
+    return model
 
 
 def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimizer:
@@ -117,7 +264,31 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
         Optimizer instance
     """
     opt_config = config["optimizer"]
+    pretrained_config = config.get("pretrained", {})
     
+    # Check if different learning rates are specified for backbone and head
+    if pretrained_config.get("lr_backbone") is not None and pretrained_config.get("lr_head") is not None:
+        # Use different learning rates for backbone and head
+        if hasattr(model, 'backbone') and hasattr(model, 'shot_head'):
+            # Separate parameter groups
+            backbone_params = list(model.backbone.parameters())
+            head_params = list(model.shot_head.parameters())
+            
+            if opt_config["type"] == "adam":
+                optimizer = optim.Adam([
+                    {'params': backbone_params, 'lr': pretrained_config["lr_backbone"]},
+                    {'params': head_params, 'lr': pretrained_config["lr_head"]},
+                ], weight_decay=opt_config.get("weight_decay", 1e-4))
+            elif opt_config["type"] == "adamw":
+                optimizer = optim.AdamW([
+                    {'params': backbone_params, 'lr': pretrained_config["lr_backbone"]},
+                    {'params': head_params, 'lr': pretrained_config["lr_head"]},
+                ], weight_decay=opt_config.get("weight_decay", 1e-4))
+            else:
+                raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
+            return optimizer
+    
+    # Default: use same learning rate for all parameters
     if opt_config["type"] == "adam":
         optimizer = optim.Adam(
             model.parameters(),
@@ -204,17 +375,38 @@ def train_epoch(
         
         optimizer.zero_grad()
         
+        # Extract edge_attr if available
+        edge_attr = data.get("edge_attr", None)
+        
+        # Extract GT receiver if available (for training)
+        use_gt_receiver = data.get("receiver_id") is not None
+        gt_receiver = data.get("receiver_id", None)
+        
         if use_amp and scaler is not None:
             with torch.cuda.amp.autocast():
-                outputs = model(data["x"], data["edge_index"], data["batch"])
-                loss = criterion(outputs, targets)
+                outputs = model(
+                    x=data["x"],
+                    edge_index=data["edge_index"],
+                    edge_attr=edge_attr,
+                    batch=data["batch"],
+                    use_gt_receiver=use_gt_receiver,
+                    gt_receiver=gt_receiver,
+                )
+                loss = criterion(outputs, targets.unsqueeze(1) if targets.dim() == 1 else targets)
             
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
-            outputs = model(data["x"], data["edge_index"], data["batch"])
-            loss = criterion(outputs, targets)
+            outputs = model(
+                x=data["x"],
+                edge_index=data["edge_index"],
+                edge_attr=edge_attr,
+                batch=data["batch"],
+                use_gt_receiver=use_gt_receiver,
+                gt_receiver=gt_receiver,
+            )
+            loss = criterion(outputs, targets.unsqueeze(1) if targets.dim() == 1 else targets)
             
             loss.backward()
             optimizer.step()
@@ -278,8 +470,17 @@ def validate_epoch(
             data = {k: v.to(device) for k, v in data.items()}
             targets = targets.to(device)
             
-            outputs = model(data["x"], data["edge_index"], data["batch"])
-            loss = criterion(outputs, targets)
+            # Extract edge_attr if available
+            edge_attr = data.get("edge_attr", None)
+            
+            outputs = model(
+                x=data["x"],
+                edge_index=data["edge_index"],
+                edge_attr=edge_attr,
+                batch=data["batch"],
+                use_gt_receiver=False,  # ValidationではReceiver予測を使用
+            )
+            loss = criterion(outputs, targets.unsqueeze(1) if targets.dim() == 1 else targets)
             
             total_loss += loss.item()
             
