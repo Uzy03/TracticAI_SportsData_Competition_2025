@@ -373,15 +373,23 @@ def train_epoch(
     num_batches = len(dataloader)
     log_interval = max(1, num_batches // 10)  # Log every 10% of batches
     
+    import time
     for batch_idx, (data, targets) in enumerate(dataloader):
         if batch_idx == 0:
             logger.info(f"Starting training epoch: {num_batches} batches")
+            t0 = time.time()
         
         if batch_idx % log_interval == 0:
             logger.info(f"  Batch {batch_idx}/{num_batches} ({(batch_idx/num_batches)*100:.1f}%)")
+        
+        t1 = time.time()
         # Move data to device
         data = {k: v.to(device) for k, v in data.items()}
         targets = targets.to(device)
+        t2 = time.time()
+        
+        if batch_idx == 0:
+            logger.info(f"  Batch {batch_idx}: Data loading took {t1-t0:.2f}s, Device transfer took {t2-t1:.2f}s")
         
         optimizer.zero_grad()
         
@@ -391,6 +399,8 @@ def train_epoch(
         # Extract GT receiver if available (for training)
         use_gt_receiver = data.get("receiver_id") is not None
         gt_receiver = data.get("receiver_id", None)
+        
+        t3 = time.time()
         
         if use_amp and scaler is not None:
             with torch.cuda.amp.autocast():
@@ -417,9 +427,23 @@ def train_epoch(
                 gt_receiver=gt_receiver,
             )
             loss = criterion(outputs, targets.unsqueeze(1) if targets.dim() == 1 else targets)
-            
+        
+        t4 = time.time()
+        
+        if batch_idx == 0:
+            logger.info(f"  Batch {batch_idx}: Forward pass took {t4-t3:.2f}s")
+        
+        if use_amp and scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
             loss.backward()
             optimizer.step()
+        
+        t5 = time.time()
+        if batch_idx == 0:
+            logger.info(f"  Batch {batch_idx}: Backward pass took {t5-t4:.2f}s, Total batch time: {t5-t1:.2f}s")
         
         total_loss += loss.item()
         
