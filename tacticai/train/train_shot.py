@@ -78,6 +78,12 @@ class ShotModelWithReceiver(nn.Module):
         if self.freeze_backbone:
             for param in self.backbone.parameters():
                 param.requires_grad = False
+            # Verify backbone is frozen
+            frozen_params = sum(1 for p in self.backbone.parameters() if not p.requires_grad)
+            total_params = sum(1 for p in self.backbone.parameters())
+            import logging
+            logger = logging.getLogger("tacticai")
+            logger.info(f"Backbone frozen: {frozen_params}/{total_params} parameters have requires_grad=False")
         
         # Load pretrained receiver head (frozen, for inference)
         use_receiver_for_conditioning = pretrained_config.get("use_receiver_for_conditioning", True)
@@ -186,6 +192,16 @@ class ShotModelWithReceiver(nn.Module):
                 pass
             else:
                 raise ValueError(f"Unexpected H shape: {H.shape}, expected 2D or 3D")
+        
+        # Debug: Check for NaN/Inf in H (backbone output)
+        if torch.isnan(H).any() or torch.isinf(H).any():
+            import logging
+            logger = logging.getLogger("tacticai")
+            logger.warning(f"NaN/Inf in H (backbone output)! H stats: mean={H.mean().item():.6f}, std={H.std().item():.6f}, min={H.min().item():.6f}, max={H.max().item():.6f}")
+            # Clamp H to prevent NaN/Inf propagation
+            H = torch.clamp(H, min=-100.0, max=100.0)
+            # Replace NaN/Inf with 0
+            H = torch.nan_to_num(H, nan=0.0, posinf=100.0, neginf=-100.0)
         
         # Get receiver probabilities
         if receiver_probs is None:
