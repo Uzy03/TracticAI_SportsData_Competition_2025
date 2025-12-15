@@ -173,10 +173,19 @@ class ShotModelWithReceiver(nn.Module):
             # Standard mode: No D2 equivariance
             N_total = x.size(0)
             num_nodes_per_graph = N_total // B if B > 1 else N_total
-            H = self.backbone(x, edge_index, edge_attr)  # [N, hidden_dim] or [B, N_per_graph, hidden_dim]
+            
+            # GATv2Network returns [N, hidden_dim] when batch is None, [B, N_per_graph, hidden_dim] when batch is provided
+            # We need to pass batch=None to get node embeddings (not graph-level readout)
+            H = self.backbone(x, edge_index, edge_attr, batch=None)  # [N, hidden_dim]
+            
+            # Reshape to [B, N_per_graph, hidden_dim]
             if H.dim() == 2:
-                # Reshape to [B, N_per_graph, hidden_dim]
                 H = H.view(B, num_nodes_per_graph, -1)
+            elif H.dim() == 3:
+                # Already in [B, N_per_graph, hidden_dim] format
+                pass
+            else:
+                raise ValueError(f"Unexpected H shape: {H.shape}, expected 2D or 3D")
         
         # Get receiver probabilities
         if receiver_probs is None:
@@ -208,10 +217,33 @@ class ShotModelWithReceiver(nn.Module):
             # Dimension mismatch: use mean pooling as fallback
             shot_prob = shot_probs_per_node.mean(dim=1, keepdim=True)  # [B, 1]
         
+        # Check for NaN in aggregated shot_prob
+        if torch.isnan(shot_prob).any() or torch.isinf(shot_prob).any():
+            import logging
+            logger = logging.getLogger("tacticai")
+            logger.warning(f"NaN/Inf in shot_prob after aggregation! shot_probs_per_node shape={shot_probs_per_node.shape}, receiver_probs shape={receiver_probs.shape}")
+            # Replace NaN/Inf with 0.5 (neutral probability)
+            shot_prob = torch.where(
+                torch.isnan(shot_prob) | torch.isinf(shot_prob),
+                torch.full_like(shot_prob, 0.5),
+                shot_prob
+            )
+        
         # Convert probability to logit for loss computation
+        # Use more stable computation to avoid NaN
         epsilon = 1e-8
         shot_prob_clamped = torch.clamp(shot_prob, epsilon, 1.0 - epsilon)
-        shot_logit = torch.log(shot_prob_clamped / (1.0 - shot_prob_clamped))
+        
+        # More stable logit computation: use torch.logit which handles edge cases better
+        shot_logit = torch.logit(shot_prob_clamped, eps=epsilon)
+        
+        # Check for NaN/Inf and handle
+        if torch.isnan(shot_logit).any() or torch.isinf(shot_logit).any():
+            # Fallback: manual computation with better numerical stability
+            # logit(p) = log(p) - log(1-p)
+            shot_logit = torch.log(shot_prob_clamped + epsilon) - torch.log(1.0 - shot_prob_clamped + epsilon)
+            # Clamp extreme values to prevent overflow
+            shot_logit = torch.clamp(shot_logit, -50.0, 50.0)
         
         return shot_logit
 
@@ -389,6 +421,13 @@ def train_epoch(
                 # outputs: [B, 1], targets: [B] or [B, 1]
                 loss = criterion(outputs, targets.unsqueeze(1) if targets.dim() == 1 else targets)
             
+            # Check for NaN in loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                logger.warning(f"NaN/Inf loss detected (AMP)! outputs: min={outputs.min().item():.6f}, max={outputs.max().item():.6f}, mean={outputs.mean().item():.6f}, has_nan={torch.isnan(outputs).any().item()}, has_inf={torch.isinf(outputs).any().item()}")
+                logger.warning(f"targets: min={targets.min().item():.6f}, max={targets.max().item():.6f}, mean={targets.mean().item():.6f}")
+                # Skip this batch
+                continue
+            
             scaler.scale(loss).backward()
             if grad_clip_enabled:
                 scaler.unscale_(optimizer)
@@ -406,6 +445,13 @@ def train_epoch(
             )
             # outputs: [B, 1], targets: [B] or [B, 1]
             loss = criterion(outputs, targets.unsqueeze(1) if targets.dim() == 1 else targets)
+            
+            # Check for NaN in loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                logger.warning(f"NaN/Inf loss detected! outputs: min={outputs.min().item():.6f}, max={outputs.max().item():.6f}, mean={outputs.mean().item():.6f}, has_nan={torch.isnan(outputs).any().item()}, has_inf={torch.isinf(outputs).any().item()}")
+                logger.warning(f"targets: min={targets.min().item():.6f}, max={targets.max().item():.6f}, mean={targets.mean().item():.6f}")
+                # Skip this batch
+                continue
             
             loss.backward()
             if grad_clip_enabled:
