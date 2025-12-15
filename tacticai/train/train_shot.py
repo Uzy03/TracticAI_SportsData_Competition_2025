@@ -73,8 +73,9 @@ class ShotModelWithReceiver(nn.Module):
                 backbone_path = f"{checkpoint_dir}/receiver/backbone_no_d2.ckpt"
         
         self.backbone, backbone_metadata = load_backbone_from_checkpoint(backbone_path, device)
-        # Backbone will be fine-tuned (not frozen) based on config
-        if pretrained_config.get("freeze_backbone", False):
+        # Backbone will be frozen if freeze_backbone is True
+        self.freeze_backbone = pretrained_config.get("freeze_backbone", True)  # Default to True (frozen)
+        if self.freeze_backbone:
             for param in self.backbone.parameters():
                 param.requires_grad = False
         
@@ -248,8 +249,9 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
     pretrained_config = config.get("pretrained", {})
     
     # Check if different learning rates are specified for backbone and head
-    if pretrained_config.get("lr_backbone") is not None and pretrained_config.get("lr_head") is not None:
-        # Separate learning rates for backbone and head
+    freeze_backbone = config.get("pretrained", {}).get("freeze_backbone", True)  # Default to True (frozen)
+    if not freeze_backbone and pretrained_config.get("lr_backbone") is not None and pretrained_config.get("lr_head") is not None:
+        # Separate learning rates for backbone and head (only if backbone is not frozen)
         backbone_params = list(model.backbone.parameters())
         head_params = list(model.shot_head.parameters())
         
@@ -266,10 +268,18 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
         else:
             raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
     else:
-        # Use single learning rate for all parameters
+        # Use single learning rate for trainable parameters only
+        # If backbone is frozen, only shot_head parameters will be optimized
+        if freeze_backbone:
+            # Only optimize shot_head (backbone is frozen)
+            trainable_params = list(model.shot_head.parameters())
+        else:
+            # Optimize all parameters
+            trainable_params = list(model.parameters())
+        
         if opt_config["type"] == "adam":
             optimizer = optim.Adam(
-                model.parameters(),
+                trainable_params,
                 lr=opt_config["lr"],
                 weight_decay=opt_config.get("weight_decay", 0.0),
             )
