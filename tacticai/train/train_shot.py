@@ -11,7 +11,7 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader, ConcatDataset, Subset
 import numpy as np
 from tqdm import tqdm
 
@@ -89,7 +89,7 @@ class ShotModelWithReceiver(nn.Module):
             receiver_checkpoint = torch.load(receiver_checkpoint_path, map_location=device)
             self.receiver_head = ReceiverHead(
                 input_dim=model_config["hidden_dim"],
-                hidden_dim=model_config["hidden_dim"],
+            hidden_dim=model_config["hidden_dim"],
                 num_classes=22,  # 22 players
                 dropout=0.0,  # No dropout for inference
             ).to(device)
@@ -230,6 +230,10 @@ class ShotModelWithReceiver(nn.Module):
             )
         
         # Convert probability to logit for loss computation
+        # NOTE: We already have shot_logits_per_node from shot_head, but we aggregate probabilities
+        # because we're using conditional probability model: P(shot) = Σ P(shot|receiver=i) * P(receiver=i)
+        # After aggregation, we convert back to logit for BCE loss
+        
         # Use more stable computation to avoid NaN
         epsilon = 1e-8
         shot_prob_clamped = torch.clamp(shot_prob, epsilon, 1.0 - epsilon)
@@ -237,13 +241,18 @@ class ShotModelWithReceiver(nn.Module):
         # More stable logit computation: use torch.logit which handles edge cases better
         shot_logit = torch.logit(shot_prob_clamped, eps=epsilon)
         
+        # Clamp logit values to prevent extreme values that cause high loss
+        # logit(0.01) ≈ -4.6, logit(0.99) ≈ 4.6
+        # Clamp to reasonable range: [-10, 10] corresponds to prob [0.00005, 0.99995]
+        shot_logit = torch.clamp(shot_logit, -10.0, 10.0)
+        
         # Check for NaN/Inf and handle
         if torch.isnan(shot_logit).any() or torch.isinf(shot_logit).any():
             # Fallback: manual computation with better numerical stability
             # logit(p) = log(p) - log(1-p)
             shot_logit = torch.log(shot_prob_clamped + epsilon) - torch.log(1.0 - shot_prob_clamped + epsilon)
             # Clamp extreme values to prevent overflow
-            shot_logit = torch.clamp(shot_logit, -50.0, 50.0)
+            shot_logit = torch.clamp(shot_logit, -10.0, 10.0)
         
         return shot_logit
 
@@ -291,9 +300,9 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
             {"params": backbone_params, "lr": pretrained_config["lr_backbone"]},
             {"params": head_params, "lr": pretrained_config["lr_head"]},
         ]
-        
-        if opt_config["type"] == "adam":
-            optimizer = optim.Adam(
+    
+    if opt_config["type"] == "adam":
+        optimizer = optim.Adam(
                 param_groups,
                 weight_decay=opt_config.get("weight_decay", 0.0),
             )
@@ -312,11 +321,11 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
         if opt_config["type"] == "adam":
             optimizer = optim.Adam(
                 trainable_params,
-                lr=opt_config["lr"],
+            lr=opt_config["lr"],
                 weight_decay=opt_config.get("weight_decay", 0.0),
-            )
-        else:
-            raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
+        )
+    else:
+        raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
     
     return optimizer
 
@@ -493,7 +502,7 @@ def train_epoch(
         binary_preds = (probs > 0.5).long()  # [N]
         
         # Compute AUC (works with probabilities/logits)
-        auc_roc, auc_pr = metrics["auc"](all_predictions, all_targets, compute_auc_pr=True)
+    auc_roc, auc_pr = metrics["auc"](all_predictions, all_targets, compute_auc_pr=True)
         
         # Compute accuracy for binary classification
         accuracy = (binary_preds == all_targets).float().mean()
@@ -505,14 +514,14 @@ def train_epoch(
         precision = tp / (tp + fp + 1e-8)
         recall = tp / (tp + fn + 1e-8)
         f1 = 2 * precision * recall / (precision + recall + 1e-8)
-        
-        epoch_metrics = {
+    
+    epoch_metrics = {
             "loss": total_loss / num_samples,
-            "auc_roc": auc_roc.item(),
-            "auc_pr": auc_pr.item(),
+        "auc_roc": auc_roc.item(),
+        "auc_pr": auc_pr.item(),
             "accuracy": accuracy.item(),
             "f1": f1.item(),
-        }
+    }
     
     return epoch_metrics
 
@@ -652,14 +661,58 @@ def main():
     merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
     
     if args.debug_overfit:
-        # Use small dataset for overfit test
+        # Use small dataset for overfit test (command-line flag)
         train_dataset = create_dummy_dataset("shot", num_samples=10, num_players=22)
         val_dataset = create_dummy_dataset("shot", num_samples=5, num_players=22)
+        logger.info(f"[DEBUG-OVERFIT] Using dummy dataset: train={len(train_dataset)}, val={len(val_dataset)}")
     else:
-        train_dataset_base = ShotDataset(
+        # Check if debug_overfit is enabled in config
+        debug_overfit_config = config.get("debug_overfit", {})
+        use_debug_overfit = debug_overfit_config.get("enabled", False)
+        
+        if use_debug_overfit:
+            # Load full training dataset first
+            logger.info("[DEBUG-OVERFIT] Creating mini subset for overfitting test...")
+            full_train_dataset = ShotDataset(
+                config["data"]["train_path"],
+                file_format=config["data"].get("format", "pickle")
+            )
+            
+            # Override num_samples from command line if provided
+            num_samples = debug_overfit_config.get("num_samples", 8)
+            subset_seed = debug_overfit_config.get("seed", 42)
+            
+            # Create reproducible subset indices
+            rng = np.random.RandomState(subset_seed)
+            total_samples = len(full_train_dataset)
+            if num_samples > total_samples:
+                logger.warning(
+                    f"[DEBUG-OVERFIT] Requested {num_samples} samples but only {total_samples} available. "
+                    f"Using all {total_samples} samples."
+                )
+                num_samples = total_samples
+            
+            # Shuffle and select subset indices
+            indices = rng.permutation(total_samples)[:num_samples]
+            indices = sorted(indices.tolist())  # Sort for reproducibility
+            
+            logger.info(
+                f"[DEBUG-OVERFIT] Selected {len(indices)} samples from {total_samples} total samples "
+                f"(seed={subset_seed}, indices={indices[:5]}...{indices[-5:] if len(indices) > 10 else indices})"
+            )
+            
+            # Create subset datasets (train=val=same samples for overfitting test)
+            train_dataset = Subset(full_train_dataset, indices)
+            val_dataset = Subset(full_train_dataset, indices)  # Same samples for train and val
+            logger.info(
+                f"[DEBUG-OVERFIT] Created subset datasets: train={len(train_dataset)}, val={len(val_dataset)} (same samples)"
+            )
+            merge_val_to_train = False  # Disable merge when using debug_overfit
+        else:
+            train_dataset_base = ShotDataset(
             config["data"]["train_path"],
-            file_format=config["data"].get("format", "pickle")
-        )
+                file_format=config["data"].get("format", "pickle")
+            )
         
         if merge_val_to_train:
             # Load Val dataset to merge with Train
@@ -681,10 +734,10 @@ def main():
         else:
             # Normal mode: separate Train and Val
             train_dataset = train_dataset_base
-            val_dataset = ShotDataset(
-                config["data"]["val_path"],
+        val_dataset = ShotDataset(
+            config["data"]["val_path"],
                 file_format=config["data"].get("format", "pickle")
-            )
+        )
     
     # Create data loaders
     train_loader = create_dataloader(
@@ -700,13 +753,13 @@ def main():
         val_loader = None
         logger.info("[MERGE-VAL] Val loader set to None (Val merged to Train)")
     else:
-        val_loader = create_dataloader(
-            val_dataset,
-            batch_size=config["train"]["batch_size"],
-            shuffle=False,
-            num_workers=config.get("num_workers", 0),
-            pin_memory=False,  # Disable pin_memory for MPS compatibility
-        )
+    val_loader = create_dataloader(
+        val_dataset,
+        batch_size=config["train"]["batch_size"],
+        shuffle=False,
+        num_workers=config.get("num_workers", 0),
+        pin_memory=False,  # Disable pin_memory for MPS compatibility
+    )
     
     # Create test dataset and loader (for final evaluation)
     test_dataset = None
@@ -758,8 +811,14 @@ def main():
     }
     
     # Create early stopping
+    # Disable early stopping for debug_overfit mode or when Val is merged to Train
+    debug_overfit_config = config.get("debug_overfit", {})
+    use_debug_overfit = debug_overfit_config.get("enabled", False) or args.debug_overfit
     merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
-    if merge_val_to_train:
+    if use_debug_overfit:
+        early_stopping_patience = 99999  # Effectively disable early stopping
+        logger.info("[DEBUG-OVERFIT] Early stopping disabled (patience=99999)")
+    elif merge_val_to_train:
         early_stopping_patience = 99999  # Effectively disable early stopping when Val is merged
         logger.info("[MERGE-VAL] Early stopping disabled (Val merged to Train, no validation set)")
     else:
@@ -814,7 +873,7 @@ def main():
             }
             logger.info("[MERGE-VAL] Validation skipped (Val merged to Train)")
         else:
-            val_metrics = validate_epoch(model, val_loader, criterion, device, metrics)
+        val_metrics = validate_epoch(model, val_loader, criterion, device, metrics)
         
         # Update learning rate
         if scheduler is not None:
@@ -857,7 +916,14 @@ def main():
             val_history[key].append(val_metrics[key])
         
         # Save CSV history after each epoch (overwrite mode, same as receiver prediction)
-        csv_filename = f"training_history_{timestamp}.csv"
+        # Use debug_overfit-specific filename if enabled
+        debug_overfit_config = config.get("debug_overfit", {})
+        use_debug_overfit = debug_overfit_config.get("enabled", False) or args.debug_overfit
+        if use_debug_overfit:
+            num_samples = debug_overfit_config.get("num_samples", 8) if debug_overfit_config.get("enabled", False) else 10
+            csv_filename = f"training_history_debug_overfit_n{num_samples}_{timestamp}.csv"
+        else:
+            csv_filename = f"training_history_{timestamp}.csv"
         csv_dir = Path(config.get("log_dir", "runs")) / "shot"
         csv_dir.mkdir(parents=True, exist_ok=True)
         csv_path = csv_dir / csv_filename
@@ -887,28 +953,28 @@ def main():
                 logger.info(f"New best model saved with Train AUC-ROC: {best_val_auc:.4f} (D2: {use_d2})")
         else:
             # Normal mode: use Val AUC-ROC
-            if val_metrics["auc_roc"] > best_val_auc:
-                best_val_auc = val_metrics["auc_roc"]
+        if val_metrics["auc_roc"] > best_val_auc:
+            best_val_auc = val_metrics["auc_roc"]
                 checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "shot" / checkpoint_filename
                 checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-                save_checkpoint(
-                    model, optimizer, epoch, val_metrics["loss"], val_metrics,
-                    checkpoint_path, scheduler
-                )
+            save_checkpoint(
+                model, optimizer, epoch, val_metrics["loss"], val_metrics,
+                checkpoint_path, scheduler
+            )
                 logger.info(f"New best model saved with AUC-ROC: {best_val_auc:.4f} (D2: {use_d2})")
         
         # Early stopping (skip if Val is merged to Train)
         merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
         if not merge_val_to_train:
-            if early_stopping(val_metrics["auc_roc"], model):
-                logger.info(f"Early stopping at epoch {epoch+1}")
-                break
+        if early_stopping(val_metrics["auc_roc"], model):
+            logger.info(f"Early stopping at epoch {epoch+1}")
+            break
     
     merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
     if merge_val_to_train:
         logger.info(f"Training completed. Best Train AUC-ROC: {best_val_auc:.4f} (Val merged to Train)")
     else:
-        logger.info(f"Training completed. Best validation AUC-ROC: {best_val_auc:.4f}")
+    logger.info(f"Training completed. Best validation AUC-ROC: {best_val_auc:.4f}")
     
     # Evaluate on test set if available
     test_history = None
@@ -931,7 +997,14 @@ def main():
         )
     
     # Save final CSV with test metrics (overwrite mode, same as receiver prediction)
-    csv_filename = f"training_history_{timestamp}.csv"
+    # Use debug_overfit-specific filename if enabled
+    debug_overfit_config = config.get("debug_overfit", {})
+    use_debug_overfit = debug_overfit_config.get("enabled", False) or args.debug_overfit
+    if use_debug_overfit:
+        num_samples = debug_overfit_config.get("num_samples", 8) if debug_overfit_config.get("enabled", False) else 10
+        csv_filename = f"training_history_debug_overfit_n{num_samples}_{timestamp}.csv"
+    else:
+        csv_filename = f"training_history_{timestamp}.csv"
     csv_dir = Path(config.get("log_dir", "runs")) / "shot"
     csv_dir.mkdir(parents=True, exist_ok=True)
     csv_path = csv_dir / csv_filename
