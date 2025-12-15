@@ -352,10 +352,10 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
             {"params": head_params, "lr": pretrained_config["lr_head"]},
         ]
     
-        if opt_config["type"] == "adam":
-            optimizer = optim.Adam(
-            param_groups,
-            weight_decay=opt_config.get("weight_decay", 0.0),
+    if opt_config["type"] == "adam":
+        optimizer = optim.Adam(
+                param_groups,
+                weight_decay=opt_config.get("weight_decay", 0.0),
             )
         else:
             raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
@@ -371,9 +371,9 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
         
         if opt_config["type"] == "adam":
             optimizer = optim.Adam(
-            trainable_params,
+                trainable_params,
             lr=opt_config["lr"],
-            weight_decay=opt_config.get("weight_decay", 0.0),
+                weight_decay=opt_config.get("weight_decay", 0.0),
         )
     else:
         raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
