@@ -321,7 +321,7 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
         if opt_config["type"] == "adam":
             optimizer = optim.Adam(
                 trainable_params,
-                lr=opt_config["lr"],
+            lr=opt_config["lr"],
                 weight_decay=opt_config.get("weight_decay", 0.0),
         )
         else:
@@ -709,35 +709,38 @@ def main():
             )
             merge_val_to_train = False  # Disable merge when using debug_overfit
         else:
+            # Normal mode: not using debug_overfit
             train_dataset_base = ShotDataset(
-            config["data"]["train_path"],
+                config["data"]["train_path"],
                 file_format=config["data"].get("format", "pickle")
             )
-        
-        if merge_val_to_train:
-            # Load Val dataset to merge with Train
-            val_path = config["data"]["val_path"]
-            logger.info(f"[MERGE-VAL] Loading validation dataset to merge with train: {val_path}")
-            val_dataset_base = ShotDataset(
-                val_path,
-                file_format=config["data"].get("format", "pickle")
-            )
-            logger.info(f"[MERGE-VAL] Validation dataset loaded: {len(val_dataset_base)} samples")
             
-            # Merge Train and Val datasets
-            train_dataset = ConcatDataset([train_dataset_base, val_dataset_base])
-            logger.info(f"[MERGE-VAL] Merged train dataset: {len(train_dataset_base)} (train) + {len(val_dataset_base)} (val) = {len(train_dataset)} samples")
-            
-            # Set Val dataset to None (not used when merged)
-            val_dataset = None
-            logger.info(f"[MERGE-VAL] Val dataset set to None (using merged train dataset only)")
-        else:
-            # Normal mode: separate Train and Val
-            train_dataset = train_dataset_base
-        val_dataset = ShotDataset(
-            config["data"]["val_path"],
-                file_format=config["data"].get("format", "pickle")
-        )
+            if merge_val_to_train:
+                # Load Val dataset to merge with Train
+                val_path = config["data"]["val_path"]
+                logger.info(f"[MERGE-VAL] Loading validation dataset to merge with train: {val_path}")
+                val_dataset_base = ShotDataset(
+                    val_path,
+                    file_format=config["data"].get("format", "pickle")
+                )
+                logger.info(f"[MERGE-VAL] Validation dataset loaded: {len(val_dataset_base)} samples")
+                
+                # Merge Train and Val datasets
+                train_dataset = ConcatDataset([train_dataset_base, val_dataset_base])
+                logger.info(f"[MERGE-VAL] Merged train dataset: {len(train_dataset_base)} (train) + {len(val_dataset_base)} (val) = {len(train_dataset)} samples")
+                
+                # Set Val dataset to None (not used when merged)
+                val_dataset = None
+                logger.info(f"[MERGE-VAL] Val dataset set to None (using merged train dataset only)")
+            else:
+                # Normal mode: separate Train and Val
+                train_dataset = train_dataset_base
+                
+                # Create validation dataset
+                val_dataset = ShotDataset(
+                    config["data"]["val_path"],
+                    file_format=config["data"].get("format", "pickle")
+                )
     
     # Create data loaders
     train_loader = create_dataloader(
@@ -754,12 +757,12 @@ def main():
         logger.info("[MERGE-VAL] Val loader set to None (Val merged to Train)")
     else:
         val_loader = create_dataloader(
-        val_dataset,
-        batch_size=config["train"]["batch_size"],
-        shuffle=False,
-        num_workers=config.get("num_workers", 0),
-        pin_memory=False,  # Disable pin_memory for MPS compatibility
-        )
+            val_dataset,
+            batch_size=config["train"]["batch_size"],
+            shuffle=False,
+            num_workers=config.get("num_workers", 0),
+            pin_memory=False,  # Disable pin_memory for MPS compatibility
+    )
     
     # Create test dataset and loader (for final evaluation)
     test_dataset = None
