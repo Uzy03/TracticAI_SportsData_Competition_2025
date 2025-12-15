@@ -52,7 +52,7 @@ data:
   val_path: "data/processed_ck/shot_val/data.pickle"
   test_path: "data/processed_ck/shot_test/data.pickle"
   format: "pickle"
-  merge_val_to_train: true  # ValデータをTrainに統合する (default=false) - データが少ないため統合推奨
+  merge_val_to_train: false  # ValデータをTrainに統合する (default=false)
 
 # Loss configuration
 loss:

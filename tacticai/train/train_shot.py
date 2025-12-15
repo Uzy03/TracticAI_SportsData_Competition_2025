@@ -800,6 +800,18 @@ def main():
             train_history[key].append(train_metrics[key])
             val_history[key].append(val_metrics[key])
         
+        # Save CSV history after each epoch (overwrite mode, same as receiver prediction)
+        csv_filename = f"training_history_{timestamp}.csv"
+        csv_dir = Path(config.get("log_dir", "runs")) / "shot"
+        csv_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = csv_dir / csv_filename
+        save_training_history_csv_shot(
+            train_history,
+            val_history,
+            test_history=None,  # Test metrics will be added at the end
+            filepath=csv_path
+        )
+        
         # Save best model
         merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
         if merge_val_to_train:
@@ -859,7 +871,7 @@ def main():
             f"F1: {test_metrics['f1']:.4f}"
         )
     
-    # Save training history (CSV format for shot prediction)
+    # Save final CSV with test metrics (overwrite mode, same as receiver prediction)
     csv_filename = f"training_history_{timestamp}.csv"
     csv_dir = Path(config.get("log_dir", "runs")) / "shot"
     csv_dir.mkdir(parents=True, exist_ok=True)
@@ -870,7 +882,7 @@ def main():
         test_history=test_history,
         filepath=csv_path
     )
-    logger.info(f"Training history saved to {csv_path}")
+    logger.info(f"Final training history saved to {csv_path}")
 
 
 if __name__ == "__main__":
