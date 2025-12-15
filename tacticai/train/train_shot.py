@@ -335,8 +335,8 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
     
     if opt_config["type"] == "adam":
         optimizer = optim.Adam(
-                param_groups,
-                weight_decay=opt_config.get("weight_decay", 0.0),
+            param_groups,
+            weight_decay=opt_config.get("weight_decay", 0.0),
             )
         else:
             raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
