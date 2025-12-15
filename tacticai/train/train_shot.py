@@ -23,7 +23,7 @@ from tacticai.modules import (
     set_seed, get_device, save_checkpoint, setup_logging,
     CosineAnnealingScheduler, EarlyStopping,
 )
-from tacticai.modules.utils import load_backbone_from_checkpoint, save_training_history_csv
+from tacticai.modules.utils import load_backbone_from_checkpoint, save_training_history_csv_shot
 from tacticai.modules.transforms import RandomFlipTransform
 from tacticai.modules.view_ops import apply_view_transform, D2_VIEWS
 import torch.nn.functional as F
@@ -424,18 +424,38 @@ def train_epoch(
     
     # Compute metrics on GPU (more efficient than CPU)
     with torch.no_grad():
-        all_predictions = torch.cat(all_predictions, dim=0)
-        all_targets = torch.cat(all_targets, dim=0)
+        all_predictions = torch.cat(all_predictions, dim=0)  # [N, 1]
+        all_targets = torch.cat(all_targets, dim=0)  # [N] or [N, 1]
         
-        # Compute AUC
+        # Convert targets to [N] if needed
+        if all_targets.dim() > 1:
+            all_targets = all_targets.squeeze(-1)
+        
+        # For binary classification: convert logits to probabilities and apply threshold
+        # Accuracy and F1 need binary predictions (0 or 1)
+        probs = torch.sigmoid(all_predictions.squeeze(-1))  # [N]
+        binary_preds = (probs > 0.5).long()  # [N]
+        
+        # Compute AUC (works with probabilities/logits)
         auc_roc, auc_pr = metrics["auc"](all_predictions, all_targets, compute_auc_pr=True)
+        
+        # Compute accuracy for binary classification
+        accuracy = (binary_preds == all_targets).float().mean()
+        
+        # Compute F1 for binary classification
+        tp = ((binary_preds == 1) & (all_targets == 1)).float().sum()
+        fp = ((binary_preds == 1) & (all_targets == 0)).float().sum()
+        fn = ((binary_preds == 0) & (all_targets == 1)).float().sum()
+        precision = tp / (tp + fp + 1e-8)
+        recall = tp / (tp + fn + 1e-8)
+        f1 = 2 * precision * recall / (precision + recall + 1e-8)
         
         epoch_metrics = {
             "loss": total_loss / num_samples,
             "auc_roc": auc_roc.item(),
             "auc_pr": auc_pr.item(),
-            "accuracy": metrics["accuracy"](all_predictions, all_targets).item(),
-            "f1": metrics["f1"](all_predictions, all_targets).item(),
+            "accuracy": accuracy.item(),
+            "f1": f1.item(),
         }
     
     return epoch_metrics
@@ -499,18 +519,38 @@ def validate_epoch(
             progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
     
     # Compute metrics on GPU
-    all_predictions = torch.cat(all_predictions, dim=0)
-    all_targets = torch.cat(all_targets, dim=0)
+    all_predictions = torch.cat(all_predictions, dim=0)  # [N, 1]
+    all_targets = torch.cat(all_targets, dim=0)  # [N] or [N, 1]
     
-    # Compute AUC
+    # Convert targets to [N] if needed
+    if all_targets.dim() > 1:
+        all_targets = all_targets.squeeze(-1)
+    
+    # For binary classification: convert logits to probabilities and apply threshold
+    # Accuracy and F1 need binary predictions (0 or 1)
+    probs = torch.sigmoid(all_predictions.squeeze(-1))  # [N]
+    binary_preds = (probs > 0.5).long()  # [N]
+    
+    # Compute AUC (works with probabilities/logits)
     auc_roc, auc_pr = metrics["auc"](all_predictions, all_targets, compute_auc_pr=True)
+    
+    # Compute accuracy for binary classification
+    accuracy = (binary_preds == all_targets).float().mean()
+    
+    # Compute F1 for binary classification
+    tp = ((binary_preds == 1) & (all_targets == 1)).float().sum()
+    fp = ((binary_preds == 1) & (all_targets == 0)).float().sum()
+    fn = ((binary_preds == 0) & (all_targets == 1)).float().sum()
+    precision = tp / (tp + fp + 1e-8)
+    recall = tp / (tp + fn + 1e-8)
+    f1 = 2 * precision * recall / (precision + recall + 1e-8)
     
     epoch_metrics = {
         "loss": total_loss / num_samples,
         "auc_roc": auc_roc.item(),
         "auc_pr": auc_pr.item(),
-        "accuracy": metrics["accuracy"](all_predictions, all_targets).item(),
-        "f1": metrics["f1"](all_predictions, all_targets).item(),
+        "accuracy": accuracy.item(),
+        "f1": f1.item(),
     }
     
     return epoch_metrics
@@ -599,13 +639,47 @@ def main():
         pin_memory=False,  # Disable pin_memory for MPS compatibility
     )
     
-    val_loader = create_dataloader(
-        val_dataset,
-        batch_size=config["train"]["batch_size"],
-        shuffle=False,
-        num_workers=config.get("num_workers", 0),
-        pin_memory=False,  # Disable pin_memory for MPS compatibility
-    )
+    if merge_val_to_train and val_dataset is None:
+        # Val dataset is None (merged to train), create dummy loader
+        val_loader = None
+        logger.info("[MERGE-VAL] Val loader set to None (Val merged to Train)")
+    else:
+        val_loader = create_dataloader(
+            val_dataset,
+            batch_size=config["train"]["batch_size"],
+            shuffle=False,
+            num_workers=config.get("num_workers", 0),
+            pin_memory=False,  # Disable pin_memory for MPS compatibility
+        )
+    
+    # Create test dataset and loader (for final evaluation)
+    test_dataset = None
+    test_loader = None
+    if not args.debug_overfit and "test_path" in config.get("data", {}):
+        try:
+            test_dataset = ShotDataset(
+                config["data"]["test_path"],
+                file_format=config["data"].get("format", "pickle")
+            )
+            test_loader = create_dataloader(
+                test_dataset,
+                batch_size=config["eval"]["batch_size"],
+                shuffle=False,
+                num_workers=config.get("num_workers", 0),
+                pin_memory=False,  # Disable pin_memory for MPS compatibility
+            )
+            logger.info(f"Test dataset loaded: {len(test_dataset)} samples")
+        except Exception as e:
+            logger.warning(f"Could not load test dataset: {e}")
+    
+    if val_loader is not None:
+        logger.info(f"Train dataloader: {len(train_loader)} batches, Val dataloader: {len(val_loader)} batches")
+        if test_loader is not None:
+            logger.info(f"Test dataloader: {len(test_loader)} batches")
+    else:
+        logger.info(f"Train dataloader: {len(train_loader)} batches (Val merged to Train)")
+        if test_loader is not None:
+            logger.info(f"Test dataloader: {len(test_loader)} batches")
     
     # Create model
     model = create_model(config, device)
@@ -765,15 +839,35 @@ def main():
     else:
         logger.info(f"Training completed. Best validation AUC-ROC: {best_val_auc:.4f}")
     
-    # Save training history (CSV format, same as receiver prediction)
+    # Evaluate on test set if available
+    test_history = None
+    if test_loader is not None:
+        logger.info("Evaluating on test set...")
+        test_metrics = validate_epoch(model, test_loader, criterion, device, metrics)
+        test_history = {
+            "loss": test_metrics["loss"],
+            "auc_roc": test_metrics["auc_roc"],
+            "auc_pr": test_metrics["auc_pr"],
+            "accuracy": test_metrics["accuracy"],
+            "f1": test_metrics["f1"],
+        }
+        logger.info(
+            f"Test - Loss: {test_metrics['loss']:.4f}, "
+            f"AUC-ROC: {test_metrics['auc_roc']:.4f}, "
+            f"AUC-PR: {test_metrics['auc_pr']:.4f}, "
+            f"Acc: {test_metrics['accuracy']:.4f}, "
+            f"F1: {test_metrics['f1']:.4f}"
+        )
+    
+    # Save training history (CSV format for shot prediction)
     csv_filename = f"training_history_{timestamp}.csv"
     csv_dir = Path(config.get("log_dir", "runs")) / "shot"
     csv_dir.mkdir(parents=True, exist_ok=True)
     csv_path = csv_dir / csv_filename
-    save_training_history_csv(
+    save_training_history_csv_shot(
         train_history,
         val_history,
-        test_history=None,  # Test metrics can be added later if needed
+        test_history=test_history,
         filepath=csv_path
     )
     logger.info(f"Training history saved to {csv_path}")

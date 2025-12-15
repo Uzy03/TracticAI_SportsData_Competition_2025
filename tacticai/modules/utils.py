@@ -420,6 +420,74 @@ def save_training_history_csv(
         writer.writerows(rows)
 
 
+def save_training_history_csv_shot(
+    train_history: Dict[str, list],
+    val_history: Dict[str, list],
+    test_history: Optional[Dict[str, float]] = None,
+    filepath: Union[str, Path] = "runs/training_history.csv"
+) -> None:
+    """Save training history to CSV file for shot prediction task.
+    
+    Args:
+        train_history: Training history dictionary (e.g., {"loss": [...], "auc_roc": [...], ...})
+        val_history: Validation history dictionary
+        test_history: Test metrics dictionary (optional, single values per metric)
+        filepath: Path to save CSV file
+    """
+    import csv
+    
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Get all epochs
+    num_epochs = len(train_history.get("loss", []))
+    
+    # Prepare CSV rows
+    rows = []
+    for epoch in range(num_epochs):
+        row = {
+            "epoch": epoch + 1,
+            "train_loss": train_history.get("loss", [0.0])[epoch] if epoch < len(train_history.get("loss", [])) else 0.0,
+            "train_auc_roc": train_history.get("auc_roc", [0.0])[epoch] if epoch < len(train_history.get("auc_roc", [])) else 0.0,
+            "train_auc_pr": train_history.get("auc_pr", [0.0])[epoch] if epoch < len(train_history.get("auc_pr", [])) else 0.0,
+            "train_accuracy": train_history.get("accuracy", [0.0])[epoch] if epoch < len(train_history.get("accuracy", [])) else 0.0,
+            "train_f1": train_history.get("f1", [0.0])[epoch] if epoch < len(train_history.get("f1", [])) else 0.0,
+            "val_loss": val_history.get("loss", [0.0])[epoch] if epoch < len(val_history.get("loss", [])) else 0.0,
+            "val_auc_roc": val_history.get("auc_roc", [0.0])[epoch] if epoch < len(val_history.get("auc_roc", [])) else 0.0,
+            "val_auc_pr": val_history.get("auc_pr", [0.0])[epoch] if epoch < len(val_history.get("auc_pr", [])) else 0.0,
+            "val_accuracy": val_history.get("accuracy", [0.0])[epoch] if epoch < len(val_history.get("accuracy", [])) else 0.0,
+            "val_f1": val_history.get("f1", [0.0])[epoch] if epoch < len(val_history.get("f1", [])) else 0.0,
+        }
+        
+        # Add test metrics if available (only for the last epoch)
+        if test_history is not None and epoch == num_epochs - 1:
+            row["test_loss"] = test_history.get("loss", 0.0)
+            row["test_auc_roc"] = test_history.get("auc_roc", 0.0)
+            row["test_auc_pr"] = test_history.get("auc_pr", 0.0)
+            row["test_accuracy"] = test_history.get("accuracy", 0.0)
+            row["test_f1"] = test_history.get("f1", 0.0)
+        else:
+            row["test_loss"] = ""
+            row["test_auc_roc"] = ""
+            row["test_auc_pr"] = ""
+            row["test_accuracy"] = ""
+            row["test_f1"] = ""
+        
+        rows.append(row)
+    
+    # Write CSV file (overwrite mode)
+    fieldnames = [
+        "epoch", "train_loss", "train_auc_roc", "train_auc_pr", "train_accuracy", "train_f1",
+        "val_loss", "val_auc_roc", "val_auc_pr", "val_accuracy", "val_f1",
+        "test_loss", "test_auc_roc", "test_auc_pr", "test_accuracy", "test_f1"
+    ]
+    
+    with open(filepath, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 class CosineAnnealingScheduler:
     """Cosine annealing learning rate scheduler.
     
