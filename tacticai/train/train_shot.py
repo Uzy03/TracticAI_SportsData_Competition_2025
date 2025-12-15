@@ -340,7 +340,7 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
     opt_config = config["optimizer"]
     pretrained_config = config.get("pretrained", {})
     
-    # Check if different learning rates are specified for backbone and head
+# Check if different learning rates are specified for backbone and head
     freeze_backbone = config.get("pretrained", {}).get("freeze_backbone", True)  # Default to True (frozen)
     if not freeze_backbone and pretrained_config.get("lr_backbone") is not None and pretrained_config.get("lr_head") is not None:
         # Separate learning rates for backbone and head (only if backbone is not frozen)
@@ -350,12 +350,12 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
         param_groups = [
             {"params": backbone_params, "lr": pretrained_config["lr_backbone"]},
             {"params": head_params, "lr": pretrained_config["lr_head"]},
-        ]
+            ]
     
-    if opt_config["type"] == "adam":
-        optimizer = optim.Adam(
-                param_groups,
-                weight_decay=opt_config.get("weight_decay", 0.0),
+        if opt_config["type"] == "adam":
+            optimizer = optim.Adam(
+            param_groups,
+            weight_decay=opt_config.get("weight_decay", 0.0),
             )
         else:
             raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
@@ -363,22 +363,23 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
         # Use single learning rate for trainable parameters only
         # If backbone is frozen, only shot_head parameters will be optimized
         if freeze_backbone:
-            # Only optimize shot_head (backbone is frozen)
-            trainable_params = list(model.shot_head.parameters())
+        # Only optimize shot_head (backbone is frozen)
+        trainable_params = list(model.shot_head.parameters())
         else:
-            # Optimize all parameters
-            trainable_params = list(model.parameters())
+        # Optimize all parameters
+        trainable_params = list(model.parameters())
         
         if opt_config["type"] == "adam":
             optimizer = optim.Adam(
-                trainable_params,
+            trainable_params,
             lr=opt_config["lr"],
-                weight_decay=opt_config.get("weight_decay", 0.0),
-        )
-    else:
-        raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
+            weight_decay=opt_config.get("weight_decay", 0.0),
+            )
+        else:
+            raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
     
     return optimizer
+
 
 
 def create_scheduler(optimizer: optim.Optimizer, config: Dict[str, Any]) -> Any:
