@@ -812,31 +812,34 @@ def main():
             filepath=csv_path
         )
         
-        # Save best model
+        # Save best model (same as receiver prediction: D2 status in filename)
         merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
+        use_d2 = config.get("d2", {}).get("enabled", False)
+        checkpoint_filename = "best_d2.ckpt" if use_d2 else "best_no_d2.ckpt"
+        
         if merge_val_to_train:
             # Use Train AUC-ROC for best model when Val is merged
             metric_for_best = train_metrics["auc_roc"]
             if metric_for_best > best_val_auc:
                 best_val_auc = metric_for_best
-                checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "shot" / "best.ckpt"
+                checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "shot" / checkpoint_filename
                 checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
                 save_checkpoint(
                     model, optimizer, epoch, train_metrics["loss"], train_metrics,
                     checkpoint_path, scheduler
                 )
-                logger.info(f"New best model saved with Train AUC-ROC: {best_val_auc:.4f}")
+                logger.info(f"New best model saved with Train AUC-ROC: {best_val_auc:.4f} (D2: {use_d2})")
         else:
             # Normal mode: use Val AUC-ROC
             if val_metrics["auc_roc"] > best_val_auc:
                 best_val_auc = val_metrics["auc_roc"]
-                checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "shot" / "best.ckpt"
+                checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "shot" / checkpoint_filename
                 checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
                 save_checkpoint(
                     model, optimizer, epoch, val_metrics["loss"], val_metrics,
                     checkpoint_path, scheduler
                 )
-                logger.info(f"New best model saved with AUC-ROC: {best_val_auc:.4f}")
+                logger.info(f"New best model saved with AUC-ROC: {best_val_auc:.4f} (D2: {use_d2})")
         
         # Early stopping (skip if Val is merged to Train)
         merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
