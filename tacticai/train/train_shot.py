@@ -340,8 +340,9 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
     opt_config = config["optimizer"]
     pretrained_config = config.get("pretrained", {})
     
-# Check if different learning rates are specified for backbone and head
+    # Check if different learning rates are specified for backbone and head
     freeze_backbone = config.get("pretrained", {}).get("freeze_backbone", True)  # Default to True (frozen)
+    
     if not freeze_backbone and pretrained_config.get("lr_backbone") is not None and pretrained_config.get("lr_head") is not None:
         # Separate learning rates for backbone and head (only if backbone is not frozen)
         backbone_params = list(model.backbone.parameters())
@@ -350,33 +351,34 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
         param_groups = [
             {"params": backbone_params, "lr": pretrained_config["lr_backbone"]},
             {"params": head_params, "lr": pretrained_config["lr_head"]},
-            ]
-    
-    if opt_config["type"] == "adam":
-        optimizer = optim.Adam(
-            param_groups,
-            weight_decay=opt_config.get("weight_decay", 0.0),
+        ]
+        
+        if opt_config["type"] == "adam":
+            optimizer = optim.Adam(
+                param_groups,
+                weight_decay=opt_config.get("weight_decay", 0.0),
             )
         else:
             raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
+            
     else:
         # Use single learning rate for trainable parameters only
         # If backbone is frozen, only shot_head parameters will be optimized
         if freeze_backbone:
-        # Only optimize shot_head (backbone is frozen)
+            # Only optimize shot_head (backbone is frozen)
             trainable_params = list(model.shot_head.parameters())
         else:
-        # Optimize all parameters
+            # Optimize all parameters
             trainable_params = list(model.parameters())
         
         if opt_config["type"] == "adam":
             optimizer = optim.Adam(
-            trainable_params,
-            lr=opt_config["lr"],
-            weight_decay=opt_config.get("weight_decay", 0.0),
-        )
-    else:
-        raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
+                trainable_params,
+                lr=opt_config["lr"],
+                weight_decay=opt_config.get("weight_decay", 0.0),
+            )
+        else:
+            raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
     
     return optimizer
 
@@ -554,7 +556,7 @@ def train_epoch(
         binary_preds = (probs > 0.5).long()  # [N]
         
         # Compute AUC (works with probabilities/logits)
-    auc_roc, auc_pr = metrics["auc"](all_predictions, all_targets, compute_auc_pr=True)
+        auc_roc, auc_pr = metrics["auc"](all_predictions, all_targets, compute_auc_pr=True)
         
         # Compute accuracy for binary classification
         accuracy = (binary_preds == all_targets).float().mean()
@@ -568,11 +570,11 @@ def train_epoch(
         f1 = 2 * precision * recall / (precision + recall + 1e-8)
     
     epoch_metrics = {
-            "loss": total_loss / num_samples,
+        "loss": total_loss / num_samples,
         "auc_roc": auc_roc.item(),
         "auc_pr": auc_pr.item(),
-            "accuracy": accuracy.item(),
-            "f1": f1.item(),
+        "accuracy": accuracy.item(),
+        "f1": f1.item(),
     }
     
     return epoch_metrics
@@ -808,13 +810,13 @@ def main():
         val_loader = None
         logger.info("[MERGE-VAL] Val loader set to None (Val merged to Train)")
     else:
-    val_loader = create_dataloader(
-        val_dataset,
-        batch_size=config["train"]["batch_size"],
-        shuffle=False,
-        num_workers=config.get("num_workers", 0),
-        pin_memory=False,  # Disable pin_memory for MPS compatibility
-    )
+        val_loader = create_dataloader(
+            val_dataset,
+            batch_size=config["train"]["batch_size"],
+            shuffle=False,
+            num_workers=config.get("num_workers", 0),
+            pin_memory=False,  # Disable pin_memory for MPS compatibility
+        )
     
     # Create test dataset and loader (for final evaluation)
     test_dataset = None
@@ -928,7 +930,7 @@ def main():
             }
             logger.info("[MERGE-VAL] Validation skipped (Val merged to Train)")
         else:
-        val_metrics = validate_epoch(model, val_loader, criterion, device, metrics)
+            val_metrics = validate_epoch(model, val_loader, criterion, device, metrics)
         
         # Update learning rate
         if scheduler is not None:
@@ -1008,28 +1010,28 @@ def main():
                 logger.info(f"New best model saved with Train AUC-ROC: {best_val_auc:.4f} (D2: {use_d2})")
         else:
             # Normal mode: use Val AUC-ROC
-        if val_metrics["auc_roc"] > best_val_auc:
-            best_val_auc = val_metrics["auc_roc"]
+            if val_metrics["auc_roc"] > best_val_auc:
+                best_val_auc = val_metrics["auc_roc"]
                 checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "shot" / checkpoint_filename
                 checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-            save_checkpoint(
-                model, optimizer, epoch, val_metrics["loss"], val_metrics,
-                checkpoint_path, scheduler
-            )
-            logger.info(f"New best model saved with AUC-ROC: {best_val_auc:.4f} (D2: {use_d2})")
+                save_checkpoint(
+                    model, optimizer, epoch, val_metrics["loss"], val_metrics,
+                    checkpoint_path, scheduler
+                )
+                logger.info(f"New best model saved with AUC-ROC: {best_val_auc:.4f} (D2: {use_d2})")
         
         # Early stopping (skip if Val is merged to Train)
         merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
         if not merge_val_to_train:
-        if early_stopping(val_metrics["auc_roc"], model):
-            logger.info(f"Early stopping at epoch {epoch+1}")
-            break
+            if early_stopping(val_metrics["auc_roc"], model):
+                logger.info(f"Early stopping at epoch {epoch+1}")
+                break
     
     merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
     if merge_val_to_train:
         logger.info(f"Training completed. Best Train AUC-ROC: {best_val_auc:.4f} (Val merged to Train)")
     else:
-    logger.info(f"Training completed. Best validation AUC-ROC: {best_val_auc:.4f}")
+        logger.info(f"Training completed. Best validation AUC-ROC: {best_val_auc:.4f}")
     
     # Evaluate on test set if available
     test_history = None
