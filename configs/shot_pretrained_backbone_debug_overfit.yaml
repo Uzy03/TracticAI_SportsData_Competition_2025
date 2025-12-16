@@ -14,7 +14,7 @@ pretrained:
   use_receiver_for_conditioning: true  # Use receiver probabilities for conditional shot prediction
   freeze_backbone: true  # Freeze backbone (only train shot head)
   lr_backbone: 0.0001  # Learning rate for backbone (lower than head, not used when frozen)
-  lr_head: 0.001  # Learning rate for shot head
+  lr_head: 0.01  # 過学習テスト用に学習率を大幅に上げる（0.001 → 0.01）
 
 # Model configuration (should match pretrained backbone)
 model:
@@ -29,22 +29,19 @@ model:
 optimizer:
   type: "adam"
   lr: 0.001  # Default learning rate (will be overridden by lr_backbone/lr_head if pretrained is used)
-  weight_decay: 0.0001
+  weight_decay: 0.0  # 過学習テスト用にL2正則化を完全に無効化
 
 # Scheduler configuration
 scheduler:
-  type: "cosine"
-  T_max: 50
-  eta_min: 0.000001
-  warmup_epochs: 5
+  type: "none"  # 過学習テスト用にスケジューラーを無効化（学習率を固定）
 
 # Training configuration
 train:
-  batch_size: 32
-  epochs: 50
+  batch_size: 1  # 過学習テスト用にバッチサイズを1に設定（1サンプルずつ学習）
+  epochs: 500  # 過学習テスト用にエポック数を大幅に増加
   amp: false  # Automatic mixed precision
   grad_clip:
-    enabled: true
+    enabled: false  # 過学習テスト用に勾配クリッピングを無効化
     max_norm: 1.0
 
 # Data configuration (will be overridden by debug_overfit mode)
@@ -78,7 +75,7 @@ loss:
 
 # D2 equivariance configuration (should match pretrained receiver model)
 d2:
-  enabled: true  # Must match pretrained receiver model setting
+  enabled: false  # Must match pretrained receiver model setting (前回の実行ではfalseだったため、falseに設定)
   group_pool: false  # Not used (D2 is handled internally in ShotModelWithReceiver)
   transforms:
     hflip: false
