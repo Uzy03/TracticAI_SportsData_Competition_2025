@@ -12,14 +12,14 @@ pretrained:
   backbone_path: null  # nullの場合はd2.enabledに応じて自動選択（backbone_d2.ckpt または backbone_no_d2.ckpt）
   receiver_checkpoint_path: "checkpoints/receiver/best.ckpt"  # For receiver head (frozen)
   use_receiver_for_conditioning: true  # Use receiver probabilities for conditional shot prediction
-  freeze_backbone: true  # Freeze backbone (only train shot head)
+  freeze_backbone: true  # Freeze backbone (only train shot head) - User request
   lr_backbone: 0.0001  # Learning rate for backbone (lower than head, not used when frozen)
   lr_head: 0.001  # 最初の安定した設定に戻す（0.001）
 
-# Model configuration (should match pretrained backbone)
+# Model configuration (should match pretrained backbone, except hidden_dim for head)
 model:
   input_dim: 16  # Must match pretrained receiver model
-  hidden_dim: 512  # Must match pretrained receiver model
+  hidden_dim: 1024  # ヘッドの隠れ層の次元を増やして表現力を上げる（512 -> 1024）
   num_layers: 3  # Must match pretrained receiver model
   num_heads: 4  # Must match pretrained receiver model
   dropout: 0.0  # Dropout for shot head only (backbone dropout is from pretrained)
