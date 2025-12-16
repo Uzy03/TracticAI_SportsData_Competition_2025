@@ -37,7 +37,7 @@ scheduler:
 
 # Training configuration
 train:
-  batch_size: 1  # 過学習テスト用にバッチサイズを1に設定（1サンプルずつ学習）
+  batch_size: 32  # 最初の安定した設定に戻す（batch_size=1は勾配ノイズが大きすぎて不安定）
   epochs: 500  # 過学習テスト用にエポック数を大幅に増加
   amp: false  # Automatic mixed precision
   grad_clip:
