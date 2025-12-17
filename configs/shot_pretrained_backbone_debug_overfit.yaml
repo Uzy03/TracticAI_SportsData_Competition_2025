@@ -12,9 +12,9 @@ pretrained:
   backbone_path: null  # nullの場合はd2.enabledに応じて自動選択（backbone_d2.ckpt または backbone_no_d2.ckpt）
   receiver_checkpoint_path: "checkpoints/receiver/best.ckpt"  # For receiver head (frozen)
   use_receiver_for_conditioning: true  # Use receiver probabilities for conditional shot prediction
-  freeze_backbone: false  # 過学習テストではバックボーンも解凍してキャパを上げる
-  lr_backbone: 0.0005  # バックボーン用のやや低めのLR
-  lr_head: 0.0015  # ヘッドは少し高めに学習
+  freeze_backbone: true  # 過学習テストではまずバックボーンを凍結して安定化
+  lr_backbone: 0.0001  # 凍結時は未使用だが念のため低め
+  lr_head: 0.001  # 安定していた設定に戻す
 
 # Model configuration (should match pretrained backbone)
 model:
@@ -42,7 +42,7 @@ train:
   amp: false  # Automatic mixed precision
   grad_clip:
     enabled: true  # 最初の安定した設定に戻す（勾配クリッピングを有効化）
-    max_norm: 1.0  # 少し緩めにして学習を進めやすく
+    max_norm: 0.5  # より厳しくして発散を抑制
 
 # Data configuration (will be overridden by debug_overfit mode)
 data:
