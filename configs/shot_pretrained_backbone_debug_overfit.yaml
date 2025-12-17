@@ -4,7 +4,7 @@
 # Debug overfit configuration
 debug_overfit:
   enabled: true  # デバッグ用過学習モードの有効化
-  num_samples: 4  # 次のステップ: 4サンプル（正例・負例を含める想定）
+  num_samples: 8  # 次のステップ: 8サンプル（正例・負例を含める想定）
   seed: 42  # 乱数シード
 
 # Pretrained model configuration
@@ -37,7 +37,7 @@ scheduler:
 
 # Training configuration
 train:
-  batch_size: 4  # サンプル数に合わせて4
+  batch_size: 8  # サンプル数に合わせて8
   epochs: 200  # デバッグ用に短縮
   amp: false  # Automatic mixed precision
   grad_clip:
