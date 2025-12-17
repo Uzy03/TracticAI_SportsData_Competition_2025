@@ -28,7 +28,7 @@ model:
 # Optimizer configuration
 optimizer:
   type: "adam"
-  lr: 0.001  # Default learning rate (will be overridden by lr_backbone/lr_head if pretrained is used)
+  lr: 0.0005  # 学習率を下げて発散を抑える
   weight_decay: 0.0  # 過学習テスト用にL2正則化を完全に無効化
 
 # Scheduler configuration
@@ -38,11 +38,11 @@ scheduler:
 # Training configuration
 train:
   batch_size: 2  # 最初の安定した設定に戻す（batch_size=1は勾配ノイズが大きすぎて不安定）
-  epochs: 500  # 過学習テスト用にエポック数を大幅に増加
+  epochs: 200  # デバッグ用に短縮
   amp: false  # Automatic mixed precision
   grad_clip:
     enabled: true  # 最初の安定した設定に戻す（勾配クリッピングを有効化）
-    max_norm: 1.0  # 最初の安定した設定に戻す（1.0）
+    max_norm: 0.5  # クリップ閾値を下げて発散を抑える
 
 # Data configuration (will be overridden by debug_overfit mode)
 data:
