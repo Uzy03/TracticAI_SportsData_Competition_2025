@@ -4,7 +4,7 @@
 # Debug overfit configuration
 debug_overfit:
   enabled: true  # デバッグ用過学習モードの有効化
-  num_samples: 1  # 最小単位（1サンプル）でテスト
+  num_samples: 2  # 次のステップ: 2サンプル（正例・負例を含める想定）
   seed: 42  # 乱数シード
 
 # Pretrained model configuration
