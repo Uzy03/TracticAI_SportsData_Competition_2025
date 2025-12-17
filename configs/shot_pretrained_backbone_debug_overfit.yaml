@@ -4,7 +4,7 @@
 # Debug overfit configuration
 debug_overfit:
   enabled: true  # デバッグ用過学習モードの有効化
-  num_samples: 2  # 2サンプル（正例・負例を含める想定）
+  num_samples: 2  # 次のステップ: 2サンプル（正例・負例を含める想定）
   seed: 42  # 乱数シード
 
 # Pretrained model configuration
@@ -28,7 +28,7 @@ model:
 # Optimizer configuration
 optimizer:
   type: "adam"
-  lr: 0.01   # ヘッドのみ学習なので学習率を上げる
+  lr: 0.001  # Default learning rate (will be overridden by lr_backbone/lr_head if pretrained is used)
   weight_decay: 0.0  # 過学習テスト用にL2正則化を完全に無効化
 
 # Scheduler configuration
@@ -37,12 +37,12 @@ scheduler:
 
 # Training configuration
 train:
-  batch_size: 2    # 2サンプルを1バッチにまとめて毎ステップ両クラスを見る
-  epochs: 200      # デバッグ用に短縮（必要なら伸ばす）
+  batch_size: 2  # 最初の安定した設定に戻す（batch_size=1は勾配ノイズが大きすぎて不安定）
+  epochs: 500  # 過学習テスト用にエポック数を大幅に増加
   amp: false  # Automatic mixed precision
   grad_clip:
-    enabled: false # 過学習テストではオフにして収束を優先
-    max_norm: 1.0  # 未使用（enabled=false時）
+    enabled: true  # 最初の安定した設定に戻す（勾配クリッピングを有効化）
+    max_norm: 1.0  # 最初の安定した設定に戻す（1.0）
 
 # Data configuration (will be overridden by debug_overfit mode)
 data:
