@@ -14,8 +14,8 @@ pretrained:
   receiver_checkpoint_path: "checkpoints/receiver/best.ckpt"  # For receiver head (frozen)
   use_receiver_for_conditioning: true  # Use receiver probabilities for conditional shot prediction
   freeze_backbone: true  # Freeze backbone (only train shot head)
-  lr_backbone: 0.0001  # Learning rate for backbone (lower than head)
-  lr_head: 0.001  # Learning rate for shot head
+  lr_backbone: 0.0001  # Learning rate for backbone (lower than head; unused when frozen)
+  lr_head: 0.003  # Overfit設定に寄せてヘッドの学習率を上げる
 
 # Model configuration (should match pretrained backbone)
 model:
@@ -30,20 +30,20 @@ model:
 optimizer:
   type: "adam"
   lr: 0.001  # Default learning rate (will be overridden by lr_backbone/lr_head if pretrained is used)
-  weight_decay: 0.0001
+  weight_decay: 0.0  # Overfit寄りに正則化を弱める
 
 # Scheduler configuration
 scheduler:
-  type: "cosine"
-  T_max: 50
-  eta_min: 0.000001
-  warmup_epochs: 5
+  type: "none"  # Overfit設定に寄せてスケジューラなし
 
 # Training configuration
 train:
   batch_size: 32
-  epochs: 50
+  epochs: 200  # Overfit寄りにエポックを延長
   amp: false  # Automatic mixed precision
+  grad_clip:
+    enabled: true
+    max_norm: 1.0  # Overfit設定に合わせたクリッピング
 
 # Data configuration
 # Uses same data source as receiver prediction (data/processed_ck)
@@ -72,12 +72,12 @@ loss:
   
   # Regularization terms
   regularization:
-    l2_weight: 0.0001
+    l2_weight: 0.0001  # Overfit設定に合わせて現状維持
     dropout_rate: 0.0
 
 # D2 equivariance configuration (should match pretrained receiver model)
 d2:
-  enabled: true  # Must match pretrained receiver model setting
+  enabled: false  # 過学習テストと揃えてD2無効（バックボーンもno_d2を自動選択）
   group_pool: false  # Not used (D2 is handled internally in ShotModelWithReceiver)
   transforms:
     hflip: false
