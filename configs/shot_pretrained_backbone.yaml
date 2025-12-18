@@ -15,7 +15,7 @@ pretrained:
   use_receiver_for_conditioning: true  # Use receiver probabilities for conditional shot prediction
   freeze_backbone: true  # Freeze backbone (only train shot head)
   lr_backbone: 0.0001  # Learning rate for backbone (lower than head; unused when frozen)
-  lr_head: 0.002  # ヘッドの学習率をやや上げて立ち上がりを強める
+  lr_head: 0.0015  # 学習率を少し下げて安定化
 
 # Model configuration (should match pretrained backbone)
 model:
@@ -30,18 +30,18 @@ model:
 optimizer:
   type: "adam"
   lr: 0.001  # Default learning rate (will be overridden by lr_backbone/lr_head if pretrained is used)
-  weight_decay: 0.00005  # 正則化を少し弱めて学習を伸ばす
+  weight_decay: 0.0001  # 正則化を少し強めて安定化
 
 # Scheduler configuration
 scheduler:
   type: "cosine"
   T_max: 50
   eta_min: 0.00001
-  warmup_epochs: 3  # 立ち上がりを早める
+  warmup_epochs: 5  # Warmupを少し長くして安定化
 
 # Training configuration
 train:
-  batch_size: 16  # 小規模データ向けにバッチを縮小
+  batch_size: 32  # バッチを大きくして勾配ノイズを減らし安定化
   epochs: 100  # 適度な長さに調整
   amp: false  # Automatic mixed precision
   grad_clip:
@@ -88,7 +88,7 @@ d2:
 
 # Early stopping configuration
 early_stopping:
-  patience: 30  # 少し粘って収束を待つ
+  patience: 20  # 改善なしなら早めに切り上げ
 
 # Evaluation configuration
 eval:
