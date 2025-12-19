@@ -80,7 +80,7 @@ loss:
 
 # D2 equivariance configuration (should match pretrained receiver model)
 d2:
-  enabled: false  # 過学習テストと揃えてD2無効（バックボーンもno_d2を自動選択）
+  enabled: true  # D2 equivariance enabled for data augmentation (helps with small dataset)
   group_pool: false  # Not used (D2 is handled internally in ShotModelWithReceiver)
   transforms:
     hflip: false
