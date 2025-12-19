@@ -86,8 +86,8 @@ class ShotModelWithReceiver(nn.Module):
             logger.info(f"Backbone frozen: {frozen_params}/{total_params} parameters have requires_grad=False")
         
         # Load pretrained receiver head (frozen, for inference)
-        use_receiver_for_conditioning = pretrained_config.get("use_receiver_for_conditioning", True)
-        if use_receiver_for_conditioning:
+        self.use_receiver_for_conditioning = pretrained_config.get("use_receiver_for_conditioning", True)
+        if self.use_receiver_for_conditioning:
             receiver_checkpoint_path = pretrained_config.get("receiver_checkpoint_path")
             if receiver_checkpoint_path is None:
                 raise ValueError("pretrained.receiver_checkpoint_path must be specified when use_receiver_for_conditioning is True")
@@ -249,6 +249,25 @@ class ShotModelWithReceiver(nn.Module):
             logger.warning(f"NaN/Inf in shot_logits_per_node! H stats: mean={H.mean().item():.6f}, std={H.std().item():.6f}, min={H.min().item():.6f}, max={H.max().item():.6f}")
             shot_logits_per_node = torch.nan_to_num(shot_logits_per_node, nan=0.0, posinf=10.0, neginf=-10.0)
         
+        # Direct prediction vs conditional prediction
+        if not self.use_receiver_for_conditioning:
+            # Direct prediction: use mean pooling over nodes
+            # shot_logits_per_node: [B, N_per_graph] -> [B, 1]
+            shot_logit = shot_logits_per_node.mean(dim=1, keepdim=True)  # [B, 1]
+            
+            # Clamp logit values to prevent extreme values
+            shot_logit = torch.clamp(shot_logit, -10.0, 10.0)
+            
+            # Check for NaN/Inf and handle
+            if torch.isnan(shot_logit).any() or torch.isinf(shot_logit).any():
+                import logging
+                logger = logging.getLogger("tacticai")
+                logger.warning(f"NaN/Inf in shot_logit (direct prediction)! shot_logits_per_node stats: mean={shot_logits_per_node.mean().item():.6f}, std={shot_logits_per_node.std().item():.6f}, min={shot_logits_per_node.min().item():.6f}, max={shot_logits_per_node.max().item():.6f}")
+                shot_logit = torch.nan_to_num(shot_logit, nan=0.0, posinf=10.0, neginf=-10.0)
+            
+            return shot_logit
+        
+        # Conditional prediction: aggregate with receiver probabilities
         shot_probs_per_node = torch.sigmoid(shot_logits_per_node)  # [B, N_per_graph]
         
         # Debug: Check for NaN/Inf in shot_probs_per_node

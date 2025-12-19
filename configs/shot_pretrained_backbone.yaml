@@ -12,7 +12,7 @@
 pretrained:
   backbone_path: null  # nullの場合はd2.enabledに応じて自動選択（backbone_d2.ckpt または backbone_no_d2.ckpt）
   receiver_checkpoint_path: "checkpoints/receiver/best.ckpt"  # For receiver head (frozen)
-  use_receiver_for_conditioning: true  # Use receiver probabilities for conditional shot prediction
+  use_receiver_for_conditioning: false  # Disable conditional prediction, use direct shot prediction
   freeze_backbone: false  # Unfreeze backbone for fine-tuning with very small LR
   lr_backbone: 0.0001  # Small LR for backbone fine-tuning (1e-4, increased from 5e-5)
   lr_head: 0.0015  # Head LR (higher than backbone)
