@@ -38,9 +38,9 @@ def main():
     parser.add_argument(
         "--phase",
         type=str,
-        default="train",
-        choices=["train", "val", "test"],
-        help="Data phase to index (train/val/test)",
+        default=None,
+        choices=["train", "val", "test", None],
+        help="Data phase to index (train/val/test). If not specified, uses all phases (train+val+test)",
     )
     parser.add_argument(
         "--use-faiss",
@@ -75,19 +75,8 @@ def main():
             backbone_checkpoint_path = f"{checkpoint_dir}/receiver/backbone_no_d2.ckpt"
         logger.info(f"Auto-selected backbone checkpoint based on D2={d2_enabled}: {backbone_checkpoint_path}")
     
-    # Determine data path based on phase
-    phase_to_key = {
-        "train": "train_path",
-        "val": "val_path",
-        "test": "test_path",
-    }
-    data_path_key = phase_to_key[args.phase]
-    data_path = config["data"][data_path_key]
-    
     logger.info(f"Building retrieval index on {device}")
-    logger.info(f"Phase: {args.phase}")
     logger.info(f"Backbone checkpoint: {backbone_checkpoint_path}")
-    logger.info(f"Data path: {data_path}")
     logger.info(f"Output index: {args.output_index}")
     
     # Create search system
@@ -96,14 +85,43 @@ def main():
         device=device,
     )
     
-    # Create dataset
-    dataset = ReceiverDataset(
-        data_path=data_path,
-        file_format=config["data"].get("format", "pickle"),
-        phase=args.phase,
-    )
+    # Create datasets based on phase
+    datasets = []
+    if args.phase is None:
+        # Load all phases (train + val + test)
+        phases = ["train", "val", "test"]
+        logger.info("Loading all phases: train, val, test")
+    else:
+        phases = [args.phase]
+        logger.info(f"Loading phase: {args.phase}")
     
-    logger.info(f"Dataset loaded: {len(dataset)} samples")
+    phase_to_key = {
+        "train": "train_path",
+        "val": "val_path",
+        "test": "test_path",
+    }
+    
+    for phase in phases:
+        data_path_key = phase_to_key[phase]
+        data_path = config["data"][data_path_key]
+        logger.info(f"  - {phase}: {data_path}")
+        
+        phase_dataset = ReceiverDataset(
+            data_path=data_path,
+            file_format=config["data"].get("format", "pickle"),
+            phase=phase,
+        )
+        datasets.append(phase_dataset)
+    
+    # Combine all datasets
+    if len(datasets) == 1:
+        dataset = datasets[0]
+    else:
+        # Concatenate datasets
+        from torch.utils.data import ConcatDataset
+        dataset = ConcatDataset(datasets)
+    
+    logger.info(f"Total dataset loaded: {len(dataset)} samples")
     
     # Get batch size from config (use eval batch size for inference)
     batch_size = config.get("eval", {}).get("batch_size", config.get("train", {}).get("batch_size", 32))
