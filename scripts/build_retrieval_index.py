@@ -3,6 +3,7 @@
 import argparse
 import logging
 from pathlib import Path
+from typing import Dict, Any
 import yaml
 
 import torch
@@ -10,7 +11,22 @@ from torch.utils.data import DataLoader
 
 from tacticai.retrieval import SimilarCKSearch, SimilarCKIndex
 from tacticai.dataio import ReceiverDataset, create_dataloader
-from tacticai.modules.utils import setup_logging, load_config, get_device
+from tacticai.modules.utils import setup_logging
+from tacticai.modules import get_device
+
+
+def load_config(config_path: str) -> Dict[str, Any]:
+    """Load configuration from YAML file.
+    
+    Args:
+        config_path: Path to configuration file
+        
+    Returns:
+        Configuration dictionary
+    """
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config
 
 
 def main():
