@@ -422,14 +422,20 @@ class ShotDataset(TacticAIDataset):
         elif self.file_format == "pickle":
             with open(file_path, 'rb') as f:
                 data = pickle.load(f)
-                # If it's already a list, return it
-                if isinstance(data, list):
-                    return data
-                # If it's a dict, it should be a single sample, wrap it in a list
+                # Same logic as ReceiverDataset: handle dict with "samples" key
+                samples: List[Dict[str, Any]]
+                if isinstance(data, dict) and "samples" in data:
+                    # Format: {"preprocess_version": ..., "samples": [...]}
+                    samples = data.get("samples", [])
+                elif isinstance(data, list):
+                    # Format: [...]
+                    samples = data
                 elif isinstance(data, dict):
-                    return [data]
+                    # Format: single sample dict, wrap it
+                    samples = [data]
                 else:
-                    return [data]
+                    samples = [data]
+                return samples
         else:
             raise ValueError(f"Unsupported file format: {self.file_format}")
     
@@ -485,6 +491,7 @@ class ShotDataset(TacticAIDataset):
             print(f"Schema __eq__: {self.schema.__class__.__eq__}")
             raise
         edge_index = self.schema.get_edge_index(sample)
+        edge_attr = self.schema.get_edge_attributes(sample)  # Get edge attributes if available
         target = self.schema.get_targets(sample)
         
         # Create batch tensor (all nodes belong to same graph)
@@ -495,6 +502,10 @@ class ShotDataset(TacticAIDataset):
             "edge_index": edge_index,
             "batch": batch,
         }
+        
+        # Add edge_attr if available
+        if edge_attr is not None:
+            input_data["edge_attr"] = edge_attr
         
         # Apply transforms
         input_data, target = self._apply_transforms(input_data, target)

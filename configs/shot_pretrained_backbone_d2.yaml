@@ -1,0 +1,101 @@
+# Configuration for shot prediction task using pretrained receiver backbone (D2 enabled)
+# 
+# 学習内容:
+# - Pretrained receiver backbone: Fine-tuning（バックボーンも学習される）
+# - Pretrained receiver head: 凍結（推論時のみ使用、学習されない）
+# - Shot head: 新規作成して学習
+#
+# 受け手とシュートを同時に学習するのではなく、受け手予測で学習された
+# エンコーダ（バックボーン）を使って、シュート予測ヘッドのみを学習します。
+
+# Pretrained model configuration
+pretrained:
+  backbone_path: null  # nullの場合はd2.enabledに応じて自動選択（backbone_d2.ckpt または backbone_no_d2.ckpt）
+  receiver_checkpoint_path: "checkpoints/receiver/best.ckpt"  # For receiver head (frozen)
+  use_receiver_for_conditioning: false  # Disable conditional prediction, use direct shot prediction
+  freeze_backbone: false  # Unfreeze backbone for fine-tuning with very small LR
+  lr_backbone: 0.00005  # Very small LR for backbone fine-tuning (5e-5, more conservative for D2)
+  lr_head: 0.001  # Head LR (higher than backbone, but lower for D2)
+
+# Model configuration (should match pretrained backbone)
+model:
+  input_dim: 16  # Must match pretrained receiver model
+  hidden_dim: 512  # Must match pretrained receiver model
+  num_layers: 3  # Must match pretrained receiver model
+  num_heads: 4  # Must match pretrained receiver model
+  dropout: 0.0  # Dropout for shot head only (backbone dropout is from pretrained)
+  edge_dim: 10  # Must match pretrained receiver model
+
+# Optimizer configuration
+optimizer:
+  type: "adam"
+  lr: 0.0005  # Lower LR for D2 enabled (more conservative, matches receiver prediction D2 settings)
+  weight_decay: 0.0001  # L2 regularization
+
+# Scheduler configuration
+scheduler:
+  type: "none"  # No scheduler for D2 enabled (matches receiver prediction D2 settings)
+
+# Training configuration
+train:
+  batch_size: 32
+  epochs: 100
+  amp: false  # Automatic mixed precision
+  grad_clip:
+    enabled: true
+    max_norm: 0.5  # Stronger gradient clipping for D2 enabled (more conservative, matches receiver prediction D2 settings)
+
+# Data configuration
+# Uses same data source as receiver prediction (data/processed_ck)
+data:
+  train_path: "data/processed_ck/shot_train/data.pickle"
+  val_path: "data/processed_ck/shot_val/data.pickle"
+  test_path: "data/processed_ck/shot_test/data.pickle"
+  format: "pickle"
+  merge_val_to_train: false  # ValデータをTrainに統合する (default=false)
+
+# Loss configuration
+loss:
+  type: "binary_cross_entropy"
+  label_smoothing: 0.0
+  weight: 1.0
+  pos_weight: 1.0  # Weight for positive class
+  
+  # Focal loss parameters (alternative to BCE)
+  focal_loss:
+    enabled: false
+    alpha: 0.25
+    gamma: 2.0
+    
+  # Class weights for imbalanced datasets
+  class_weights: null
+  
+  # Regularization terms
+  regularization:
+    l2_weight: 0.0001
+    dropout_rate: 0.0
+
+# D2 equivariance configuration (D2 enabled)
+d2:
+  enabled: true  # D2 equivariance enabled for data augmentation
+  group_pool: false  # Not used (D2 is handled internally in ShotModelWithReceiver)
+  transforms:
+    hflip: false
+    vflip: false
+
+# Early stopping configuration
+early_stopping:
+  patience: 20  # Patience for early stopping
+
+# Evaluation configuration
+eval:
+  batch_size: 32
+
+# System configuration
+device: "auto"
+seed: 42
+num_workers: 0  # Set to 0 to avoid multiprocessing issues
+log_level: "INFO"
+log_dir: "runs"
+checkpoint_dir: "checkpoints"
+
