@@ -105,6 +105,8 @@ def train_epoch(
     metrics: Dict[str, Any],
     lambda_receiver: float = 1.0,
     lambda_shot: float = 1.0,
+    receiver_loss_weight: float = 1.0,
+    shot_loss_weight: float = 1.0,
     use_amp: bool = False,
     grad_clip_enabled: bool = False,
     grad_clip_max_norm: float = 1.0,
@@ -170,9 +172,11 @@ def train_epoch(
         # For now, use a simplified approach
         # This is a placeholder - actual implementation needs to handle candidate masking
         receiver_loss = criterion_receiver(receiver_logits, receiver_target)
+        receiver_loss = receiver_loss * float(receiver_loss_weight)
         
         # Compute shot loss
         shot_loss = criterion_shot(shot_logit, shot_target.unsqueeze(1) if shot_target.dim() == 1 else shot_target)
+        shot_loss = shot_loss * float(shot_loss_weight)
         
         # Combined loss
         total_batch_loss = lambda_receiver * receiver_loss + lambda_shot * shot_loss
@@ -257,6 +261,8 @@ def validate_epoch(
     metrics: Dict[str, Any],
     lambda_receiver: float = 1.0,
     lambda_shot: float = 1.0,
+    receiver_loss_weight: float = 1.0,
+    shot_loss_weight: float = 1.0,
 ) -> Dict[str, float]:
     """Validate model for one epoch."""
     model.eval()
@@ -298,7 +304,9 @@ def validate_epoch(
             shot_logit = outputs["shot_logit"]
             
             receiver_loss = criterion_receiver(receiver_logits, receiver_target)
+            receiver_loss = receiver_loss * float(receiver_loss_weight)
             shot_loss = criterion_shot(shot_logit, shot_target.unsqueeze(1) if shot_target.dim() == 1 else shot_target)
+            shot_loss = shot_loss * float(shot_loss_weight)
             total_batch_loss = lambda_receiver * receiver_loss + lambda_shot * shot_loss
             
             batch_size = shot_target.size(0)
@@ -440,10 +448,17 @@ def main():
     
     # Create losses
     loss_config_receiver = config["loss"]["receiver"]
+    # NOTE: CrossEntropyLoss.weight expects class-weight tensor (or None).
+    # The YAML's loss.receiver.weight is treated as a scalar multiplier, not class weights.
+    class_weights = loss_config_receiver.get("class_weights", None)
+    class_weights_t = None
+    if class_weights is not None:
+        class_weights_t = torch.tensor(class_weights, dtype=torch.float32, device=device)
     criterion_receiver = CrossEntropyLoss(
         label_smoothing=loss_config_receiver.get("label_smoothing", 0.0),
-        weight=loss_config_receiver.get("weight", 1.0),
+        weight=class_weights_t,
     )
+    receiver_loss_weight = float(loss_config_receiver.get("weight", 1.0))
     
     loss_config_shot = config["loss"]["shot"]
     pos_weight = loss_config_shot.get("pos_weight", 1.0)
@@ -453,6 +468,7 @@ def main():
         label_smoothing=loss_config_shot.get("label_smoothing", 0.0),
         pos_weight=pos_weight,
     )
+    shot_loss_weight = float(loss_config_shot.get("weight", 1.0))
     
     # Create optimizer
     optimizer = create_optimizer(model, config)
@@ -518,6 +534,7 @@ def main():
             model, train_dataloader, optimizer,
             criterion_receiver, criterion_shot, device, metrics,
             lambda_receiver, lambda_shot,
+            receiver_loss_weight, shot_loss_weight,
             use_amp, grad_clip_enabled, grad_clip_max_norm,
         )
         
@@ -526,6 +543,7 @@ def main():
             model, val_dataloader,
             criterion_receiver, criterion_shot, device, metrics,
             lambda_receiver, lambda_shot,
+            receiver_loss_weight, shot_loss_weight,
         )
         
         # Update scheduler
@@ -587,6 +605,7 @@ def main():
         model, test_dataloader,
         criterion_receiver, criterion_shot, device, metrics,
         lambda_receiver, lambda_shot,
+        receiver_loss_weight, shot_loss_weight,
     )
     
     logger.info(
