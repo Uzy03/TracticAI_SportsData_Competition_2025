@@ -1,0 +1,98 @@
+# Multi-task learning configuration for receiver and shot prediction (D2 enabled)
+#
+# 学習内容:
+# - 共有バックボーン: 受け手予測（ノードレベル）とシュート予測（グラフレベル）を同時に学習
+# - 受け手予測ヘッド: ノードレベルの分類（22クラス）
+# - シュート予測ヘッド: グラフレベルの二値分類
+#
+# D2等変性: 有効
+
+model:
+  input_dim: 16
+  hidden_dim: 512
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.0
+  num_classes: 22  # Receiver prediction: 22 players
+  edge_dim: 10
+  mlp_num_layers: 2  # Number of layers in receiver head MLP
+
+optimizer:
+  type: "adam"
+  lr: 0.001
+  weight_decay: 0.0001
+
+scheduler:
+  type: "cosine"
+  T_max: 50
+  eta_min: 1e-6
+  warmup_epochs: 5
+
+train:
+  batch_size: 32
+  epochs: 100
+  amp: false
+  grad_clip:
+    enabled: true
+    max_norm: 0.5  # D2有効時は0.5を推奨
+
+# Task weights for multi-task learning
+multitask:
+  lambda_receiver: 1.0  # Weight for receiver prediction loss
+  lambda_shot: 1.0      # Weight for shot prediction loss
+
+data:
+  receiver_train_path: "data/processed_ck/receiver_train/data.pickle"
+  receiver_val_path: "data/processed_ck/receiver_val/data.pickle"
+  receiver_test_path: "data/processed_ck/receiver_test/data.pickle"
+  shot_train_path: "data/processed_ck/shot_train/data.pickle"
+  shot_val_path: "data/processed_ck/shot_val/data.pickle"
+  shot_test_path: "data/processed_ck/shot_test/data.pickle"
+  format: "pickle"
+  merge_val_to_train: false
+
+loss:
+  receiver:
+    type: "cross_entropy"
+    label_smoothing: 0.0
+    weight: 1.0
+    focal_loss:
+      enabled: false
+      alpha: 0.25
+      gamma: 2.0
+    class_weights: null
+  shot:
+    type: "binary_cross_entropy"
+    label_smoothing: 0.0
+    weight: 1.0
+    pos_weight: 1.0
+    focal_loss:
+      enabled: false
+      alpha: 0.25
+      gamma: 2.0
+
+d2:
+  enabled: true
+  group_pool: false
+  transforms:
+    hflip: false
+    vflip: false
+
+early_stopping:
+  patience: 20
+  min_delta: 0.0005
+  monitor: "val_receiver_top3"  # Monitor receiver top-3 accuracy
+
+eval:
+  batch_size: 32
+
+device: "auto"
+seed: 42
+num_workers: 0
+log_level: "INFO"
+log_dir: "runs"
+checkpoint_dir: "checkpoints"
+
+# Model save paths (will be saved as checkpoints/receiver_shot/best_d2.ckpt)
+model_save_dir: "checkpoints/receiver_shot"
+

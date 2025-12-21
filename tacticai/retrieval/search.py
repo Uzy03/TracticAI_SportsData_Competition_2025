@@ -241,7 +241,8 @@ class SimilarCKSearch:
                 index_path=save_path,
             )
         
-        # Add embeddings to index
+        # Add embeddings to index (normalize=True for cosine similarity)
+        # Note: embeddings from generate_embeddings are NOT normalized yet
         index.add_embeddings(embeddings, metadata, normalize=True)
         
         # Save if path provided

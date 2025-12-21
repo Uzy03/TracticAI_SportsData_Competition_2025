@@ -8,6 +8,7 @@ from .dataset import (
     create_dataloader,
     create_dummy_dataset,
 )
+from .multitask_dataset import MultiTaskDataset
 from .schema import (
     DataSchema,
     ReceiverSchema,
@@ -21,6 +22,7 @@ __all__ = [
     "ReceiverDataset", 
     "ShotDataset",
     "CVAEDataset",
+    "MultiTaskDataset",
     "create_dataloader",
     "create_dummy_dataset",
     "DataSchema",

@@ -15,6 +15,7 @@ from .mlp_heads import (
     marginalize_shot,
 )
 from .cvae import CVAEEncoder, CVAEDecoder, CVAEModel
+from .multitask_model import MultiTaskModel
 
 __all__ = [
     "GATv2Layer",
@@ -30,4 +31,5 @@ __all__ = [
     "CVAEEncoder",
     "CVAEDecoder",
     "CVAEModel",
+    "MultiTaskModel",
 ]
