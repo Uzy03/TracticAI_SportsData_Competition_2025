@@ -187,20 +187,28 @@ class SimilarCKSearch:
             H_inv = node_emb_4view.mean(dim=1)  # [B, N_per_graph, hidden_dim]
         else:
             # Standard mode: No D2 equivariance
-            N_total = x.size(0)
-            num_nodes_per_graph = N_total // B if B > 1 else N_total
+            # Get node embeddings - don't pass batch so we get node-level embeddings
+            H = self.backbone(x, edge_index, edge_attr, batch=None)  # [N_total, hidden_dim]
             
-            # Get node embeddings (readout=None returns node-level embeddings)
-            H = self.backbone(x, edge_index, edge_attr, batch=None)  # [N, hidden_dim]
-            
-            # Reshape to [B, N_per_graph, hidden_dim]
-            if H.dim() == 2:
-                H_inv = H.view(B, num_nodes_per_graph, -1)
-            elif H.dim() == 3:
-                # Already in [B, N_per_graph, hidden_dim] format
-                H_inv = H
+            # Group node embeddings by graph using batch tensor
+            if batch is not None:
+                unique_batches = torch.unique(batch, sorted=True)
+                B_actual = len(unique_batches)
+                
+                # Group node embeddings by graph using batch tensor
+                graph_embeddings = []
+                for b in range(B_actual):
+                    mask = (batch == b)
+                    graph_nodes = H[mask]  # [N_b, hidden_dim]
+                    graph_emb = graph_nodes.mean(dim=0)  # [hidden_dim]
+                    graph_embeddings.append(graph_emb)
+                
+                z_graph = torch.stack(graph_embeddings, dim=0)  # [B_actual, hidden_dim]
+                return z_graph
             else:
-                raise ValueError(f"Unexpected H shape: {H.shape}, expected 2D or 3D")
+                # Single graph case
+                z_graph = H.mean(dim=0, keepdim=True)  # [1, hidden_dim]
+                return z_graph
         
         # Graph Pooling: Mean pooling over nodes to get graph-level embedding
         z_graph = H_inv.mean(dim=1)  # [B, hidden_dim]
