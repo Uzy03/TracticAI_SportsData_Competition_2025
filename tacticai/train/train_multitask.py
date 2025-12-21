@@ -471,10 +471,15 @@ def main():
     
     # Early stopping
     early_stopping_config = config.get("early_stopping", {})
+    # Determine mode based on monitor metric (accuracy metrics should use 'max', loss should use 'min')
+    monitor = early_stopping_config.get("monitor", "val_receiver_top3")
+    # Remove "val_" prefix if present for accessing metrics dict
+    monitor_key = monitor.replace("val_", "")
+    mode = "max" if "accuracy" in monitor or "top" in monitor or "auc" in monitor or "f1" in monitor else "min"
     early_stopping = EarlyStopping(
         patience=early_stopping_config.get("patience", 20),
         min_delta=early_stopping_config.get("min_delta", 0.0),
-        monitor=early_stopping_config.get("monitor", "val_receiver_top3"),
+        mode=mode,
     )
     
     # Training history
@@ -557,18 +562,18 @@ def main():
             filepath=csv_path
         )
         
-        # Save best model
-        monitor_metric = val_metrics[early_stopping.monitor]
+        # Save best model and check early stopping
+        monitor_metric = val_metrics[monitor_key]
         if monitor_metric > best_val_metric:
             best_val_metric = monitor_metric
             save_checkpoint(
                 model, optimizer, epoch, val_metrics,
                 checkpoint_path
             )
-            logger.info(f"New best model saved with {early_stopping.monitor}: {best_val_metric:.4f}")
+            logger.info(f"New best model saved with {monitor}: {best_val_metric:.4f}")
         
-        # Early stopping
-        if early_stopping(val_metrics):
+        # Early stopping (pass score value and model)
+        if early_stopping(monitor_metric, model):
             logger.info(f"Early stopping triggered at epoch {epoch+1}")
             break
     
