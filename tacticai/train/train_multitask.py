@@ -25,7 +25,6 @@ from tacticai.modules import (
     CosineAnnealingScheduler, EarlyStopping,
 )
 from tacticai.modules.utils import save_training_history_csv
-from tacticai.modules.mlp_heads import mask_logits
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
