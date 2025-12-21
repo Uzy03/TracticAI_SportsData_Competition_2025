@@ -697,6 +697,71 @@ def collate_fn(batch: List[Tuple[Dict[str, torch.Tensor], torch.Tensor]]) -> Tup
     return batched_input, batched_targets
 
 
+def collate_fn_multitask(
+    batch: List[Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]]
+) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    """Collate function for multi-task datasets.
+    
+    Args:
+        batch: List of (input_data, targets_dict) tuples
+        
+    Returns:
+        Tuple of (batched_input, batched_targets_dict)
+    """
+    input_data_list, targets_list = zip(*batch)
+    
+    # Batch input data (same as regular collate_fn)
+    node_features = torch.cat([data["x"] for data in input_data_list], dim=0)
+    
+    # Batch edge indices with proper offsets
+    edge_indices = []
+    node_offset = 0
+    for data in input_data_list:
+        edge_idx = data["edge_index"]
+        edge_indices.append(edge_idx + node_offset)
+        node_offset += data["x"].size(0)
+    edge_index = torch.cat(edge_indices, dim=1)
+    
+    # Create batch assignment
+    batch_tensor = torch.cat([
+        torch.full((data["x"].size(0),), i, dtype=torch.long)
+        for i, data in enumerate(input_data_list)
+    ])
+    
+    batched_input = {
+        "x": node_features,
+        "edge_index": edge_index,
+        "batch": batch_tensor,
+    }
+    
+    # Concatenate edge_attr if present
+    if all("edge_attr" in data and data["edge_attr"] is not None for data in input_data_list):
+        edge_attrs = []
+        for data in input_data_list:
+            edge_attrs.append(data["edge_attr"])
+        batched_input["edge_attr"] = torch.cat(edge_attrs, dim=0)
+    
+    # Optional per-node fields: mask, team, ball
+    opt_keys = ["mask", "team", "ball", "cand_mask"]
+    for k in opt_keys:
+        if all(k in data for data in input_data_list):
+            batched_input[k] = torch.cat([data[k] for data in input_data_list], dim=0)
+    
+    # Batch targets (dict of tensors)
+    batched_targets = {}
+    for key in targets_list[0].keys():
+        targets = [t[key] for t in targets_list]
+        # Handle different target shapes
+        if all(t.dim() == 0 for t in targets):
+            batched_targets[key] = torch.stack(targets)
+        elif all(t.dim() == 1 for t in targets):
+            batched_targets[key] = torch.stack(targets)
+        else:
+            batched_targets[key] = torch.stack([t.flatten() for t in targets])
+    
+    return batched_input, batched_targets
+
+
 def create_dataloader(
     dataset: TacticAIDataset,
     batch_size: int = 32,

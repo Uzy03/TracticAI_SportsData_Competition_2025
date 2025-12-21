@@ -18,7 +18,8 @@ import numpy as np
 from tqdm import tqdm
 
 from tacticai.models import MultiTaskModel
-from tacticai.dataio import MultiTaskDataset, create_dataloader
+from tacticai.dataio import MultiTaskDataset, create_dataloader, collate_fn_multitask
+from torch.utils.data import DataLoader
 from tacticai.modules import (
     CrossEntropyLoss, BCELoss, TopKAccuracy, Accuracy, F1Score, AUC,
     set_seed, get_device, save_checkpoint, setup_logging,
@@ -405,29 +406,32 @@ def main():
     logger.info(f"Val dataset: {len(val_dataset)} samples")
     logger.info(f"Test dataset: {len(test_dataset)} samples")
     
-    # Create dataloaders
-    train_dataloader = create_dataloader(
+    # Create dataloaders (use multitask collate_fn)
+    train_dataloader = DataLoader(
         train_dataset,
         batch_size=config["train"]["batch_size"],
         shuffle=True,
         num_workers=config.get("num_workers", 0),
         pin_memory=False,
+        collate_fn=collate_fn_multitask,
     )
     
-    val_dataloader = create_dataloader(
+    val_dataloader = DataLoader(
         val_dataset,
         batch_size=config["eval"]["batch_size"],
         shuffle=False,
         num_workers=config.get("num_workers", 0),
         pin_memory=False,
+        collate_fn=collate_fn_multitask,
     )
     
-    test_dataloader = create_dataloader(
+    test_dataloader = DataLoader(
         test_dataset,
         batch_size=config["eval"]["batch_size"],
         shuffle=False,
         num_workers=config.get("num_workers", 0),
         pin_memory=False,
+        collate_fn=collate_fn_multitask,
     )
     
     # Create model
