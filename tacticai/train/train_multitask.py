@@ -114,16 +114,17 @@ def train_epoch(
     """Train model for one epoch."""
     model.train()
     
-    total_receiver_loss = 0.0
-    total_shot_loss = 0.0
-    total_loss = 0.0
-    
-    receiver_predictions = []
-    receiver_targets = []
+    total_receiver_loss_sum = 0.0
+    total_shot_loss_sum = 0.0
+    total_loss_sum = 0.0
+
+    receiver_graphs = 0
+    receiver_top1_correct = 0
+    receiver_top3_correct = 0
+
     shot_predictions = []
     shot_targets = []
-    
-    num_samples = 0
+    num_samples = 0  # number of graphs (shot labels)
     scaler = torch.cuda.amp.GradScaler() if use_amp else None
     
     logger = logging.getLogger("tacticai")
@@ -164,14 +165,68 @@ def train_epoch(
                 ball=ball,
             )
         
-        receiver_logits = outputs["receiver_logits"]  # [N_attacking, num_classes]
+        receiver_logits = outputs["receiver_logits"]  # [B, N] (per-node logits)
         shot_logit = outputs["shot_logit"]  # [B, 1]
         
-        # Compute receiver loss (need to filter targets to match filtered logits)
-        # TODO: Implement proper filtering logic here (similar to train_receiver.py)
-        # For now, use a simplified approach
-        # This is a placeholder - actual implementation needs to handle candidate masking
-        receiver_loss = criterion_receiver(receiver_logits, receiver_target)
+        # Receiver loss: candidate-masked softmax classification per graph (same as train_receiver.py)
+        cand_mask = data.get("cand_mask", None)
+        if cand_mask is None:
+            raise ValueError("Multi-task training requires 'cand_mask' in batched input_data.")
+
+        B = int(data["batch"].max().item() + 1) if data.get("batch") is not None else int(shot_target.size(0))
+        N_total = int(data["x"].size(0))
+        if N_total % B != 0:
+            raise ValueError(f"N_total ({N_total}) must be divisible by batch size B ({B})")
+        N = N_total // B
+
+        if receiver_logits.dim() == 1:
+            receiver_logits = receiver_logits.view(B, N)
+        elif receiver_logits.dim() == 2 and receiver_logits.size(0) == B:
+            pass
+        else:
+            raise ValueError(f"Unexpected receiver_logits shape: {receiver_logits.shape} (expected [B, N])")
+
+        cand_mask_b = cand_mask.view(B, N).bool()
+        receiver_target_b = receiver_target.view(-1)
+
+        receiver_loss_sum = 0.0
+        graphs_in_batch = 0
+
+        for b in range(B):
+            cm = cand_mask_b[b]
+            Ncand = int(cm.sum().item())
+            if Ncand <= 0:
+                continue
+
+            logits_b = receiver_logits[b][cm].unsqueeze(0)  # [1, Ncand]
+            cand_indices = torch.arange(N, device=logits_b.device)[cm]  # [Ncand]
+            target_global = int(receiver_target_b[b].item())
+
+            # If target not in candidates, skip (shouldn't happen if dataset is prepared correctly)
+            if not (0 <= target_global < N) or not cm[target_global].item():
+                continue
+
+            cand_target_idx = int((cand_indices == target_global).nonzero(as_tuple=True)[0].item())
+            target_t = torch.tensor([cand_target_idx], device=logits_b.device, dtype=torch.long)
+
+            graph_loss = criterion_receiver(logits_b, target_t)
+            receiver_loss_sum += graph_loss
+            graphs_in_batch += 1
+
+            # Receiver top-k metrics in candidate space
+            top1 = int(torch.argmax(logits_b, dim=1).item())
+            receiver_top1_correct += int(top1 == cand_target_idx)
+            k3 = min(3, Ncand)
+            top3 = torch.topk(logits_b, k=k3, dim=1).indices[0].tolist()
+            receiver_top3_correct += int(cand_target_idx in top3)
+
+        if graphs_in_batch == 0:
+            # No valid receiver graphs in this batch; still train shot head
+            receiver_loss = torch.tensor(0.0, device=device)
+        else:
+            receiver_loss = receiver_loss_sum / graphs_in_batch
+            receiver_graphs += graphs_in_batch
+
         receiver_loss = receiver_loss * float(receiver_loss_weight)
         
         # Compute shot loss
@@ -200,16 +255,14 @@ def train_epoch(
             optimizer.step()
         
         # Accumulate metrics
-        batch_size = shot_target.size(0)
-        total_receiver_loss += receiver_loss.item() * batch_size
-        total_shot_loss += shot_loss.item() * batch_size
-        total_loss += total_batch_loss.item() * batch_size
+        batch_size = int(shot_target.size(0))
+        total_receiver_loss_sum += float(receiver_loss.item()) * batch_size
+        total_shot_loss_sum += float(shot_loss.item()) * batch_size
+        total_loss_sum += float(total_batch_loss.item()) * batch_size
         num_samples += batch_size
         
         # Collect predictions for metrics
         with torch.no_grad():
-            receiver_predictions.append(receiver_logits.detach())
-            receiver_targets.append(receiver_target.detach())
             shot_predictions.append(shot_logit.detach())
             shot_targets.append(shot_target.detach())
         
@@ -219,18 +272,11 @@ def train_epoch(
             "shot": f"{shot_loss.item():.4f}",
         })
     
-    # Compute metrics
+    # Compute shot metrics
     with torch.no_grad():
-        receiver_logits_all = torch.cat(receiver_predictions, dim=0)
-        receiver_targets_all = torch.cat(receiver_targets, dim=0)
         shot_logits_all = torch.cat(shot_predictions, dim=0)
         shot_targets_all = torch.cat(shot_targets, dim=0)
-        
-        # Receiver metrics
-        receiver_top1 = metrics["receiver_top1"](receiver_logits_all, receiver_targets_all)
-        receiver_top3 = metrics["receiver_top3"](receiver_logits_all, receiver_targets_all)
-        
-        # Shot metrics
+
         shot_probs = torch.sigmoid(shot_logits_all.squeeze(-1))
         shot_binary = (shot_probs > 0.5).long()
         shot_acc = (shot_binary == shot_targets_all).float().mean()
@@ -238,11 +284,11 @@ def train_epoch(
         shot_f1 = metrics["shot_f1"](shot_logits_all, shot_targets_all)
     
     epoch_metrics = {
-        "total_loss": total_loss / num_samples,
-        "receiver_loss": total_receiver_loss / num_samples,
-        "shot_loss": total_shot_loss / num_samples,
-        "receiver_top1": receiver_top1.item(),
-        "receiver_top3": receiver_top3.item(),
+        "total_loss": total_loss_sum / max(1, num_samples),
+        "receiver_loss": total_receiver_loss_sum / max(1, num_samples),
+        "shot_loss": total_shot_loss_sum / max(1, num_samples),
+        "receiver_top1": (receiver_top1_correct / max(1, receiver_graphs)),
+        "receiver_top3": (receiver_top3_correct / max(1, receiver_graphs)),
         "shot_acc": shot_acc.item(),
         "shot_auc_roc": shot_auc_roc.item(),
         "shot_auc_pr": shot_auc_pr.item(),
@@ -267,12 +313,14 @@ def validate_epoch(
     """Validate model for one epoch."""
     model.eval()
     
-    total_receiver_loss = 0.0
-    total_shot_loss = 0.0
-    total_loss = 0.0
-    
-    receiver_predictions = []
-    receiver_targets = []
+    total_receiver_loss_sum = 0.0
+    total_shot_loss_sum = 0.0
+    total_loss_sum = 0.0
+
+    receiver_graphs = 0
+    receiver_top1_correct = 0
+    receiver_top3_correct = 0
+
     shot_predictions = []
     shot_targets = []
     
@@ -303,31 +351,73 @@ def validate_epoch(
             receiver_logits = outputs["receiver_logits"]
             shot_logit = outputs["shot_logit"]
             
-            receiver_loss = criterion_receiver(receiver_logits, receiver_target)
+            # Receiver loss (candidate-masked per graph)
+            cand_mask = data.get("cand_mask", None)
+            if cand_mask is None:
+                raise ValueError("Multi-task validation requires 'cand_mask' in batched input_data.")
+
+            B = int(data["batch"].max().item() + 1) if data.get("batch") is not None else int(shot_target.size(0))
+            N_total = int(data["x"].size(0))
+            if N_total % B != 0:
+                raise ValueError(f"N_total ({N_total}) must be divisible by batch size B ({B})")
+            N = N_total // B
+
+            if receiver_logits.dim() == 1:
+                receiver_logits = receiver_logits.view(B, N)
+            elif receiver_logits.dim() == 2 and receiver_logits.size(0) == B:
+                pass
+            else:
+                raise ValueError(f"Unexpected receiver_logits shape: {receiver_logits.shape} (expected [B, N])")
+
+            cand_mask_b = cand_mask.view(B, N).bool()
+            receiver_target_b = receiver_target.view(-1)
+
+            receiver_loss_sum = 0.0
+            graphs_in_batch = 0
+            for b in range(B):
+                cm = cand_mask_b[b]
+                Ncand = int(cm.sum().item())
+                if Ncand <= 0:
+                    continue
+                logits_b = receiver_logits[b][cm].unsqueeze(0)  # [1, Ncand]
+                cand_indices = torch.arange(N, device=logits_b.device)[cm]
+                target_global = int(receiver_target_b[b].item())
+                if not (0 <= target_global < N) or not cm[target_global].item():
+                    continue
+                cand_target_idx = int((cand_indices == target_global).nonzero(as_tuple=True)[0].item())
+                target_t = torch.tensor([cand_target_idx], device=logits_b.device, dtype=torch.long)
+                graph_loss = criterion_receiver(logits_b, target_t)
+                receiver_loss_sum += graph_loss
+                graphs_in_batch += 1
+
+                top1 = int(torch.argmax(logits_b, dim=1).item())
+                receiver_top1_correct += int(top1 == cand_target_idx)
+                k3 = min(3, Ncand)
+                top3 = torch.topk(logits_b, k=k3, dim=1).indices[0].tolist()
+                receiver_top3_correct += int(cand_target_idx in top3)
+
+            if graphs_in_batch == 0:
+                receiver_loss = torch.tensor(0.0, device=device)
+            else:
+                receiver_loss = receiver_loss_sum / graphs_in_batch
+                receiver_graphs += graphs_in_batch
             receiver_loss = receiver_loss * float(receiver_loss_weight)
             shot_loss = criterion_shot(shot_logit, shot_target.unsqueeze(1) if shot_target.dim() == 1 else shot_target)
             shot_loss = shot_loss * float(shot_loss_weight)
             total_batch_loss = lambda_receiver * receiver_loss + lambda_shot * shot_loss
             
             batch_size = shot_target.size(0)
-            total_receiver_loss += receiver_loss.item() * batch_size
-            total_shot_loss += shot_loss.item() * batch_size
-            total_loss += total_batch_loss.item() * batch_size
+            total_receiver_loss_sum += float(receiver_loss.item()) * batch_size
+            total_shot_loss_sum += float(shot_loss.item()) * batch_size
+            total_loss_sum += float(total_batch_loss.item()) * batch_size
             num_samples += batch_size
             
-            receiver_predictions.append(receiver_logits)
-            receiver_targets.append(receiver_target)
             shot_predictions.append(shot_logit)
             shot_targets.append(shot_target)
     
     # Compute metrics
-    receiver_logits_all = torch.cat(receiver_predictions, dim=0)
-    receiver_targets_all = torch.cat(receiver_targets, dim=0)
     shot_logits_all = torch.cat(shot_predictions, dim=0)
     shot_targets_all = torch.cat(shot_targets, dim=0)
-    
-    receiver_top1 = metrics["receiver_top1"](receiver_logits_all, receiver_targets_all)
-    receiver_top3 = metrics["receiver_top3"](receiver_logits_all, receiver_targets_all)
     
     shot_probs = torch.sigmoid(shot_logits_all.squeeze(-1))
     shot_binary = (shot_probs > 0.5).long()
@@ -336,11 +426,11 @@ def validate_epoch(
     shot_f1 = metrics["shot_f1"](shot_logits_all, shot_targets_all)
     
     epoch_metrics = {
-        "total_loss": total_loss / num_samples,
-        "receiver_loss": total_receiver_loss / num_samples,
-        "shot_loss": total_shot_loss / num_samples,
-        "receiver_top1": receiver_top1.item(),
-        "receiver_top3": receiver_top3.item(),
+        "total_loss": total_loss_sum / max(1, num_samples),
+        "receiver_loss": total_receiver_loss_sum / max(1, num_samples),
+        "shot_loss": total_shot_loss_sum / max(1, num_samples),
+        "receiver_top1": (receiver_top1_correct / max(1, receiver_graphs)),
+        "receiver_top3": (receiver_top3_correct / max(1, receiver_graphs)),
         "shot_acc": shot_acc.item(),
         "shot_auc_roc": shot_auc_roc.item(),
         "shot_auc_pr": shot_auc_pr.item(),

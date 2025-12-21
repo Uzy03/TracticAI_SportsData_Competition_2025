@@ -146,33 +146,10 @@ class MultiTaskModel(nn.Module):
                 raise ValueError(f"Unexpected H shape: {H.shape}, expected 2D or 3D")
         
         # Receiver prediction (node-level)
-        receiver_logits = self.receiver_head(H)  # [B, N, num_classes]
-        
-        # Apply filtering for receiver prediction if mask/team/ball provided
-        if mask is not None and team is not None and ball is not None:
-            # Filter to attacking team nodes only (same logic as ReceiverModel)
-            # Reshape receiver_logits to [N, num_classes]
-            N_total = receiver_logits.size(0) * receiver_logits.size(1)
-            receiver_logits_flat = receiver_logits.view(N_total, -1)  # [N, num_classes]
-            
-            # Apply mask and team filtering
-            valid_mask = mask.bool()
-            if team is not None:
-                # Filter to same team as kicker
-                kicker_idx = ball.argmax() if ball.sum() > 0 else 0
-                kicker_team = team[kicker_idx]
-                team_mask = (team == kicker_team)
-                valid_mask = valid_mask & team_mask
-            
-            # Filter out kicker (ball owner)
-            if ball is not None:
-                ball_mask = (ball < 0.5)  # Not ball owner
-                valid_mask = valid_mask & ball_mask
-            
-            receiver_logits_filtered = receiver_logits_flat[valid_mask]  # [N_attacking, num_classes]
-        else:
-            # No filtering: return all nodes
-            receiver_logits_filtered = receiver_logits.view(-1, receiver_logits.size(-1))  # [N, num_classes]
+        # NOTE:
+        # ReceiverHead is NodeScoreHead (per-node scalar), so output is [B, N].
+        # Candidate masking / target mapping is handled in the training loop (like train_receiver.py).
+        receiver_logits_nodes = self.receiver_head(H)  # [B, N]
         
         # Shot prediction (graph-level)
         # Normalize H to prevent numerical instability
@@ -185,7 +162,7 @@ class MultiTaskModel(nn.Module):
         shot_logit = shot_logits_per_node.mean(dim=1, keepdim=True)  # [B, 1]
         
         return {
-            'receiver_logits': receiver_logits_filtered,
+            'receiver_logits': receiver_logits_nodes,
             'shot_logit': shot_logit,
         }
 
