@@ -679,8 +679,8 @@ def main():
         if monitor_metric > best_val_metric:
             best_val_metric = monitor_metric
             save_checkpoint(
-                model, optimizer, epoch, val_metrics,
-                checkpoint_path
+                model, optimizer, epoch, val_metrics["total_loss"], val_metrics,
+                checkpoint_path, scheduler
             )
             logger.info(f"New best model saved with {monitor}: {best_val_metric:.4f}")
         
