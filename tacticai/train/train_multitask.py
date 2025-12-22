@@ -617,24 +617,41 @@ def main():
     logger.info(f"Starting training for {num_epochs} epochs")
     
     for epoch in range(num_epochs):
-        logger.info(f"Epoch {epoch+1}/{num_epochs}")
-        
-        # Train
-        train_metrics = train_epoch(
-            model, train_dataloader, optimizer,
-            criterion_receiver, criterion_shot, device, metrics,
-            lambda_receiver, lambda_shot,
-            receiver_loss_weight, shot_loss_weight,
-            use_amp, grad_clip_enabled, grad_clip_max_norm,
-        )
-        
-        # Validate
-        val_metrics = validate_epoch(
-            model, val_dataloader,
-            criterion_receiver, criterion_shot, device, metrics,
-            lambda_receiver, lambda_shot,
-            receiver_loss_weight, shot_loss_weight,
-        )
+        try:
+            logger.info(f"Epoch {epoch+1}/{num_epochs}")
+            
+            # Train
+            logger.info(f"Starting training epoch {epoch+1}...")
+            train_metrics = train_epoch(
+                model, train_dataloader, optimizer,
+                criterion_receiver, criterion_shot, device, metrics,
+                lambda_receiver, lambda_shot,
+                receiver_loss_weight, shot_loss_weight,
+                use_amp, grad_clip_enabled, grad_clip_max_norm,
+            )
+            logger.info(f"Training epoch {epoch+1} completed successfully")
+            
+            # Validate
+            logger.info(f"Starting validation epoch {epoch+1}...")
+            val_metrics = validate_epoch(
+                model, val_dataloader,
+                criterion_receiver, criterion_shot, device, metrics,
+                lambda_receiver, lambda_shot,
+                receiver_loss_weight, shot_loss_weight,
+            )
+            logger.info(f"Validation epoch {epoch+1} completed successfully")
+        except Exception as e:
+            logger.error(f"Error occurred at epoch {epoch+1}: {type(e).__name__}: {str(e)}")
+            logger.error("Traceback:", exc_info=True)
+            logger.error("Saving current history before exit...")
+            # Save history even on error
+            save_training_history_csv_multitask(
+                train_history,
+                val_history,
+                test_history=None,
+                filepath=log_dir / f"training_history_{timestamp}_error_epoch_{epoch+1}.csv"
+            )
+            raise  # Re-raise the exception
         
         # Update scheduler
         if scheduler is not None:
@@ -675,7 +692,18 @@ def main():
         )
         
         # Save best model and check early stopping
+        if monitor_key not in val_metrics:
+            logger.error(f"Monitor key '{monitor_key}' not found in val_metrics. Available keys: {list(val_metrics.keys())}")
+            raise KeyError(f"Monitor key '{monitor_key}' not found in val_metrics. Available keys: {list(val_metrics.keys())}")
+        
         monitor_metric = val_metrics[monitor_key]
+        
+        # Check for NaN/Inf values
+        if torch.isnan(torch.tensor(monitor_metric)) or torch.isinf(torch.tensor(monitor_metric)):
+            logger.error(f"Monitor metric '{monitor_key}' is NaN or Inf: {monitor_metric}")
+            logger.error(f"All val_metrics: {val_metrics}")
+            raise ValueError(f"Monitor metric '{monitor_key}' is NaN or Inf: {monitor_metric}")
+        
         if monitor_metric > best_val_metric:
             best_val_metric = monitor_metric
             save_checkpoint(
