@@ -25,7 +25,7 @@ from tacticai.modules import (
     set_seed, get_device, save_checkpoint, setup_logging,
     CosineAnnealingScheduler, EarlyStopping,
 )
-from tacticai.modules.utils import save_training_history_csv
+from tacticai.modules.utils import save_training_history_csv_multitask
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -595,7 +595,7 @@ def main():
     # Training history
     train_history = defaultdict(list)
     val_history = defaultdict(list)
-    test_history = defaultdict(list)
+    test_history = {}  # Test metrics are saved only once at the end
     
     # Model save directory (checkpoints/receiver_shot/)
     model_save_dir = Path(config.get("model_save_dir", "checkpoints/receiver_shot"))
@@ -667,7 +667,7 @@ def main():
         # Save CSV history
         csv_filename = f"training_history_{timestamp}.csv"
         csv_path = log_dir / csv_filename
-        save_training_history_csv(
+        save_training_history_csv_multitask(
             train_history,
             val_history,
             test_history=None,
@@ -702,6 +702,16 @@ def main():
         f"Test  - Total: {test_metrics['total_loss']:.4f}, "
         f"Receiver: Loss={test_metrics['receiver_loss']:.4f}, Top1={test_metrics['receiver_top1']:.4f}, Top3={test_metrics['receiver_top3']:.4f} | "
         f"Shot: Loss={test_metrics['shot_loss']:.4f}, Acc={test_metrics['shot_acc']:.4f}, AUC-ROC={test_metrics['shot_auc_roc']:.4f}, F1={test_metrics['shot_f1']:.4f}"
+    )
+    
+    # Update test history (single values, not lists) and save final CSV
+    test_history = test_metrics.copy()
+    
+    save_training_history_csv_multitask(
+        train_history,
+        val_history,
+        test_history=test_history,
+        filepath=log_dir / f"final_training_history_{timestamp}.csv"
     )
     
     logger.info("Training completed!")

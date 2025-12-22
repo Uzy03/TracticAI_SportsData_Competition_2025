@@ -488,6 +488,94 @@ def save_training_history_csv_shot(
         writer.writerows(rows)
 
 
+def save_training_history_csv_multitask(
+    train_history: Dict[str, list],
+    val_history: Dict[str, list],
+    test_history: Optional[Dict[str, float]] = None,
+    filepath: Union[str, Path] = "runs/training_history.csv"
+) -> None:
+    """Save training history to CSV file for multi-task learning (receiver + shot prediction).
+    
+    Args:
+        train_history: Training history dictionary with multitask metrics
+        val_history: Validation history dictionary with multitask metrics
+        test_history: Test metrics dictionary (optional, single values per metric)
+        filepath: Path to save CSV file
+    """
+    import csv
+    
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Get all epochs
+    num_epochs = len(train_history.get("total_loss", []))
+    
+    # Prepare CSV rows
+    rows = []
+    for epoch in range(num_epochs):
+        row = {
+            "epoch": epoch + 1,
+            "train_total_loss": train_history.get("total_loss", [0.0])[epoch] if epoch < len(train_history.get("total_loss", [])) else 0.0,
+            "train_receiver_loss": train_history.get("receiver_loss", [0.0])[epoch] if epoch < len(train_history.get("receiver_loss", [])) else 0.0,
+            "train_receiver_top1": train_history.get("receiver_top1", [0.0])[epoch] if epoch < len(train_history.get("receiver_top1", [])) else 0.0,
+            "train_receiver_top3": train_history.get("receiver_top3", [0.0])[epoch] if epoch < len(train_history.get("receiver_top3", [])) else 0.0,
+            "train_shot_loss": train_history.get("shot_loss", [0.0])[epoch] if epoch < len(train_history.get("shot_loss", [])) else 0.0,
+            "train_shot_acc": train_history.get("shot_acc", [0.0])[epoch] if epoch < len(train_history.get("shot_acc", [])) else 0.0,
+            "train_shot_auc_roc": train_history.get("shot_auc_roc", [0.0])[epoch] if epoch < len(train_history.get("shot_auc_roc", [])) else 0.0,
+            "train_shot_auc_pr": train_history.get("shot_auc_pr", [0.0])[epoch] if epoch < len(train_history.get("shot_auc_pr", [])) else 0.0,
+            "train_shot_f1": train_history.get("shot_f1", [0.0])[epoch] if epoch < len(train_history.get("shot_f1", [])) else 0.0,
+            "val_total_loss": val_history.get("total_loss", [0.0])[epoch] if epoch < len(val_history.get("total_loss", [])) else 0.0,
+            "val_receiver_loss": val_history.get("receiver_loss", [0.0])[epoch] if epoch < len(val_history.get("receiver_loss", [])) else 0.0,
+            "val_receiver_top1": val_history.get("receiver_top1", [0.0])[epoch] if epoch < len(val_history.get("receiver_top1", [])) else 0.0,
+            "val_receiver_top3": val_history.get("receiver_top3", [0.0])[epoch] if epoch < len(val_history.get("receiver_top3", [])) else 0.0,
+            "val_shot_loss": val_history.get("shot_loss", [0.0])[epoch] if epoch < len(val_history.get("shot_loss", [])) else 0.0,
+            "val_shot_acc": val_history.get("shot_acc", [0.0])[epoch] if epoch < len(val_history.get("shot_acc", [])) else 0.0,
+            "val_shot_auc_roc": val_history.get("shot_auc_roc", [0.0])[epoch] if epoch < len(val_history.get("shot_auc_roc", [])) else 0.0,
+            "val_shot_auc_pr": val_history.get("shot_auc_pr", [0.0])[epoch] if epoch < len(val_history.get("shot_auc_pr", [])) else 0.0,
+            "val_shot_f1": val_history.get("shot_f1", [0.0])[epoch] if epoch < len(val_history.get("shot_f1", [])) else 0.0,
+        }
+        
+        # Add test metrics if available (only for the last epoch)
+        if test_history is not None and epoch == num_epochs - 1:
+            row["test_total_loss"] = test_history.get("total_loss", 0.0)
+            row["test_receiver_loss"] = test_history.get("receiver_loss", 0.0)
+            row["test_receiver_top1"] = test_history.get("receiver_top1", 0.0)
+            row["test_receiver_top3"] = test_history.get("receiver_top3", 0.0)
+            row["test_shot_loss"] = test_history.get("shot_loss", 0.0)
+            row["test_shot_acc"] = test_history.get("shot_acc", 0.0)
+            row["test_shot_auc_roc"] = test_history.get("shot_auc_roc", 0.0)
+            row["test_shot_auc_pr"] = test_history.get("shot_auc_pr", 0.0)
+            row["test_shot_f1"] = test_history.get("shot_f1", 0.0)
+        else:
+            row["test_total_loss"] = ""
+            row["test_receiver_loss"] = ""
+            row["test_receiver_top1"] = ""
+            row["test_receiver_top3"] = ""
+            row["test_shot_loss"] = ""
+            row["test_shot_acc"] = ""
+            row["test_shot_auc_roc"] = ""
+            row["test_shot_auc_pr"] = ""
+            row["test_shot_f1"] = ""
+        
+        rows.append(row)
+    
+    # Write CSV file (overwrite mode)
+    fieldnames = [
+        "epoch",
+        "train_total_loss", "train_receiver_loss", "train_receiver_top1", "train_receiver_top3",
+        "train_shot_loss", "train_shot_acc", "train_shot_auc_roc", "train_shot_auc_pr", "train_shot_f1",
+        "val_total_loss", "val_receiver_loss", "val_receiver_top1", "val_receiver_top3",
+        "val_shot_loss", "val_shot_acc", "val_shot_auc_roc", "val_shot_auc_pr", "val_shot_f1",
+        "test_total_loss", "test_receiver_loss", "test_receiver_top1", "test_receiver_top3",
+        "test_shot_loss", "test_shot_acc", "test_shot_auc_roc", "test_shot_auc_pr", "test_shot_f1",
+    ]
+    
+    with open(filepath, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 class CosineAnnealingScheduler:
     """Cosine annealing learning rate scheduler.
     

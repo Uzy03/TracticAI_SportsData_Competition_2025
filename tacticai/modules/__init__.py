@@ -31,6 +31,7 @@ from .utils import (
     save_training_history,
     save_training_history_csv,
     save_training_history_csv_shot,
+    save_training_history_csv_multitask,
     CosineAnnealingScheduler,
     EarlyStopping,
 )
