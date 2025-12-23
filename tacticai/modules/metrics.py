@@ -236,9 +236,18 @@ class AUC:
         logits_np = logits.detach().cpu().numpy()
         targets_np = targets.detach().cpu().numpy()
         
-        # Handle binary classification
+        # Handle binary classification: ensure 1D array (not scalar)
         if logits.dim() == 2 and logits.size(1) == 1:
-            logits_np = logits_np.squeeze()
+            logits_np = logits_np.squeeze(-1)  # Only squeeze the last dimension
+        elif logits.dim() == 0:
+            # If scalar, convert to 1D array
+            logits_np = logits_np.reshape(1)
+        
+        # Ensure 1D arrays (not scalars) for sklearn
+        if logits_np.ndim == 0:
+            logits_np = logits_np.reshape(1)
+        if targets_np.ndim == 0:
+            targets_np = targets_np.reshape(1)
         
         # Compute AUC-ROC
         try:
