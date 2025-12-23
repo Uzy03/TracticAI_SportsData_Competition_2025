@@ -19,7 +19,6 @@ from tqdm import tqdm
 
 from tacticai.models import MultiTaskModel
 from tacticai.dataio import MultiTaskDataset, create_dataloader, collate_fn_multitask
-from torch.utils.data import DataLoader
 from tacticai.modules import (
     CrossEntropyLoss, BCELoss, TopKAccuracy, Accuracy, F1Score, AUC,
     set_seed, get_device, save_checkpoint, setup_logging,
@@ -516,39 +515,67 @@ def main():
     use_d2 = d2_config.get("enabled", False)
     
     # Create datasets
-    train_dataset = MultiTaskDataset(
+    full_train_dataset = MultiTaskDataset(
         receiver_data_path=config["data"]["receiver_train_path"],
         shot_data_path=config["data"]["shot_train_path"],
         receiver_file_format=config["data"].get("format", "pickle"),
         shot_file_format=config["data"].get("format", "pickle"),
         phase="train",
     )
-    
-    val_dataset = MultiTaskDataset(
-        receiver_data_path=config["data"]["receiver_val_path"],
-        shot_data_path=config["data"]["shot_val_path"],
-        receiver_file_format=config["data"].get("format", "pickle"),
-        shot_file_format=config["data"].get("format", "pickle"),
-        phase="val",
-    )
-    
-    test_dataset = MultiTaskDataset(
-        receiver_data_path=config["data"]["receiver_test_path"],
-        shot_data_path=config["data"]["shot_test_path"],
-        receiver_file_format=config["data"].get("format", "pickle"),
-        shot_file_format=config["data"].get("format", "pickle"),
-        phase="test",
-    )
+
+    # Debug overfit mode (config-driven) - make a small subset and use train=val=test same samples
+    debug_overfit_cfg = config.get("debug_overfit", {})
+    use_debug_overfit = bool(debug_overfit_cfg.get("enabled", False))
+    if use_debug_overfit:
+        num_samples = int(debug_overfit_cfg.get("num_samples", 8))
+        subset_seed = int(debug_overfit_cfg.get("seed", 42))
+        total = len(full_train_dataset)
+        if total <= 0:
+            raise ValueError("[DEBUG-OVERFIT] Training dataset is empty.")
+        if num_samples > total:
+            logger.warning(f"[DEBUG-OVERFIT] num_samples ({num_samples}) > total ({total}). Using all samples.")
+            num_samples = total
+
+        rng = np.random.RandomState(subset_seed)
+        indices = rng.permutation(total)[:num_samples].tolist()
+        indices = sorted(indices)
+
+        logger.info(
+            f"[DEBUG-OVERFIT] Using subset of {len(indices)}/{total} samples "
+            f"(seed={subset_seed}, indices={indices[:5]}{'...' if len(indices) > 5 else ''})"
+        )
+
+        train_dataset = Subset(full_train_dataset, indices)
+        val_dataset = Subset(full_train_dataset, indices)
+        test_dataset = Subset(full_train_dataset, indices)
+    else:
+        train_dataset = full_train_dataset
+        val_dataset = MultiTaskDataset(
+            receiver_data_path=config["data"]["receiver_val_path"],
+            shot_data_path=config["data"]["shot_val_path"],
+            receiver_file_format=config["data"].get("format", "pickle"),
+            shot_file_format=config["data"].get("format", "pickle"),
+            phase="val",
+        )
+
+        test_dataset = MultiTaskDataset(
+            receiver_data_path=config["data"]["receiver_test_path"],
+            shot_data_path=config["data"]["shot_test_path"],
+            receiver_file_format=config["data"].get("format", "pickle"),
+            shot_file_format=config["data"].get("format", "pickle"),
+            phase="test",
+        )
     
     logger.info(f"Train dataset: {len(train_dataset)} samples")
     logger.info(f"Val dataset: {len(val_dataset)} samples")
     logger.info(f"Test dataset: {len(test_dataset)} samples")
     
     # Create dataloaders (use multitask collate_fn)
+    train_shuffle = False if use_debug_overfit else True
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=config["train"]["batch_size"],
-        shuffle=True,
+        shuffle=train_shuffle,
         num_workers=config.get("num_workers", 0),
         pin_memory=False,
         collate_fn=collate_fn_multitask,
