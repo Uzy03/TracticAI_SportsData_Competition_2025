@@ -720,10 +720,10 @@ def main():
         
         # Early stopping (pass score value and model)
         logger.info(f"Checking early stopping for epoch {epoch+1}...")
-            if early_stopping(monitor_metric, model):
-                logger.info(f"Early stopping triggered at epoch {epoch+1}")
-                break
-            logger.info(f"Epoch {epoch+1} completed successfully")
+        if early_stopping(monitor_metric, model):
+            logger.info(f"Early stopping triggered at epoch {epoch+1}")
+            break
+        logger.info(f"Epoch {epoch+1} completed successfully")
     
     # Test evaluation
     logger.info("Evaluating on test set...")
