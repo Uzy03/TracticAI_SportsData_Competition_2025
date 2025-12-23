@@ -28,7 +28,7 @@ scheduler:
   warmup_epochs: 0
 
 train:
-  batch_size: 8
+  batch_size: 1
   epochs: 300
   amp: false
   grad_clip:
@@ -82,7 +82,7 @@ early_stopping:
   monitor: "val_receiver_top3"
 
 eval:
-  batch_size: 8
+  batch_size: 1
 
 device: "auto"
 seed: 42
@@ -94,7 +94,7 @@ model_save_dir: "checkpoints/receiver_shot"
 
 debug_overfit:
   enabled: true
-  num_samples: 8
+  num_samples: 1
   seed: 42
 
 
