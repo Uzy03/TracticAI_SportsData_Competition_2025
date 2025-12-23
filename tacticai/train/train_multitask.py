@@ -653,73 +653,73 @@ def main():
             )
             raise  # Re-raise the exception
         
-            # Update scheduler
-            if scheduler is not None:
-                if isinstance(scheduler, CosineAnnealingScheduler):
-                    current_lr = scheduler.step_epoch(epoch)
-                else:
-                    scheduler.step()
-                    current_lr = optimizer.param_groups[0]['lr']
+        # Update scheduler
+        if scheduler is not None:
+            if isinstance(scheduler, CosineAnnealingScheduler):
+                current_lr = scheduler.step_epoch(epoch)
             else:
+                scheduler.step()
                 current_lr = optimizer.param_groups[0]['lr']
-            
-            # Log metrics
-            logger.info(
-                f"Train - Total: {train_metrics['total_loss']:.4f}, "
-                f"Receiver: Loss={train_metrics['receiver_loss']:.4f}, Top1={train_metrics['receiver_top1']:.4f}, Top3={train_metrics['receiver_top3']:.4f} | "
-                f"Shot: Loss={train_metrics['shot_loss']:.4f}, Acc={train_metrics['shot_acc']:.4f}, AUC-ROC={train_metrics['shot_auc_roc']:.4f}, F1={train_metrics['shot_f1']:.4f}"
+        else:
+            current_lr = optimizer.param_groups[0]['lr']
+        
+        # Log metrics
+        logger.info(
+            f"Train - Total: {train_metrics['total_loss']:.4f}, "
+            f"Receiver: Loss={train_metrics['receiver_loss']:.4f}, Top1={train_metrics['receiver_top1']:.4f}, Top3={train_metrics['receiver_top3']:.4f} | "
+            f"Shot: Loss={train_metrics['shot_loss']:.4f}, Acc={train_metrics['shot_acc']:.4f}, AUC-ROC={train_metrics['shot_auc_roc']:.4f}, F1={train_metrics['shot_f1']:.4f}"
+        )
+        logger.info(
+            f"Val   - Total: {val_metrics['total_loss']:.4f}, "
+            f"Receiver: Loss={val_metrics['receiver_loss']:.4f}, Top1={val_metrics['receiver_top1']:.4f}, Top3={val_metrics['receiver_top3']:.4f} | "
+            f"Shot: Loss={val_metrics['shot_loss']:.4f}, Acc={val_metrics['shot_acc']:.4f}, AUC-ROC={val_metrics['shot_auc_roc']:.4f}, F1={val_metrics['shot_f1']:.4f}"
+        )
+        logger.info(f"Learning rate: {current_lr:.6f}")
+        
+        # Update history
+        logger.info(f"Updating history for epoch {epoch+1}...")
+        for key in train_metrics:
+            train_history[key].append(train_metrics[key])
+            val_history[key].append(val_metrics[key])
+        logger.info(f"History updated successfully for epoch {epoch+1}")
+        
+        # Save CSV history
+        logger.info(f"Saving CSV history for epoch {epoch+1}...")
+        csv_filename = f"training_history_{timestamp}.csv"
+        csv_path = log_dir / csv_filename
+        save_training_history_csv_multitask(
+            train_history,
+            val_history,
+            test_history=None,
+            filepath=csv_path
+        )
+        logger.info(f"CSV history saved successfully for epoch {epoch+1}")
+        
+        # Save best model and check early stopping
+        logger.info(f"Checking best model and early stopping for epoch {epoch+1}...")
+        if monitor_key not in val_metrics:
+            logger.error(f"Monitor key '{monitor_key}' not found in val_metrics. Available keys: {list(val_metrics.keys())}")
+            raise KeyError(f"Monitor key '{monitor_key}' not found in val_metrics. Available keys: {list(val_metrics.keys())}")
+        
+        monitor_metric = val_metrics[monitor_key]
+        
+        # Check for NaN/Inf values
+        if torch.isnan(torch.tensor(monitor_metric)) or torch.isinf(torch.tensor(monitor_metric)):
+            logger.error(f"Monitor metric '{monitor_key}' is NaN or Inf: {monitor_metric}")
+            logger.error(f"All val_metrics: {val_metrics}")
+            raise ValueError(f"Monitor metric '{monitor_key}' is NaN or Inf: {monitor_metric}")
+        
+        if monitor_metric > best_val_metric:
+            best_val_metric = monitor_metric
+            logger.info(f"Saving checkpoint for epoch {epoch+1}...")
+            save_checkpoint(
+                model, optimizer, epoch, val_metrics["total_loss"], val_metrics,
+                checkpoint_path, scheduler
             )
-            logger.info(
-                f"Val   - Total: {val_metrics['total_loss']:.4f}, "
-                f"Receiver: Loss={val_metrics['receiver_loss']:.4f}, Top1={val_metrics['receiver_top1']:.4f}, Top3={val_metrics['receiver_top3']:.4f} | "
-                f"Shot: Loss={val_metrics['shot_loss']:.4f}, Acc={val_metrics['shot_acc']:.4f}, AUC-ROC={val_metrics['shot_auc_roc']:.4f}, F1={val_metrics['shot_f1']:.4f}"
-            )
-            logger.info(f"Learning rate: {current_lr:.6f}")
-            
-            # Update history
-            logger.info(f"Updating history for epoch {epoch+1}...")
-            for key in train_metrics:
-                train_history[key].append(train_metrics[key])
-                val_history[key].append(val_metrics[key])
-            logger.info(f"History updated successfully for epoch {epoch+1}")
-            
-            # Save CSV history
-            logger.info(f"Saving CSV history for epoch {epoch+1}...")
-            csv_filename = f"training_history_{timestamp}.csv"
-            csv_path = log_dir / csv_filename
-            save_training_history_csv_multitask(
-                train_history,
-                val_history,
-                test_history=None,
-                filepath=csv_path
-            )
-            logger.info(f"CSV history saved successfully for epoch {epoch+1}")
-            
-            # Save best model and check early stopping
-            logger.info(f"Checking best model and early stopping for epoch {epoch+1}...")
-            if monitor_key not in val_metrics:
-                logger.error(f"Monitor key '{monitor_key}' not found in val_metrics. Available keys: {list(val_metrics.keys())}")
-                raise KeyError(f"Monitor key '{monitor_key}' not found in val_metrics. Available keys: {list(val_metrics.keys())}")
-            
-            monitor_metric = val_metrics[monitor_key]
-            
-            # Check for NaN/Inf values
-            if torch.isnan(torch.tensor(monitor_metric)) or torch.isinf(torch.tensor(monitor_metric)):
-                logger.error(f"Monitor metric '{monitor_key}' is NaN or Inf: {monitor_metric}")
-                logger.error(f"All val_metrics: {val_metrics}")
-                raise ValueError(f"Monitor metric '{monitor_key}' is NaN or Inf: {monitor_metric}")
-            
-            if monitor_metric > best_val_metric:
-                best_val_metric = monitor_metric
-                logger.info(f"Saving checkpoint for epoch {epoch+1}...")
-                save_checkpoint(
-                    model, optimizer, epoch, val_metrics["total_loss"], val_metrics,
-                    checkpoint_path, scheduler
-                )
-                logger.info(f"New best model saved with {monitor}: {best_val_metric:.4f}")
-            
-            # Early stopping (pass score value and model)
-            logger.info(f"Checking early stopping for epoch {epoch+1}...")
+            logger.info(f"New best model saved with {monitor}: {best_val_metric:.4f}")
+        
+        # Early stopping (pass score value and model)
+        logger.info(f"Checking early stopping for epoch {epoch+1}...")
             if early_stopping(monitor_metric, model):
                 logger.info(f"Early stopping triggered at epoch {epoch+1}")
                 break
