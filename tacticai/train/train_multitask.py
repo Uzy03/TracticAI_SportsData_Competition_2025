@@ -54,18 +54,20 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
 def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimizer:
     """Create optimizer."""
     opt_config = config["optimizer"]
+    lr = float(opt_config["lr"])
+    weight_decay = float(opt_config.get("weight_decay", 1e-4))
     
     if opt_config["type"] == "adam":
         optimizer = optim.Adam(
             model.parameters(),
-            lr=opt_config["lr"],
-            weight_decay=opt_config.get("weight_decay", 1e-4),
+            lr=lr,
+            weight_decay=weight_decay,
         )
     elif opt_config["type"] == "adamw":
         optimizer = optim.AdamW(
             model.parameters(),
-            lr=opt_config["lr"],
-            weight_decay=opt_config.get("weight_decay", 1e-4),
+            lr=lr,
+            weight_decay=weight_decay,
         )
     else:
         raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
@@ -80,9 +82,9 @@ def create_scheduler(optimizer: optim.Optimizer, config: Dict[str, Any]) -> Any:
     if sched_config.get("type") == "cosine":
         return CosineAnnealingScheduler(
             optimizer,
-            T_max=sched_config.get("T_max", config["train"]["epochs"]),
-            eta_min=sched_config.get("eta_min", 0.0),
-            warmup_epochs=sched_config.get("warmup_epochs", 0),
+            T_max=int(sched_config.get("T_max", config["train"]["epochs"])),
+            eta_min=float(sched_config.get("eta_min", 0.0)),
+            warmup_epochs=int(sched_config.get("warmup_epochs", 0)),
         )
     elif sched_config.get("type") == "step":
         return optim.lr_scheduler.StepLR(
