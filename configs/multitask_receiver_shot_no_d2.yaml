@@ -24,8 +24,10 @@ optimizer:
 
 scheduler:
   type: "cosine"
-  T_max: 50
-  eta_min: 1e-6
+  # train.epochsに合わせて1サイクル回す
+  T_max: 100
+  # YAMLで指数表記が文字列扱いになる環境があったため明示
+  eta_min: 0.000001
   warmup_epochs: 5
 
 train:
@@ -39,7 +41,8 @@ train:
 # Task weights for multi-task learning
 multitask:
   lambda_receiver: 1.0  # Weight for receiver prediction loss
-  lambda_shot: 1.0      # Weight for shot prediction loss
+  # shot側が埋もれないよう少し強め（overfit8で学習できることを確認済み）
+  lambda_shot: 2.0      # Weight for shot prediction loss
 
 data:
   receiver_train_path: "data/processed_ck/receiver_train/data.pickle"
@@ -79,9 +82,10 @@ d2:
     vflip: false
 
 early_stopping:
-  patience: 20
-  min_delta: 0.0005
-  monitor: "val_receiver_top3"  # Monitor receiver top-3 accuracy
+  # フル学習ではマルチタスク全体の改善を見る（lossが下がらなければ止める）
+  patience: 15
+  min_delta: 0.001
+  monitor: "val_total_loss"
 
 eval:
   batch_size: 32
