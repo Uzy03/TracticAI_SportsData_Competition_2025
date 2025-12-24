@@ -20,7 +20,7 @@ from tqdm import tqdm
 from tacticai.models import MultiTaskModel
 from tacticai.dataio import MultiTaskDataset, create_dataloader, collate_fn_multitask
 from tacticai.modules import (
-    CrossEntropyLoss, BCELoss, TopKAccuracy, Accuracy, F1Score, AUC,
+    CrossEntropyLoss, BCELoss, TopKAccuracy, Accuracy, F1Score, BinaryF1, AUC,
     set_seed, get_device, save_checkpoint, setup_logging,
     CosineAnnealingScheduler, EarlyStopping,
 )
@@ -278,11 +278,24 @@ def train_epoch(
         shot_logits_all = torch.cat(shot_predictions, dim=0)
         shot_targets_all = torch.cat(shot_targets, dim=0)
 
-        shot_probs = torch.sigmoid(shot_logits_all.squeeze(-1))
+        # Normalize shapes to avoid broadcasting bugs:
+        # - logits: [N]
+        # - targets: [N]
+        if shot_logits_all.dim() == 2 and shot_logits_all.size(1) == 1:
+            shot_logits_1d = shot_logits_all.squeeze(-1)
+        else:
+            shot_logits_1d = shot_logits_all.view(-1)
+
+        if shot_targets_all.dim() == 2 and shot_targets_all.size(1) == 1:
+            shot_targets_1d = shot_targets_all.squeeze(-1)
+        else:
+            shot_targets_1d = shot_targets_all.view(-1)
+
+        shot_probs = torch.sigmoid(shot_logits_1d)
         shot_binary = (shot_probs > 0.5).long()
-        shot_acc = (shot_binary == shot_targets_all).float().mean()
-        shot_auc_roc, shot_auc_pr = metrics["shot_auc"](shot_logits_all, shot_targets_all, compute_auc_pr=True)
-        shot_f1 = metrics["shot_f1"](shot_logits_all, shot_targets_all)
+        shot_acc = (shot_binary == shot_targets_1d.long()).float().mean()
+        shot_auc_roc, shot_auc_pr = metrics["shot_auc"](shot_logits_1d, shot_targets_1d, compute_auc_pr=True)
+        shot_f1 = metrics["shot_f1"](shot_logits_1d, shot_targets_1d)
     
     epoch_metrics = {
         "total_loss": total_loss_sum / max(1, num_samples),
@@ -419,12 +432,23 @@ def validate_epoch(
     # Compute metrics
     shot_logits_all = torch.cat(shot_predictions, dim=0)
     shot_targets_all = torch.cat(shot_targets, dim=0)
-    
-    shot_probs = torch.sigmoid(shot_logits_all.squeeze(-1))
+
+    # Normalize shapes to avoid broadcasting bugs
+    if shot_logits_all.dim() == 2 and shot_logits_all.size(1) == 1:
+        shot_logits_1d = shot_logits_all.squeeze(-1)
+    else:
+        shot_logits_1d = shot_logits_all.view(-1)
+
+    if shot_targets_all.dim() == 2 and shot_targets_all.size(1) == 1:
+        shot_targets_1d = shot_targets_all.squeeze(-1)
+    else:
+        shot_targets_1d = shot_targets_all.view(-1)
+
+    shot_probs = torch.sigmoid(shot_logits_1d)
     shot_binary = (shot_probs > 0.5).long()
-    shot_acc = (shot_binary == shot_targets_all).float().mean()
-    shot_auc_roc, shot_auc_pr = metrics["shot_auc"](shot_logits_all, shot_targets_all, compute_auc_pr=True)
-    shot_f1 = metrics["shot_f1"](shot_logits_all, shot_targets_all)
+    shot_acc = (shot_binary == shot_targets_1d.long()).float().mean()
+    shot_auc_roc, shot_auc_pr = metrics["shot_auc"](shot_logits_1d, shot_targets_1d, compute_auc_pr=True)
+    shot_f1 = metrics["shot_f1"](shot_logits_1d, shot_targets_1d)
     
     epoch_metrics = {
         "total_loss": total_loss_sum / max(1, num_samples),
@@ -640,7 +664,7 @@ def main():
         "receiver_top1": TopKAccuracy(k=1),
         "receiver_top3": TopKAccuracy(k=3),
         "shot_auc": AUC(),
-        "shot_f1": F1Score(),
+        "shot_f1": BinaryF1(threshold=0.5),
     }
     
     # Task weights

@@ -19,6 +19,7 @@ from .metrics import (
     TopKAccuracy,
     Accuracy,
     F1Score,
+    BinaryF1,
     AUC,
     ECE,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "TopKAccuracy",
     "Accuracy",
     "F1Score",
+    "BinaryF1",
     "AUC",
     "ECE",
     "set_seed",
