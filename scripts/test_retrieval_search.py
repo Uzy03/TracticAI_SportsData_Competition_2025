@@ -181,7 +181,7 @@ def main():
         metadata = result['metadata']
         idx = result['index']
         
-        print(f"\n{i}. Rank {i} (Similarity: {similarity:.4f})")
+        print(f"\n{i}. Rank {i} (Similarity: {similarity:.8f})")
         print(f"   Index: {idx}")
         print(f"   Metadata: {metadata}")
     
