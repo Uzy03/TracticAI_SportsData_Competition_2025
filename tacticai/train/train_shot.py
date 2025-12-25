@@ -92,7 +92,7 @@ class ShotModelWithReceiver(nn.Module):
             if receiver_checkpoint_path is None:
                 raise ValueError("pretrained.receiver_checkpoint_path must be specified when use_receiver_for_conditioning is True")
             
-            receiver_checkpoint = torch.load(receiver_checkpoint_path, map_location=device)
+            receiver_checkpoint = torch.load(receiver_checkpoint_path, map_location=device, weights_only=False)
             self.receiver_head = ReceiverHead(
             input_dim=model_config["hidden_dim"],
             hidden_dim=model_config["hidden_dim"],
@@ -920,7 +920,7 @@ def main():
     
     start_epoch = 0
     if args.resume:
-        checkpoint = torch.load(args.resume, map_location=device)
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1

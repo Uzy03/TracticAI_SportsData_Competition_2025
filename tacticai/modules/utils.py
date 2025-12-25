@@ -181,7 +181,8 @@ def load_checkpoint(
     if device is None:
         device = torch.device("cpu")
     
-    checkpoint = torch.load(filepath, map_location=device)
+    # weights_only=False for compatibility with checkpoints containing NumPy scalars (PyTorch 2.6+)
+    checkpoint = torch.load(filepath, map_location=device, weights_only=False)
     
     if model is not None and "model_state_dict" in checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -218,7 +219,8 @@ def load_backbone_from_checkpoint(
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Backbone checkpoint not found: {checkpoint_path}")
     
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # weights_only=False for compatibility with checkpoints containing NumPy scalars (PyTorch 2.6+)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Metadata can come from checkpoint (backbone-only ckpt) or be provided externally
     if "metadata" in checkpoint:
