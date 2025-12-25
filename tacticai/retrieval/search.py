@@ -25,6 +25,7 @@ class SimilarCKSearch:
     def __init__(
         self,
         backbone_checkpoint_path: Union[str, Path],
+        config: Optional[Dict[str, Any]] = None,
         device: Optional[torch.device] = None,
     ):
         """Initialize SimilarCKSearch.
@@ -40,9 +41,26 @@ class SimilarCKSearch:
         
         # Load pretrained backbone
         logger.info(f"Loading backbone from {backbone_checkpoint_path}")
+        metadata_override = None
+        if config is not None:
+            # Derive backbone metadata from config for loading full checkpoints (e.g., multitask best_*.ckpt)
+            model_cfg = config.get("model", {})
+            d2_cfg = config.get("d2", {})
+            metadata_override = {
+                "input_dim": model_cfg.get("input_dim"),
+                "hidden_dim": model_cfg.get("hidden_dim"),
+                "num_layers": model_cfg.get("num_layers"),
+                "num_heads": model_cfg.get("num_heads"),
+                "dropout": model_cfg.get("dropout", 0.0),
+                "edge_dim": model_cfg.get("edge_dim", 1),
+                "use_d2_equivariance": d2_cfg.get("enabled", False),
+                # Provide a hint for constructor selection
+                "backbone_type": "GATv2Network4View" if d2_cfg.get("enabled", False) else "GATv2Network",
+            }
         self.backbone, self.metadata = load_backbone_from_checkpoint(
             backbone_checkpoint_path,
-            device=device
+            device=device,
+            metadata_override=metadata_override,
         )
         self.backbone.eval()
         

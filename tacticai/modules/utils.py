@@ -198,12 +198,15 @@ def load_checkpoint(
 def load_backbone_from_checkpoint(
     checkpoint_path: Union[str, Path],
     device: Optional[torch.device] = None,
+    metadata_override: Optional[Dict[str, Any]] = None,
 ) -> Tuple[nn.Module, Dict[str, Any]]:
     """Load pretrained backbone from checkpoint.
     
     Args:
         checkpoint_path: Path to backbone checkpoint file
         device: Device to load checkpoint on (default: cpu)
+        metadata_override: Metadata/config-derived parameters to construct backbone when the
+            checkpoint does not include `metadata` (e.g., full model checkpoints).
         
     Returns:
         Tuple of (backbone_model, metadata)
@@ -217,10 +220,16 @@ def load_backbone_from_checkpoint(
     
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    if "metadata" not in checkpoint:
-        raise ValueError(f"Checkpoint does not contain metadata: {checkpoint_path}")
-    
-    metadata = checkpoint["metadata"]
+    # Metadata can come from checkpoint (backbone-only ckpt) or be provided externally
+    if "metadata" in checkpoint:
+        metadata = checkpoint["metadata"]
+    elif metadata_override is not None:
+        metadata = metadata_override
+    else:
+        raise ValueError(
+            f"Checkpoint does not contain metadata: {checkpoint_path}. "
+            f"Pass metadata_override (e.g., derived from YAML config) to construct backbone."
+        )
     
     # Import models here to avoid circular imports
     from tacticai.models import GATv2Network, GATv2Network4View
@@ -258,8 +267,23 @@ def load_backbone_from_checkpoint(
     # Load state dict
     if "backbone_state_dict" in checkpoint:
         backbone.load_state_dict(checkpoint["backbone_state_dict"])
+    elif "model_state_dict" in checkpoint:
+        # Full model checkpoint: extract backbone.* parameters (e.g., MultiTaskModel)
+        full_sd = checkpoint["model_state_dict"]
+        backbone_sd = {}
+        prefix = "backbone."
+        for k, v in full_sd.items():
+            if k.startswith(prefix):
+                backbone_sd[k[len(prefix):]] = v
+        if len(backbone_sd) == 0:
+            raise ValueError(
+                f"Checkpoint contains model_state_dict but no '{prefix}*' keys were found: {checkpoint_path}"
+            )
+        backbone.load_state_dict(backbone_sd, strict=True)
     else:
-        raise ValueError(f"Checkpoint does not contain backbone_state_dict: {checkpoint_path}")
+        raise ValueError(
+            f"Checkpoint does not contain backbone_state_dict or model_state_dict: {checkpoint_path}"
+        )
     
     backbone = backbone.to(device)
     

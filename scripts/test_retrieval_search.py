@@ -43,7 +43,8 @@ def main():
     parser.add_argument(
         "--backbone-checkpoint",
         type=str,
-        help="Path to pretrained backbone checkpoint (auto-selects from config if not specified)",
+        help="(Deprecated) Path to pretrained checkpoint (backbone-only or full). "
+             "If not specified, auto-selects from config.",
     )
     parser.add_argument(
         "--index-path",
@@ -99,18 +100,20 @@ def main():
     if args.backbone_checkpoint:
         backbone_checkpoint_path = args.backbone_checkpoint
     else:
-        # Auto-select based on D2 setting
+        # Auto-select based on D2 setting (prefer receiver_shot multitask checkpoints)
         d2_enabled = config.get("d2", {}).get("enabled", False)
         checkpoint_dir = config.get("checkpoint_dir", "checkpoints")
+        model_save_dir = config.get("model_save_dir", f"{checkpoint_dir}/receiver_shot")
         if d2_enabled:
-            backbone_checkpoint_path = f"{checkpoint_dir}/receiver/backbone_d2.ckpt"
+            backbone_checkpoint_path = f"{model_save_dir}/best_d2.ckpt"
         else:
-            backbone_checkpoint_path = f"{checkpoint_dir}/receiver/backbone_no_d2.ckpt"
+            backbone_checkpoint_path = f"{model_save_dir}/best_no_d2.ckpt"
         logger.info(f"Auto-selected backbone checkpoint: {backbone_checkpoint_path}")
     
     # Create search system
     search_system = SimilarCKSearch(
         backbone_checkpoint_path=backbone_checkpoint_path,
+        config=config,
         device=device,
     )
     
@@ -131,7 +134,16 @@ def main():
             "val": "val_path",
             "test": "test_path",
         }
-        query_data_path = config["data"][phase_to_key[args.phase]]
+        phase_to_key_multitask = {
+            "train": "receiver_train_path",
+            "val": "receiver_val_path",
+            "test": "receiver_test_path",
+        }
+        # Try standard key first, then multitask key
+        query_key = phase_to_key[args.phase]
+        if query_key not in config["data"]:
+            query_key = phase_to_key_multitask[args.phase]
+        query_data_path = config["data"][query_key]
     
     logger.info(f"Loading query data from: {query_data_path}")
     query_dataset = ReceiverDataset(

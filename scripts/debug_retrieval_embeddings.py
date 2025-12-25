@@ -41,13 +41,14 @@ def main():
     else:
         d2_enabled = config.get("d2", {}).get("enabled", False)
         checkpoint_dir = config.get("checkpoint_dir", "checkpoints")
+        model_save_dir = config.get("model_save_dir", f"{checkpoint_dir}/receiver_shot")
         if d2_enabled:
-            backbone_path = f"{checkpoint_dir}/receiver/backbone_d2.ckpt"
+            backbone_path = f"{model_save_dir}/best_d2.ckpt"
         else:
-            backbone_path = f"{checkpoint_dir}/receiver/backbone_no_d2.ckpt"
+            backbone_path = f"{model_save_dir}/best_no_d2.ckpt"
     
     # Create search system
-    search_system = SimilarCKSearch(backbone_checkpoint_path=backbone_path, device=device)
+    search_system = SimilarCKSearch(backbone_checkpoint_path=backbone_path, config=config, device=device)
     
     # Load index
     index = SimilarCKIndex(embedding_dim=config["model"]["hidden_dim"], index_path=args.index_path)
@@ -83,8 +84,13 @@ def main():
         print(f"  Most frequent count: {counts.max()}")
         print(f"  Number of unique values with count > 1: {(counts > 1).sum()}")
     
-    # Load query data
-    query_data_path = config["data"]["train_path"]
+    # Load query data (support both standard and multitask configs)
+    if "train_path" in config["data"]:
+        query_data_path = config["data"]["train_path"]
+    elif "receiver_train_path" in config["data"]:
+        query_data_path = config["data"]["receiver_train_path"]
+    else:
+        raise ValueError("Neither 'train_path' nor 'receiver_train_path' found in config['data']")
     query_dataset = ReceiverDataset(
         data_path=query_data_path,
         file_format=config["data"].get("format", "pickle"),
