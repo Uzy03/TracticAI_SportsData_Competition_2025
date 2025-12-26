@@ -32,6 +32,8 @@ pip install streamlit plotly pandas numpy pyyaml
 
 ## 実行方法
 
+### ローカル環境
+
 プロジェクトルートから実行：
 
 ```bash
@@ -45,6 +47,33 @@ streamlit run app.py
 ```
 
 ブラウザが自動的に開き、`http://localhost:8501`でアプリケーションが起動します。
+
+### リモートSSH環境（Dockerコンテナ含む）
+
+リモートサーバーで実行する場合、以下の手順が必要です：
+
+1. **SSHポートフォワーディングの設定**（ローカルマシン側）:
+```bash
+ssh -L 8501:localhost:8501 <user>@<remote_host>
+# Dockerコンテナの場合
+ssh -L 8501:localhost:8501 -p <port> <user>@<remote_host>
+# または、コンテナにポートマッピングがある場合
+docker exec -it <container_name> bash
+```
+
+2. **リモートサーバー（コンテナ内）でStreamlitを起動**:
+```bash
+# コンテナ内で実行
+streamlit run tacticai/retrieval/visualization/app.py \
+  --server.address 0.0.0.0 \
+  --server.port 8501 \
+  --server.headless true
+```
+
+3. **ローカルブラウザでアクセス**:
+- `http://localhost:8501` を開く
+
+**注意**: エラーが出る場合は、ターミナルに表示されるエラーメッセージを確認してください。
 
 ## 使用方法
 
@@ -86,7 +115,30 @@ tacticai/retrieval/visualization/
 
 ## トラブルシューティング
 
-- **エラー: Module not found**: `pip install -r requirements.txt`で必要なライブラリをインストールしてください
-- **エラー: File not found**: 設定ファイル、インデックスファイル、データファイルのパスが正しいか確認してください
-- **エラー: Index out of range**: クエリサンプルのインデックスがデータセットの範囲内か確認してください
+### よくあるエラー
+
+- **エラー: Module not found**: 
+  - `pip install streamlit plotly` で必要なライブラリをインストールしてください
+  - または `pip install -e .` でプロジェクトを再インストールしてください
+
+- **エラー: File not found**: 
+  - 設定ファイル、インデックスファイル、データファイルのパスが正しいか確認してください
+  - リモート環境では絶対パスまたはプロジェクトルートからの相対パスを使用してください
+
+- **エラー: Index out of range**: 
+  - クエリサンプルのインデックスがデータセットの範囲内か確認してください
+
+- **エラー: ページを開けません / Connection refused**:
+  - **リモートSSH環境の場合**: SSHポートフォワーディングが正しく設定されているか確認してください
+  - Streamlitが正常に起動しているか、ターミナルのログを確認してください
+  - `--server.address 0.0.0.0` オプションを指定して起動してください
+  - ポートが他のプロセスで使用されていないか確認してください: `lsof -i :8501`
+
+- **アプリケーションが起動しない**:
+  - ターミナルで直接実行してエラーメッセージを確認してください:
+    ```bash
+    python -m streamlit run tacticai/retrieval/visualization/app.py
+    ```
+  - インポートエラーの場合は、プロジェクトルートで実行しているか確認してください
+  - `PYTHONPATH`を設定する場合: `PYTHONPATH=/workspace:$PYTHONPATH streamlit run ...`
 

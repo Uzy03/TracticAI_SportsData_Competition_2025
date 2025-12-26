@@ -30,6 +30,8 @@ setup(
         "scikit-learn>=1.3.0",
         "tqdm>=4.65.0",
         "matplotlib>=3.7.0",
+        "streamlit>=1.28.0",
+        "plotly>=5.17.0",
     ],
     extras_require={
         "dev": [
