@@ -1,7 +1,10 @@
 # =========================
-# GPU Dev Environment (CUDA 12.4 / cuDNN9 / Ubuntu 22.04)
+# GPU Dev Environment (CUDA 12.4 / Ubuntu 22.04)
 # =========================
-FROM nvidia/cuda:12.4.1-cudnn9-devel-ubuntu22.04
+# NOTE:
+# - `nvidia/cuda:12.4.1-cudnn9-devel-ubuntu22.04` はDocker Hub上に存在しないためビルドに失敗します。
+# - 本プロジェクトはcuDNN必須ではないため、確実に存在するdevelイメージを利用します。
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
 # 基本ツールと Python
 ARG DEBIAN_FRONTEND=noninteractive
@@ -38,6 +41,6 @@ RUN python3 -m venv ~/.venv && \
 # PATH 設定
 ENV PATH="/home/${USERNAME}/.venv/bin:${PATH}"
 
-EXPOSE 8888
+EXPOSE 8501
 CMD ["bash", "-lc", "python -c 'import subprocess; subprocess.run([\"nvidia-smi\"])' && bash"]
 
