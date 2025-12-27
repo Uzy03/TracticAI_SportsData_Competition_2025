@@ -226,6 +226,15 @@ def load_raw_sample_data(
     y = np.array(sample.get("y", []))
     team = np.array(sample.get("team", []))
     ball = np.array(sample.get("ball", []))
+    # Some samples may not have an explicit ball flag. Use kicker position as proxy.
+    if (ball.size > 0) and (ball.sum() == 0) and ("kicker_idx" in sample) and (sample["kicker_idx"] is not None):
+        try:
+            k = int(sample["kicker_idx"])
+            if 0 <= k < ball.size:
+                ball = ball.astype(float)
+                ball[k] = 1.0
+        except Exception:
+            pass
     
     # Get velocities if available
     vx = np.array(sample.get("vx", [0.0] * len(x)))
@@ -375,7 +384,12 @@ def get_ball_swing_arc(
 
     bx = float(ball_rows.iloc[0]["x"])
     by = float(ball_rows.iloc[0]["y"])
+    # Start from the ball position, but use nearest corner only to decide "side"
     cx, cy = _nearest_corner(bx, by)
+    # If ball is far from the corner, it's likely a short corner / restart, and a curved corner arc is misleading.
+    dist_to_corner = float(((bx - cx) ** 2 + (by - cy) ** 2) ** 0.5)
+    if dist_to_corner > 8.0:
+        return np.array([]), np.array([]), swing
 
     # End point: into the penalty area near the goal side.
     half_length = FIELD_LENGTH / 2
@@ -395,9 +409,62 @@ def get_ball_swing_arc(
     else:
         y1 = cy + sgn * delta  # toward sideline
 
-    # Quadratic Bezier curve: P0=(cx,cy), P1=(x1,y1), P2=(x2,y2)
+    # Quadratic Bezier curve: P0=(ball), P1=(control), P2=(target)
     t = np.linspace(0.0, 1.0, num_points)
-    x = (1 - t) ** 2 * cx + 2 * (1 - t) * t * x1 + t**2 * x2
-    y = (1 - t) ** 2 * cy + 2 * (1 - t) * t * y1 + t**2 * y2
+    x = (1 - t) ** 2 * bx + 2 * (1 - t) * t * x1 + t**2 * x2
+    y = (1 - t) ** 2 * by + 2 * (1 - t) * t * y1 + t**2 * y2
     return x, y, swing
+
+
+def get_short_pass_arrow(
+    df: pd.DataFrame,
+    receiver_idx: Optional[int] = None,
+    short_corner_threshold_m: float = 8.0,
+) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
+    """If this looks like a short corner, return a short pass arrow (start,end).
+
+    - Start: ball/kicker position
+    - End: receiver_idx if provided; otherwise nearest same-team player (excluding kicker)
+    """
+    ball_rows = df[df["ball"] > 0.5]
+    if len(ball_rows) == 0:
+        return None, None
+
+    # Kicker/ball position
+    bx = float(ball_rows.iloc[0]["x"])
+    by = float(ball_rows.iloc[0]["y"])
+    cx, cy = _nearest_corner(bx, by)
+    dist_to_corner = float(((bx - cx) ** 2 + (by - cy) ** 2) ** 0.5)
+    if dist_to_corner <= float(short_corner_threshold_m):
+        return None, None
+
+    start = (bx, by)
+
+    # Determine receiver
+    if receiver_idx is not None:
+        try:
+            ridx = int(receiver_idx)
+            if 0 <= ridx < len(df):
+                end_row = df.iloc[ridx]
+                return start, (float(end_row["x"]), float(end_row["y"]))
+        except Exception:
+            pass
+
+    # Fallback: nearest same-team player (exclude kicker)
+    kicker_team = int(ball_rows.iloc[0]["team_id"]) if "team_id" in df.columns else 0
+    kicker_pos = np.array([bx, by], dtype=float)
+
+    candidates = df[df["team_id"] == kicker_team].copy() if "team_id" in df.columns else df.copy()
+    if len(candidates) <= 1:
+        return None, None
+
+    # Compute distances, exclude the ball row itself by distance ~0
+    coords = candidates[["x", "y"]].to_numpy(dtype=float)
+    d = np.sqrt(((coords - kicker_pos) ** 2).sum(axis=1))
+    d = np.where(d < 1e-6, np.inf, d)
+    j = int(np.argmin(d))
+    if not np.isfinite(d[j]):
+        return None, None
+    end = (float(coords[j, 0]), float(coords[j, 1]))
+    return start, end
 

@@ -28,6 +28,10 @@ try:
     from .utils import draw_soccer_field, load_raw_sample_data, get_ball_swing_arc
 except ImportError:
     from tacticai.retrieval.visualization.utils import draw_soccer_field, load_raw_sample_data, get_ball_swing_arc
+try:
+    from .utils import get_short_pass_arrow
+except ImportError:
+    from tacticai.retrieval.visualization.utils import get_short_pass_arrow
 
 
 def _get_raw_sample(dataset: Any, idx: int) -> Dict[str, Any]:
@@ -99,6 +103,7 @@ def plot_ck_snapshot(
     show_ids: bool = False,
     show_ball_arc: bool = True,
     swing_mode: str = "auto",
+    receiver_idx: Optional[int] = None,
 ) -> go.Figure:
     """Plot a single CK snapshot on the soccer field.
     
@@ -212,18 +217,32 @@ def plot_ck_snapshot(
                     arrowwidth=2,
                     arrowcolor=('deepskyblue' if is_in else 'orange'),
                 )
-                # Label near the curve so the direction is visually obvious
-                mid = len(arc_x) // 2
-                fig.add_annotation(
-                    x=float(arc_x[mid]),
-                    y=float(arc_y[mid]),
-                    text=("In-swing (内側)" if is_in else "Out-swing (外側)"),
-                    showarrow=False,
-                    font=dict(color=('deepskyblue' if is_in else 'orange'), size=12),
-                    bgcolor="rgba(255,255,255,0.7)",
-                    bordercolor=('deepskyblue' if is_in else 'orange'),
-                    borderwidth=1,
-                )
+            else:
+                # Short corner: draw a short pass arrow instead
+                start, end = get_short_pass_arrow(df, receiver_idx=receiver_idx)
+                if start is not None and end is not None:
+                    fig.add_trace(go.Scatter(
+                        x=[start[0], end[0]],
+                        y=[start[1], end[1]],
+                        mode='lines',
+                        line=dict(color='yellow', width=3, dash='solid'),
+                        name='Short pass',
+                    ))
+                    fig.add_annotation(
+                        x=end[0],
+                        y=end[1],
+                        ax=start[0],
+                        ay=start[1],
+                        xref="x",
+                        yref="y",
+                        axref="x",
+                        ayref="y",
+                        showarrow=True,
+                        arrowhead=3,
+                        arrowsize=1.6,
+                        arrowwidth=2,
+                        arrowcolor="yellow",
+                    )
     
     # Plot velocity vectors
     if show_vectors:
@@ -456,6 +475,7 @@ def main():
             show_ids=show_ids,
             show_ball_arc=show_ball_arc,
             swing_mode=swing_mode,
+            receiver_idx=int(query_target.item()),
         )
         st.plotly_chart(query_fig, use_container_width=True)
         
@@ -509,6 +529,7 @@ def main():
                                     show_ids=show_ids,
                                     show_ball_arc=show_ball_arc,
                                     swing_mode=swing_mode,
+                                    receiver_idx=int(similar_target.item()),
                                 )
                                 st.plotly_chart(similar_fig, use_container_width=True)
                                 
