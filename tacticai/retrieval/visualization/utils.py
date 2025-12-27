@@ -245,6 +245,26 @@ def load_raw_sample_data(
     vx = vx[:min_len]
     vy = vy[:min_len]
     
+    # Heuristic: many preprocessors store positions normalized to [0, 1] (or slightly beyond).
+    # Plotly field is drawn in meters with origin at center, so convert if values look normalized.
+    def _looks_normalized(arr: np.ndarray) -> bool:
+        if arr.size == 0:
+            return False
+        a = np.asarray(arr).reshape(-1)
+        # Typical ranges we observed in this project: ~0.3..1.0 (sometimes slightly >1)
+        return (a.min() >= -0.5) and (a.max() <= 1.5)
+
+    if _looks_normalized(x) and _looks_normalized(y):
+        # Convert normalized [0,1] -> meters centered at (0,0)
+        x = (x - 0.5) * FIELD_LENGTH
+        y = (y - 0.5) * FIELD_WIDTH
+
+        # Velocities often follow same normalization scale; convert if they look small.
+        if _looks_normalized(vx):
+            vx = vx * FIELD_LENGTH
+        if _looks_normalized(vy):
+            vy = vy * FIELD_WIDTH
+
     # Create DataFrame
     df = pd.DataFrame({
         'player_id': [f'player_{i}' for i in range(min_len)],

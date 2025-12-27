@@ -13,6 +13,7 @@ from pathlib import Path
 import sys
 from typing import Dict, Any, List, Optional
 import yaml
+from torch.utils.data import ConcatDataset
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -26,6 +27,22 @@ try:
     from .utils import draw_soccer_field, load_raw_sample_data, get_ball_trajectory
 except ImportError:
     from tacticai.retrieval.visualization.utils import draw_soccer_field, load_raw_sample_data, get_ball_trajectory
+
+
+def _get_raw_sample(dataset: Any, idx: int) -> Dict[str, Any]:
+    """Get underlying raw dict sample for both ReceiverDataset and ConcatDataset[ReceiverDataset]."""
+    if isinstance(dataset, ReceiverDataset):
+        return dataset.data[idx]
+    if isinstance(dataset, ConcatDataset):
+        i = idx
+        for ds in dataset.datasets:
+            n = len(ds)
+            if i < n:
+                # ds is ReceiverDataset
+                return ds.data[i]
+            i -= n
+        raise IndexError(idx)
+    raise TypeError(f"Unsupported dataset type: {type(dataset)}")
 
 
 # Page config
@@ -252,6 +269,12 @@ def main():
         value="data/processed_ck/receiver_train/data.pickle",
         help="Path to receiver dataset",
     )
+
+    use_config_splits = st.sidebar.checkbox(
+        "Use config receiver_train/val/test paths (recommended for index=373)",
+        value=True,
+        help="If enabled, load and concatenate train+val+test based on the selected config file.",
+    )
     
     # Query index
     query_index = st.sidebar.number_input(
@@ -304,11 +327,17 @@ def main():
     
     # Load query dataset
     try:
-        dataset = ReceiverDataset(
-            data_path=data_path,
-            file_format="pickle",
-            phase="train",
-        )
+        if use_config_splits and isinstance(config, dict) and "data" in config:
+            dcfg = config["data"]
+            if all(k in dcfg for k in ["receiver_train_path", "receiver_val_path", "receiver_test_path"]):
+                ds_train = ReceiverDataset(dcfg["receiver_train_path"], file_format="pickle", phase="train")
+                ds_val = ReceiverDataset(dcfg["receiver_val_path"], file_format="pickle", phase="val")
+                ds_test = ReceiverDataset(dcfg["receiver_test_path"], file_format="pickle", phase="test")
+                dataset = ConcatDataset([ds_train, ds_val, ds_test])
+            else:
+                dataset = ReceiverDataset(data_path=data_path, file_format="pickle", phase="train")
+        else:
+            dataset = ReceiverDataset(data_path=data_path, file_format="pickle", phase="train")
         
         if query_index >= len(dataset):
             st.error(f"Query index {query_index} is out of range (dataset size: {len(dataset)})")
@@ -316,7 +345,7 @@ def main():
         
         # Get query sample
         query_data_dict, query_target = dataset[query_index]
-        query_raw_sample = dataset.data[query_index]
+        query_raw_sample = _get_raw_sample(dataset, query_index)
         
         st.sidebar.info(f"Query target receiver: {query_target.item()}")
     except Exception as e:
@@ -388,7 +417,7 @@ def main():
                             # Try to get sample from dataset using index
                             if idx < len(dataset):
                                 similar_data_dict, similar_target = dataset[idx]
-                                similar_raw_sample = dataset.data[idx]
+                                similar_raw_sample = _get_raw_sample(dataset, idx)
                                 
                                 similar_df = load_raw_sample_data(similar_raw_sample)
                                 similar_fig = plot_ck_snapshot(
