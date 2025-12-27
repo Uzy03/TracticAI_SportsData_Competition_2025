@@ -258,12 +258,9 @@ def load_raw_sample_data(
         # Convert normalized [0,1] -> meters centered at (0,0)
         x = (x - 0.5) * FIELD_LENGTH
         y = (y - 0.5) * FIELD_WIDTH
-
-        # Velocities often follow same normalization scale; convert if they look small.
-        if _looks_normalized(vx):
-            vx = vx * FIELD_LENGTH
-        if _looks_normalized(vy):
-            vy = vy * FIELD_WIDTH
+        # NOTE: Do NOT auto-scale velocities here. In this project vx/vy may already be in
+        # real-world units (and can be large). Vector visualization is handled by clipping
+        # in the plotting function.
 
     # Create DataFrame
     df = pd.DataFrame({
@@ -302,4 +299,100 @@ def get_ball_trajectory(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
     else:
         # If no ball data, return empty arrays
         return np.array([]), np.array([])
+
+
+def _nearest_corner(x: float, y: float) -> Tuple[float, float]:
+    """Return nearest pitch corner (in meters) to a point."""
+    half_length = FIELD_LENGTH / 2
+    half_width = FIELD_WIDTH / 2
+    corners = [
+        (-half_length, -half_width),
+        (-half_length, +half_width),
+        (+half_length, -half_width),
+        (+half_length, +half_width),
+    ]
+    best = min(corners, key=lambda c: (x - c[0]) ** 2 + (y - c[1]) ** 2)
+    return float(best[0]), float(best[1])
+
+
+def infer_swing_mode(
+    df: pd.DataFrame,
+    mode: str = "auto",
+) -> str:
+    """Infer in/out-swing mode.
+
+    Data does not contain true ball trajectory, so this is a heuristic.
+    """
+    m = (mode or "auto").lower().replace("_", "-")
+    if m in {"in", "in-swing", "inswing"}:
+        return "in"
+    if m in {"out", "out-swing", "outswing"}:
+        return "out"
+    if m in {"none", "off", "disable", "disabled"}:
+        return "none"
+
+    # Auto heuristic:
+    # - Use the kicker position (ball marker) to determine the corner (top/bottom).
+    # - Compare attacking team center-of-mass Y to corner Y:
+    #   if attackers are more "inside" (closer to 0), assume in-swing; else out-swing.
+    ball_rows = df[df["ball"] > 0.5]
+    if len(ball_rows) == 0:
+        return "in"
+    bx = float(ball_rows.iloc[0]["x"])
+    by = float(ball_rows.iloc[0]["y"])
+    _, cy = _nearest_corner(bx, by)
+
+    # Determine attacking team label from kicker's team_id
+    kicker_team = int(ball_rows.iloc[0]["team_id"]) if "team_id" in df.columns else 0
+    attacking = df[df["team_id"] == kicker_team] if "team_id" in df.columns else df[df["team_id"] == 0]
+    if len(attacking) == 0:
+        return "in"
+    ay = float(attacking["y"].mean())
+
+    # Top corner: inside means smaller y than corner y.
+    # Bottom corner: inside means larger y than corner y (since corner y is negative).
+    if cy >= 0:
+        return "in" if ay < cy * 0.7 else "out"
+    return "in" if ay > cy * 0.7 else "out"
+
+
+def get_ball_swing_arc(
+    df: pd.DataFrame,
+    mode: str = "auto",
+    num_points: int = 40,
+) -> Tuple[np.ndarray, np.ndarray, str]:
+    """Create a stylized ball flight arc (in/out-swing) from nearest corner into the box.
+
+    Returns (x_points, y_points, label). Empty arrays if not available/disabled.
+    """
+    swing = infer_swing_mode(df, mode=mode)
+    if swing == "none":
+        return np.array([]), np.array([]), "none"
+
+    ball_rows = df[df["ball"] > 0.5]
+    if len(ball_rows) == 0:
+        return np.array([]), np.array([]), swing
+
+    bx = float(ball_rows.iloc[0]["x"])
+    by = float(ball_rows.iloc[0]["y"])
+    cx, cy = _nearest_corner(bx, by)
+
+    # End point: into the penalty area near the goal side.
+    half_length = FIELD_LENGTH / 2
+    goal_side = 1.0 if cx > 0 else -1.0
+    x2 = goal_side * (half_length - 12.0)  # ~12m inside from goal line
+    y2 = 0.0
+
+    # Control point: determines curvature (in-swing vs out-swing)
+    x1 = goal_side * (half_length - 6.0)
+    if swing == "in":
+        y1 = cy * 0.55  # bend toward center
+    else:
+        y1 = cy * 1.25  # bend outside then back (visual cue)
+
+    # Quadratic Bezier curve: P0=(cx,cy), P1=(x1,y1), P2=(x2,y2)
+    t = np.linspace(0.0, 1.0, num_points)
+    x = (1 - t) ** 2 * cx + 2 * (1 - t) * t * x1 + t**2 * x2
+    y = (1 - t) ** 2 * cy + 2 * (1 - t) * t * y1 + t**2 * y2
+    return x, y, swing
 

@@ -24,9 +24,9 @@ from tacticai.modules import get_device
 
 # Import utils (handle both relative and absolute imports)
 try:
-    from .utils import draw_soccer_field, load_raw_sample_data, get_ball_trajectory
+    from .utils import draw_soccer_field, load_raw_sample_data, get_ball_swing_arc
 except ImportError:
-    from tacticai.retrieval.visualization.utils import draw_soccer_field, load_raw_sample_data, get_ball_trajectory
+    from tacticai.retrieval.visualization.utils import draw_soccer_field, load_raw_sample_data, get_ball_swing_arc
 
 
 def _get_raw_sample(dataset: Any, idx: int) -> Dict[str, Any]:
@@ -94,7 +94,10 @@ def plot_ck_snapshot(
     title: str = "CK Snapshot",
     show_vectors: bool = True,
     vector_scale: float = 0.5,
+    max_vector_len: float = 6.0,
     show_ids: bool = False,
+    show_ball_arc: bool = True,
+    swing_mode: str = "auto",
 ) -> go.Figure:
     """Plot a single CK snapshot on the soccer field.
     
@@ -175,18 +178,34 @@ def plot_ck_snapshot(
                           'x: %{x:.2f}<br>' +
                           'y: %{y:.2f}<extra></extra>',
         ))
-        
-        # Draw ball trajectory (for single frame, this is just a point)
-        ball_x, ball_y = get_ball_trajectory(df)
-        if len(ball_x) > 0:
-            fig.add_trace(go.Scatter(
-                x=ball_x,
-                y=ball_y,
-                mode='lines',
-                line=dict(color='yellow', width=3, dash='solid'),
-                name='Ball Trajectory',
-                showlegend=False,
-            ))
+
+        # Stylized swing arc (in/out) from nearest corner into the box
+        if show_ball_arc:
+            arc_x, arc_y, swing = get_ball_swing_arc(df, mode=swing_mode)
+            if len(arc_x) > 1:
+                fig.add_trace(go.Scatter(
+                    x=arc_x,
+                    y=arc_y,
+                    mode='lines',
+                    line=dict(color='red', width=3, dash='dash'),
+                    name=f"{'In' if swing=='in' else 'Out'}-swing",
+                ))
+                # Arrow head at the end (last segment)
+                fig.add_annotation(
+                    x=float(arc_x[-1]),
+                    y=float(arc_y[-1]),
+                    ax=float(arc_x[-2]),
+                    ay=float(arc_y[-2]),
+                    xref="x",
+                    yref="y",
+                    axref="x",
+                    ayref="y",
+                    showarrow=True,
+                    arrowhead=3,
+                    arrowsize=1.8,
+                    arrowwidth=3,
+                    arrowcolor="red",
+                )
     
     # Plot velocity vectors
     if show_vectors:
@@ -194,9 +213,16 @@ def plot_ck_snapshot(
         if len(attacking) > 0:
             for idx, row in attacking.iterrows():
                 if abs(row['vx']) > 0.01 or abs(row['vy']) > 0.01:  # Only show if significant
+                    dx = float(row['vx']) * float(vector_scale)
+                    dy = float(row['vy']) * float(vector_scale)
+                    norm = (dx * dx + dy * dy) ** 0.5
+                    if norm > float(max_vector_len) and norm > 1e-9:
+                        scale = float(max_vector_len) / norm
+                        dx *= scale
+                        dy *= scale
                     fig.add_annotation(
-                        x=row['x'] + row['vx'] * vector_scale,
-                        y=row['y'] + row['vy'] * vector_scale,
+                        x=float(row['x']) + dx,
+                        y=float(row['y']) + dy,
                         ax=row['x'],
                         ay=row['y'],
                         xref="x",
@@ -214,9 +240,16 @@ def plot_ck_snapshot(
         if len(defending) > 0:
             for idx, row in defending.iterrows():
                 if abs(row['vx']) > 0.01 or abs(row['vy']) > 0.01:
+                    dx = float(row['vx']) * float(vector_scale)
+                    dy = float(row['vy']) * float(vector_scale)
+                    norm = (dx * dx + dy * dy) ** 0.5
+                    if norm > float(max_vector_len) and norm > 1e-9:
+                        scale = float(max_vector_len) / norm
+                        dx *= scale
+                        dy *= scale
                     fig.add_annotation(
-                        x=row['x'] + row['vx'] * vector_scale,
-                        y=row['y'] + row['vy'] * vector_scale,
+                        x=float(row['x']) + dx,
+                        y=float(row['y']) + dy,
                         ax=row['x'],
                         ay=row['y'],
                         xref="x",
@@ -298,13 +331,30 @@ def main():
     show_vectors = st.sidebar.checkbox("Show velocity vectors", value=True)
     vector_scale = st.sidebar.slider(
         "Vector scale",
-        min_value=0.1,
-        max_value=2.0,
-        value=0.5,
+        min_value=0.01,
+        max_value=0.5,
+        value=0.08,
         step=0.1,
         help="Scale factor for velocity vectors",
     )
+    max_vector_len = st.sidebar.slider(
+        "Max vector length (m)",
+        min_value=1.0,
+        max_value=15.0,
+        value=6.0,
+        step=0.5,
+        help="Clip velocity arrows to this maximum length for readability.",
+    )
     show_ids = st.sidebar.checkbox("Show player IDs", value=False)
+
+    st.sidebar.header("Ball Trajectory")
+    show_ball_arc = st.sidebar.checkbox("Show in/out-swing arc", value=True)
+    swing_mode = st.sidebar.selectbox(
+        "Swing mode",
+        options=["auto", "in", "out", "none"],
+        index=0,
+        help="Data has no true ball trajectory; this draws a stylized arc from the corner. Auto is a heuristic.",
+    )
     
     # Grid layout option
     num_cols = st.sidebar.selectbox(
@@ -384,7 +434,10 @@ def main():
             title=f"Query CK (Index {query_idx}, Receiver: {query_target.item()})",
             show_vectors=show_vectors,
             vector_scale=vector_scale,
+            max_vector_len=max_vector_len,
             show_ids=show_ids,
+            show_ball_arc=show_ball_arc,
+            swing_mode=swing_mode,
         )
         st.plotly_chart(query_fig, use_container_width=True)
         
@@ -425,7 +478,10 @@ def main():
                                     title=f"Rank {result_idx + 1} (Idx {idx})",
                                     show_vectors=show_vectors,
                                     vector_scale=vector_scale,
+                                    max_vector_len=max_vector_len,
                                     show_ids=show_ids,
+                                    show_ball_arc=show_ball_arc,
+                                    swing_mode=swing_mode,
                                 )
                                 st.plotly_chart(similar_fig, use_container_width=True)
                                 
