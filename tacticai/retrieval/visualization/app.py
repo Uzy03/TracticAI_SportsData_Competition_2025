@@ -14,6 +14,7 @@ import sys
 from typing import Dict, Any, List, Optional
 import yaml
 from torch.utils.data import ConcatDataset
+import math
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -183,12 +184,17 @@ def plot_ck_snapshot(
         if show_ball_arc:
             arc_x, arc_y, swing = get_ball_swing_arc(df, mode=swing_mode)
             if len(arc_x) > 1:
+                is_in = (swing == "in")
                 fig.add_trace(go.Scatter(
                     x=arc_x,
                     y=arc_y,
                     mode='lines',
-                    line=dict(color='red', width=3, dash='dash'),
-                    name=f"{'In' if swing=='in' else 'Out'}-swing",
+                    line=dict(
+                        color='deepskyblue' if is_in else 'orange',
+                        width=3,
+                        dash='solid' if is_in else 'dash',
+                    ),
+                    name=f"{'In' if is_in else 'Out'}-swing",
                 ))
                 # Arrow head at the end (last segment)
                 fig.add_annotation(
@@ -203,8 +209,20 @@ def plot_ck_snapshot(
                     showarrow=True,
                     arrowhead=3,
                     arrowsize=1.8,
-                    arrowwidth=3,
-                    arrowcolor="red",
+                    arrowwidth=2,
+                    arrowcolor=('deepskyblue' if is_in else 'orange'),
+                )
+                # Label near the curve so the direction is visually obvious
+                mid = len(arc_x) // 2
+                fig.add_annotation(
+                    x=float(arc_x[mid]),
+                    y=float(arc_y[mid]),
+                    text=("In-swing (内側)" if is_in else "Out-swing (外側)"),
+                    showarrow=False,
+                    font=dict(color=('deepskyblue' if is_in else 'orange'), size=12),
+                    bgcolor="rgba(255,255,255,0.7)",
+                    bordercolor=('deepskyblue' if is_in else 'orange'),
+                    borderwidth=1,
                 )
     
     # Plot velocity vectors
@@ -231,8 +249,8 @@ def plot_ck_snapshot(
                         ayref="y",
                         showarrow=True,
                         arrowhead=2,
-                        arrowsize=1.5,
-                        arrowwidth=2,
+                        arrowsize=1.2,
+                        arrowwidth=1,
                         arrowcolor="red",
                     )
         
@@ -258,8 +276,8 @@ def plot_ck_snapshot(
                         ayref="y",
                         showarrow=True,
                         arrowhead=2,
-                        arrowsize=1.5,
-                        arrowwidth=2,
+                        arrowsize=1.2,
+                        arrowwidth=1,
                         arrowcolor="blue",
                     )
     
@@ -331,10 +349,10 @@ def main():
     show_vectors = st.sidebar.checkbox("Show velocity vectors", value=True)
     vector_scale = st.sidebar.slider(
         "Vector scale",
-        min_value=0.01,
-        max_value=0.5,
-        value=0.08,
-        step=0.1,
+        min_value=0.02,
+        max_value=1.5,
+        value=0.25,
+        step=0.01,
         help="Scale factor for velocity vectors",
     )
     max_vector_len = st.sidebar.slider(
@@ -459,7 +477,16 @@ def main():
                     metadata = result['metadata']
                     
                     with cols[col_idx]:
-                        st.markdown(f"**Rank {result_idx + 1}** (Similarity: {similarity:.4f})")
+                        sim_val = result.get("similarity", None)
+                        sim_str = "N/A"
+                        try:
+                            sim_f = float(sim_val)
+                            if math.isfinite(sim_f):
+                                sim_str = f"{sim_f:.4f}"
+                        except Exception:
+                            pass
+
+                        st.markdown(f"**Rank {result_idx + 1}** (Similarity: {sim_str})")
                         st.caption(f"Index: {idx}")
                         
                         # Load and plot similar CK

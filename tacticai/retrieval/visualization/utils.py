@@ -384,11 +384,16 @@ def get_ball_swing_arc(
     y2 = 0.0
 
     # Control point: determines curvature (in-swing vs out-swing)
+    # Make curvature direction very explicit:
+    # - In-swing: bend toward the pitch centerline (y -> 0)
+    # - Out-swing: bend toward the sideline (|y| increases)
     x1 = goal_side * (half_length - 6.0)
+    sgn = 1.0 if cy >= 0 else -1.0
+    delta = 12.0  # meters of lateral curvature for visual clarity
     if swing == "in":
-        y1 = cy * 0.55  # bend toward center
+        y1 = cy - sgn * delta  # toward center
     else:
-        y1 = cy * 1.25  # bend outside then back (visual cue)
+        y1 = cy + sgn * delta  # toward sideline
 
     # Quadratic Bezier curve: P0=(cx,cy), P1=(x1,y1), P2=(x2,y2)
     t = np.linspace(0.0, 1.0, num_points)
