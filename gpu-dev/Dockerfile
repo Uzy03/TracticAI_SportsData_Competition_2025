@@ -24,19 +24,21 @@ ARG UID=1000
 RUN useradd -m -u ${UID} -s /bin/bash ${USERNAME} && \
     mkdir -p /workspace && chown ${USERNAME}:${USERNAME} /workspace
 WORKDIR /workspace
+
+# Docker build context（gpu-dev/）に置いた requirements を利用する
+COPY requirements.txt /tmp/requirements.txt
+
 USER ${USERNAME}
 
 # Python 仮想環境 + よく使うライブラリ
 RUN python3 -m venv ~/.venv && \
     ~/.venv/bin/pip install --upgrade pip wheel setuptools && \
-    ~/.venv/bin/pip install \
-      ipython jupyter jupyterlab \
-      numpy scipy pandas matplotlib \
-      scikit-learn tqdm rich \
-      streamlit plotly
+    ~/.venv/bin/pip install -r /tmp/requirements.txt
 
-# ---- PyTorch (CUDA 12.4) を使う場合 ----
-# RUN ~/.venv/bin/pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision torchaudio
+# ---- PyTorch (CUDA 12.4) ----
+# Streamlit可視化/学習コードの実行に必須なので、cu124 wheel をインストールする
+RUN ~/.venv/bin/pip install --index-url https://download.pytorch.org/whl/cu124 \
+      torch torchvision torchaudio
 
 # PATH 設定
 ENV PATH="/home/${USERNAME}/.venv/bin:${PATH}"
