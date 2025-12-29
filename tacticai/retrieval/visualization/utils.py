@@ -281,6 +281,12 @@ def load_raw_sample_data(
         'vy': vy,
         'ball': ball.astype(float),
     })
+
+    # Attach metadata (useful for loading tracking-based ball trajectory)
+    if "match_id" in sample:
+        df["match_id"] = sample["match_id"]
+    if "frame" in sample:
+        df["frame"] = sample["frame"]
     
     # If ball possession is indicated, mark that player
     if ball.sum() > 0:
@@ -467,4 +473,73 @@ def get_short_pass_arrow(
         return None, None
     end = (float(coords[j, 0]), float(coords[j, 1]))
     return start, end
+
+
+def load_ball_trajectory_from_tracking(
+    match_id: str,
+    frame: int,
+    soccerdata_dir: str = "SoccerData",
+    window_frames: int = 120,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Load ball trajectory from SoccerData tracking.csv around (match_id, frame).
+
+    SoccerData format (per README):
+    - tracking.csv columns include: Frame, HA, SysTarget, No, X, Y
+    - Ball rows are typically HA==0 and No==0 (SysTarget==0)
+    - X,Y are in centimeters with origin at pitch center in many files.
+    """
+    try:
+        mid = str(match_id)
+        year = mid[:4]
+        tracking_path = Path(soccerdata_dir) / f"{year}_data" / mid / "tracking.csv"
+        if not tracking_path.exists():
+            return np.array([]), np.array([])
+
+        usecols = ["Frame", "HA", "SysTarget", "No", "X", "Y"]
+        df = pd.read_csv(tracking_path, usecols=usecols)
+        # Ball candidate rows (empirically: HA==0, No==0, SysTarget==0)
+        ball = df[(df["HA"] == 0) | (df["No"] == 0) | (df["SysTarget"] == 0)]
+        seg = ball[(ball["Frame"] >= int(frame)) & (ball["Frame"] <= int(frame) + int(window_frames))]
+        if len(seg) < 2:
+            return np.array([]), np.array([])
+
+        x = seg["X"].to_numpy(dtype=float)
+        y = seg["Y"].to_numpy(dtype=float)
+
+        # Units heuristic: if values look like centimeters, convert to meters.
+        if max(np.max(np.abs(x)), np.max(np.abs(y))) > 200.0:
+            x = x / 100.0
+            y = y / 100.0
+        return x, y
+    except Exception:
+        return np.array([]), np.array([])
+
+
+def infer_swing_from_ball_trajectory(x: np.ndarray, y: np.ndarray) -> str:
+    """Infer in/out-swing from real ball trajectory.
+
+    Heuristic:
+    - Determine nearest corner at start.
+    - If |y| moves toward 0 (centerline) shortly after kick -> in
+      else -> out
+    """
+    if x is None or y is None or len(x) < 3 or len(y) < 3:
+        return "none"
+    x0 = float(x[0])
+    y0 = float(y[0])
+    _, cy = _nearest_corner(x0, y0)
+    # Use first ~10 frames for "initial curve"
+    n = min(10, len(y) - 1)
+    y_start = float(y[0])
+    y_end = float(y[n])
+
+    # Compare absolute distance from centerline (y=0)
+    if abs(y_end) < abs(y_start):
+        return "in"
+    if abs(y_end) > abs(y_start):
+        return "out"
+    # Tie-breaker: compare sign relative to corner
+    if cy >= 0:
+        return "in" if y_end < y_start else "out"
+    return "in" if y_end > y_start else "out"
 

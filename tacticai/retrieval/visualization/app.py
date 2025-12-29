@@ -32,6 +32,10 @@ try:
     from .utils import get_short_pass_arrow
 except ImportError:
     from tacticai.retrieval.visualization.utils import get_short_pass_arrow
+try:
+    from .utils import load_ball_trajectory_from_tracking, infer_swing_from_ball_trajectory
+except ImportError:
+    from tacticai.retrieval.visualization.utils import load_ball_trajectory_from_tracking, infer_swing_from_ball_trajectory
 
 
 def _get_raw_sample(dataset: Any, idx: int) -> Dict[str, Any]:
@@ -103,6 +107,9 @@ def plot_ck_snapshot(
     show_ids: bool = False,
     show_ball_arc: bool = True,
     swing_mode: str = "auto",
+    trajectory_source: str = "stylized",
+    soccerdata_dir: str = "SoccerData",
+    traj_window_frames: int = 120,
     receiver_idx: Optional[int] = None,
 ) -> go.Figure:
     """Plot a single CK snapshot on the soccer field.
@@ -185,64 +192,168 @@ def plot_ck_snapshot(
                           'y: %{y:.2f}<extra></extra>',
         ))
 
-        # Stylized swing arc (in/out) from nearest corner into the box
+        # Ball trajectory visualization
         if show_ball_arc:
-            arc_x, arc_y, swing = get_ball_swing_arc(df, mode=swing_mode)
-            if len(arc_x) > 1:
-                is_in = (swing == "in")
-                fig.add_trace(go.Scatter(
-                    x=arc_x,
-                    y=arc_y,
-                    mode='lines',
-                    line=dict(
-                        color='deepskyblue' if is_in else 'orange',
-                        width=3,
-                        dash='solid' if is_in else 'dash',
-                    ),
-                    name=f"{'In' if is_in else 'Out'}-swing",
-                ))
-                # Arrow head at the end (last segment)
-                fig.add_annotation(
-                    x=float(arc_x[-1]),
-                    y=float(arc_y[-1]),
-                    ax=float(arc_x[-2]),
-                    ay=float(arc_y[-2]),
-                    xref="x",
-                    yref="y",
-                    axref="x",
-                    ayref="y",
-                    showarrow=True,
-                    arrowhead=3,
-                    arrowsize=1.8,
-                    arrowwidth=2,
-                    arrowcolor=('deepskyblue' if is_in else 'orange'),
-                )
-            else:
-                # Short corner: draw a short pass arrow instead
-                start, end = get_short_pass_arrow(df, receiver_idx=receiver_idx)
-                if start is not None and end is not None:
+            if (trajectory_source or "stylized").lower() == "tracking":
+                # Use real ball trajectory from SoccerData tracking.csv
+                try:
+                    match_id = str(df["match_id"].iloc[0]) if "match_id" in df.columns else None
+                    frame = int(df["frame"].iloc[0]) if "frame" in df.columns else None
+                except Exception:
+                    match_id, frame = None, None
+
+                traj_x = traj_y = np.array([])
+                if match_id is not None and frame is not None:
+                    traj_x, traj_y = load_ball_trajectory_from_tracking(
+                        match_id=match_id,
+                        frame=frame,
+                        soccerdata_dir=soccerdata_dir,
+                        window_frames=traj_window_frames,
+                    )
+                if len(traj_x) > 1:
+                    swing = infer_swing_from_ball_trajectory(traj_x, traj_y)
+                    is_in = (swing == "in")
+                    arc_color = 'deepskyblue' if is_in else 'orange'
                     fig.add_trace(go.Scatter(
-                        x=[start[0], end[0]],
-                        y=[start[1], end[1]],
+                        x=traj_x,
+                        y=traj_y,
                         mode='lines',
-                        line=dict(color='yellow', width=3, dash='solid'),
-                        name='Short pass',
+                        line=dict(color=arc_color, width=3, dash='solid' if is_in else 'dash'),
+                        name="Ball trajectory",
                     ))
                     fig.add_annotation(
-                        x=end[0],
-                        y=end[1],
-                        ax=start[0],
-                        ay=start[1],
+                        x=float(traj_x[-1]),
+                        y=float(traj_y[-1]),
+                        ax=float(traj_x[-2]),
+                        ay=float(traj_y[-2]),
                         xref="x",
                         yref="y",
                         axref="x",
                         ayref="y",
                         showarrow=True,
                         arrowhead=3,
-                        arrowsize=1.6,
+                        arrowsize=1.8,
                         arrowwidth=2,
-                        arrowcolor="yellow",
+                        arrowcolor=arc_color,
                     )
+                else:
+                    # Fallback to stylized arc + short-pass arrow if tracking not available
+                    arc_x, arc_y, swing = get_ball_swing_arc(df, mode=swing_mode)
+                    if len(arc_x) > 1:
+                        is_in = (swing == "in")
+                        arc_color = 'deepskyblue' if is_in else 'orange'
+                        fig.add_trace(go.Scatter(
+                            x=arc_x,
+                            y=arc_y,
+                            mode='lines',
+                            line=dict(
+                                color=arc_color,
+                                width=3,
+                                dash='solid' if is_in else 'dash',
+                            ),
+                            name=f"{'In' if is_in else 'Out'}-swing",
+                        ))
+                        fig.add_annotation(
+                            x=float(arc_x[-1]),
+                            y=float(arc_y[-1]),
+                            ax=float(arc_x[-2]),
+                            ay=float(arc_y[-2]),
+                            xref="x",
+                            yref="y",
+                            axref="x",
+                            ayref="y",
+                            showarrow=True,
+                            arrowhead=3,
+                            arrowsize=1.8,
+                            arrowwidth=2,
+                            arrowcolor=arc_color,
+                        )
+                    else:
+                        start, end = get_short_pass_arrow(df, receiver_idx=receiver_idx)
+                        if start is not None and end is not None:
+                            is_in = (swing == "in")
+                            arc_color = 'deepskyblue' if is_in else 'orange'
+                            fig.add_trace(go.Scatter(
+                                x=[start[0], end[0]],
+                                y=[start[1], end[1]],
+                                mode='lines',
+                                line=dict(color=arc_color, width=3, dash=('solid' if is_in else 'dash')),
+                                name='Short pass',
+                            ))
+                            fig.add_annotation(
+                                x=end[0],
+                                y=end[1],
+                                ax=start[0],
+                                ay=start[1],
+                                xref="x",
+                                yref="y",
+                                axref="x",
+                                ayref="y",
+                                showarrow=True,
+                                arrowhead=3,
+                                arrowsize=1.6,
+                                arrowwidth=2,
+                                arrowcolor=arc_color,
+                            )
+            else:
+                # Stylized swing arc (in/out) from nearest corner into the box
+                arc_x, arc_y, swing = get_ball_swing_arc(df, mode=swing_mode)
+                if len(arc_x) > 1:
+                    is_in = (swing == "in")
+                    arc_color = 'deepskyblue' if is_in else 'orange'
+                    fig.add_trace(go.Scatter(
+                        x=arc_x,
+                        y=arc_y,
+                        mode='lines',
+                        line=dict(
+                            color=arc_color,
+                            width=3,
+                            dash='solid' if is_in else 'dash',
+                        ),
+                        name=f"{'In' if is_in else 'Out'}-swing",
+                    ))
+                    fig.add_annotation(
+                        x=float(arc_x[-1]),
+                        y=float(arc_y[-1]),
+                        ax=float(arc_x[-2]),
+                        ay=float(arc_y[-2]),
+                        xref="x",
+                        yref="y",
+                        axref="x",
+                        ayref="y",
+                        showarrow=True,
+                        arrowhead=3,
+                        arrowsize=1.8,
+                        arrowwidth=2,
+                        arrowcolor=arc_color,
+                    )
+                else:
+                    start, end = get_short_pass_arrow(df, receiver_idx=receiver_idx)
+                    if start is not None and end is not None:
+                        is_in = (swing == "in")
+                        arc_color = 'deepskyblue' if is_in else 'orange'
+                        fig.add_trace(go.Scatter(
+                            x=[start[0], end[0]],
+                            y=[start[1], end[1]],
+                            mode='lines',
+                            line=dict(color=arc_color, width=3, dash=('solid' if is_in else 'dash')),
+                            name='Short pass',
+                        ))
+                        fig.add_annotation(
+                            x=end[0],
+                            y=end[1],
+                            ax=start[0],
+                            ay=start[1],
+                            xref="x",
+                            yref="y",
+                            axref="x",
+                            ayref="y",
+                            showarrow=True,
+                            arrowhead=3,
+                            arrowsize=1.6,
+                            arrowwidth=2,
+                            arrowcolor=arc_color,
+                        )
     
     # Plot velocity vectors
     if show_vectors:
@@ -386,11 +497,30 @@ def main():
 
     st.sidebar.header("Ball Trajectory")
     show_ball_arc = st.sidebar.checkbox("Show in/out-swing arc", value=True)
+    trajectory_source = st.sidebar.selectbox(
+        "Trajectory source",
+        options=["tracking", "stylized"],
+        index=0,
+        help="tracking: draw real ball trajectory from SoccerData tracking.csv (if available). stylized: draw a heuristic arc.",
+    )
+    soccerdata_dir = st.sidebar.text_input(
+        "SoccerData directory",
+        value="SoccerData",
+        help="Root directory containing 2023_data/ and 2024_data/.",
+    )
+    traj_window_frames = st.sidebar.slider(
+        "Trajectory window (frames)",
+        min_value=20,
+        max_value=300,
+        value=120,
+        step=10,
+        help="How many frames after the kick to draw for tracking trajectory.",
+    )
     swing_mode = st.sidebar.selectbox(
         "Swing mode",
         options=["auto", "in", "out", "none"],
         index=0,
-        help="Data has no true ball trajectory; this draws a stylized arc from the corner. Auto is a heuristic.",
+        help="Used only for stylized trajectory. Auto is a heuristic.",
     )
     
     # Grid layout option
@@ -475,6 +605,9 @@ def main():
             show_ids=show_ids,
             show_ball_arc=show_ball_arc,
             swing_mode=swing_mode,
+            trajectory_source=trajectory_source,
+            soccerdata_dir=soccerdata_dir,
+            traj_window_frames=int(traj_window_frames),
             receiver_idx=int(query_target.item()),
         )
         st.plotly_chart(query_fig, use_container_width=True)
@@ -529,6 +662,9 @@ def main():
                                     show_ids=show_ids,
                                     show_ball_arc=show_ball_arc,
                                     swing_mode=swing_mode,
+                                    trajectory_source=trajectory_source,
+                                    soccerdata_dir=soccerdata_dir,
+                                    traj_window_frames=int(traj_window_frames),
                                     receiver_idx=int(similar_target.item()),
                                 )
                                 st.plotly_chart(similar_fig, use_container_width=True)
