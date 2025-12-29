@@ -129,9 +129,28 @@ def plot_ck_snapshot(
     # Draw soccer field
     draw_soccer_field(fig)
     
+    # Determine attacking/defending team IDs.
+    # Do NOT assume team_id==0 is always attacking: some samples flip.
+    ball_data = df[df['ball'] > 0.5]
+    if len(ball_data) > 0:
+        attacking_team_id = int(ball_data.iloc[0]['team_id'])
+    else:
+        attacking_team_id = 0
+
+    unique_team_ids = [int(x) for x in df['team_id'].dropna().unique().tolist()]
+    defending_team_id = None
+    for tid in unique_team_ids:
+        if tid != attacking_team_id:
+            defending_team_id = tid
+            break
+    if defending_team_id is None and attacking_team_id in (0, 1):
+        defending_team_id = 1 - attacking_team_id
+    if defending_team_id is None:
+        defending_team_id = 1
+
     # Separate attacking and defending teams
-    attacking = df[df['team_id'] == 0]  # Attacking team (usually team 0)
-    defending = df[df['team_id'] == 1]  # Defending team (usually team 1)
+    attacking = df[df['team_id'] == attacking_team_id]
+    defending = df[df['team_id'] == defending_team_id]
     
     # Plot attacking team (red)
     if len(attacking) > 0:
@@ -174,7 +193,6 @@ def plot_ck_snapshot(
         ))
     
     # Plot ball
-    ball_data = df[df['ball'] > 0.5]
     if len(ball_data) > 0:
         fig.add_trace(go.Scatter(
             x=ball_data['x'],
