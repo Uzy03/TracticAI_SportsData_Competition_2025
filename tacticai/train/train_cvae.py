@@ -173,7 +173,7 @@ def train_epoch(
                 
                 total_loss_batch, recon_loss, kl_loss = criterion(
                     outputs_flat, targets_flat,
-                    mean.view(batch_size, -1), log_var.view(batch_size, -1)
+                    mean.reshape(batch_size, -1), log_var.reshape(batch_size, -1)
                 )
             
             scaler.scale(total_loss_batch).backward()
@@ -193,7 +193,7 @@ def train_epoch(
             
             total_loss_batch, recon_loss, kl_loss = criterion(
                 outputs_flat, targets_flat,
-                mean.view(batch_size, -1), log_var.view(batch_size, -1)
+                mean.reshape(batch_size, -1), log_var.reshape(batch_size, -1)
             )
             
             total_loss_batch.backward()
@@ -260,7 +260,7 @@ def validate_epoch(
             
             total_loss_batch, recon_loss, kl_loss = criterion(
                 outputs_flat, targets_flat,
-                mean.view(batch_size, -1), log_var.view(batch_size, -1)
+                mean.reshape(batch_size, -1), log_var.reshape(batch_size, -1)
             )
             
             total_loss += total_loss_batch.item()
