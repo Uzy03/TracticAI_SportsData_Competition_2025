@@ -1,0 +1,59 @@
+# CVAE config for Corner Kick (processed_ck-based) guided generation
+
+model:
+  # Node feature dim produced by ReceiverSchema for processed_ck samples in this repo
+  input_dim: 16
+
+  # Condition:
+  # - shot(1)
+  # - swing one-hot (in/out/short = 3)
+  # - receiver one-hot (22)
+  condition_dim: 26
+
+  latent_dim: 32
+  # 22 players * (x,y,vx,vy)
+  output_dim: 88
+  hidden_dim: 128
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.2
+
+optimizer:
+  type: "adam"
+  lr: 0.0003
+  weight_decay: 0.0001
+
+scheduler:
+  type: "cosine"
+  T_max: 50
+  eta_min: 0.000001
+  warmup_epochs: 5
+
+train:
+  batch_size: 4
+  epochs: 50
+  amp: false
+
+data:
+  train_path: "data/processed_ck/cvae_ck_train/data.pickle"
+  val_path: "data/processed_ck/cvae_ck_val/data.pickle"
+  test_path: "data/processed_ck/cvae_ck_test/data.pickle"
+  format: "pickle"
+
+loss:
+  recon_type: "mse"
+  recon_weight: 1.0
+  beta: 1.0
+  kl_weight: 1.0
+
+early_stopping:
+  patience: 15
+
+device: "auto"
+seed: 42
+num_workers: 0
+log_level: "INFO"
+log_dir: "runs"
+checkpoint_dir: "checkpoints"
+
+

@@ -1,0 +1,17 @@
+{
+  "task": "receiver",
+  "split": "train",
+  "num_samples": 261,
+  "preprocess_version": "ck_improved_v2",
+  "source": "data/processed_ck/receiver_train/data.pickle",
+  "generated_by": "scripts/build_cvae_ck_dataset.py",
+  "swing_encoding": {
+    "in": 0,
+    "out": 1,
+    "short": 2
+  },
+  "swing_heuristic": {
+    "short_threshold_m": 8.0,
+    "in_margin_m": 2.0
+  }
+}
