@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from tacticai.models.gatv2 import GATv2Network, GATv2Network4View
+from tacticai.modules.view_ops import D2_VIEWS, apply_view_transform
 
 
 @dataclass(frozen=True)
@@ -169,16 +170,40 @@ class CVAEGenerator(nn.Module):
         batch: torch.Tensor,
         edge_attr: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        node_emb, _graph_emb = self.backbone(x, edge_index, edge_attr, batch)  # [N_total,D]
-        # reshape to [B,N,D]
+        # Follow the same D2-view construction as multitask/receiver/shot models.
         bsz = int(batch.max().item() + 1) if batch is not None else 1
-        n_total = int(node_emb.size(0))
-        n_per = n_total // bsz
-        if n_per != self.num_players:
-            # fall back: reshape assuming fixed ordering per-graph
-            # (dataset should be fixed 22 nodes per graph)
-            self.num_players = n_per
-        return node_emb.view(bsz, self.num_players, -1)
+        n_total = int(x.size(0))
+        n_per = n_total // bsz if bsz > 1 else n_total
+
+        if isinstance(self.backbone, GATv2Network4View):
+            # Create 4 views: [B, 4, N, D]
+            views_list = []
+            for view_idx in range(len(D2_VIEWS)):
+                x_view = x.clone()
+                x_view = apply_view_transform(x_view, view_idx, xy_indices=(0, 1))  # x, y
+                if x_view.size(-1) > 3:
+                    x_view = apply_view_transform(x_view, view_idx, xy_indices=(2, 3))  # vx, vy
+                if x_view.size(-1) > 8:
+                    x_view = apply_view_transform(x_view, view_idx, xy_indices=(7, 8))  # dx_to_kicker, dy_to_kicker
+                if x_view.size(-1) > 12:
+                    x_view = apply_view_transform(x_view, view_idx, xy_indices=(11, 12))  # dx_to_goal, dy_to_goal
+                views_list.append(x_view)
+
+            x_views = torch.stack(views_list, dim=0)  # [4, N_total, D]
+            x_4view = x_views.view(4, bsz, n_per, -1).permute(1, 0, 2, 3)  # [B,4,N,D]
+
+            node_emb_4view = self.backbone(x_4view, edge_index, edge_attr, batch=None)  # [B,4,N,H]
+            context = node_emb_4view.mean(dim=1)  # [B,N,H]
+            return context
+
+        # Standard (no D2): backbone returns [N_total,H] when batch=None
+        node_emb = self.backbone(x, edge_index, edge_attr, batch=None)  # [N_total,H]
+        if node_emb.dim() == 2:
+            return node_emb.view(bsz, n_per, -1)
+        if node_emb.dim() == 3:
+            # Already [B,N,H]
+            return node_emb
+        raise ValueError(f"Unexpected node_emb shape: {tuple(node_emb.shape)}")
 
     def forward(
         self,
