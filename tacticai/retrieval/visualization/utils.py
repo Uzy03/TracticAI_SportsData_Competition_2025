@@ -271,8 +271,20 @@ def load_raw_sample_data(
         # real-world units (and can be large). Vector visualization is handled by clipping
         # in the plotting function.
 
+    # Some preprocess pipelines pad/mask a missing player by placing them exactly at a corner.
+    # In this dataset, we observed a frequent dummy at (-FIELD_LENGTH/2, -FIELD_WIDTH/2).
+    # Keep the row (to preserve indices) but mark it so visualization can ignore it.
+    is_dummy = (
+        np.isclose(x, -FIELD_LENGTH / 2, atol=1e-9)
+        & np.isclose(y, -FIELD_WIDTH / 2, atol=1e-9)
+        & np.isclose(vx, 0.0, atol=1e-6)
+        & np.isclose(vy, 0.0, atol=1e-6)
+        & (ball.astype(float) < 0.5)
+    )
+
     # Create DataFrame
     df = pd.DataFrame({
+        'orig_idx': np.arange(min_len, dtype=int),
         'player_id': [f'player_{i}' for i in range(min_len)],
         'team_id': team,
         'x': x,
@@ -280,6 +292,7 @@ def load_raw_sample_data(
         'vx': vx,
         'vy': vy,
         'ball': ball.astype(float),
+        'is_dummy': is_dummy.astype(bool),
     })
 
     # Attach metadata (useful for loading tracking-based ball trajectory)
@@ -450,9 +463,15 @@ def get_short_pass_arrow(
     if receiver_idx is not None:
         try:
             ridx = int(receiver_idx)
-            if 0 <= ridx < len(df):
-                end_row = df.iloc[ridx]
-                return start, (float(end_row["x"]), float(end_row["y"]))
+            if "orig_idx" in df.columns:
+                hit = df[df["orig_idx"] == ridx]
+                if len(hit) > 0:
+                    end_row = hit.iloc[0]
+                    return start, (float(end_row["x"]), float(end_row["y"]))
+            else:
+                if 0 <= ridx < len(df):
+                    end_row = df.iloc[ridx]
+                    return start, (float(end_row["x"]), float(end_row["y"]))
         except Exception:
             pass
 
@@ -461,6 +480,8 @@ def get_short_pass_arrow(
     kicker_pos = np.array([bx, by], dtype=float)
 
     candidates = df[df["team_id"] == kicker_team].copy() if "team_id" in df.columns else df.copy()
+    if "is_dummy" in candidates.columns:
+        candidates = candidates[~candidates["is_dummy"]]
     if len(candidates) <= 1:
         return None, None
 

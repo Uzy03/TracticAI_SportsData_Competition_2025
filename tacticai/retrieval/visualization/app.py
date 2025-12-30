@@ -131,13 +131,31 @@ def plot_ck_snapshot(
     
     # Determine attacking/defending team IDs.
     # Do NOT assume team_id==0 is always attacking: some samples flip.
-    ball_data = df[df['ball'] > 0.5]
+    # Also guard against older dataframes that don't have is_dummy by filtering the known (0,0)->corner placeholder.
+    vis_mask = (df["team_id"] == df["team_id"])
+    if "is_dummy" in df.columns:
+        vis_mask = vis_mask & (~df["is_dummy"])
+    # Fallback dummy detection (corner placeholder)
+    try:
+        is_corner_dummy = (
+            (df["ball"] < 0.5)
+            & (df["vx"].abs() < 1e-6)
+            & (df["vy"].abs() < 1e-6)
+            & ((df["x"] + 52.5).abs() < 1e-6)
+            & ((df["y"] + 34.0).abs() < 1e-6)
+        )
+        vis_mask = vis_mask & (~is_corner_dummy)
+    except Exception:
+        pass
+    df_vis = df[vis_mask]
+
+    ball_data = df_vis[df_vis['ball'] > 0.5]
     if len(ball_data) > 0:
         attacking_team_id = int(ball_data.iloc[0]['team_id'])
     else:
         attacking_team_id = 0
 
-    unique_team_ids = [int(x) for x in df['team_id'].dropna().unique().tolist()]
+    unique_team_ids = [int(x) for x in df_vis['team_id'].dropna().unique().tolist()]
     defending_team_id = None
     for tid in unique_team_ids:
         if tid != attacking_team_id:
@@ -149,8 +167,8 @@ def plot_ck_snapshot(
         defending_team_id = 1
 
     # Separate attacking and defending teams
-    attacking = df[df['team_id'] == attacking_team_id]
-    defending = df[df['team_id'] == defending_team_id]
+    attacking = df_vis[df_vis['team_id'] == attacking_team_id]
+    defending = df_vis[df_vis['team_id'] == defending_team_id]
     
     # Plot attacking team (red)
     if len(attacking) > 0:
