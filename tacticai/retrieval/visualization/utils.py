@@ -533,7 +533,9 @@ def load_ball_trajectory_from_tracking(
     match_id: str,
     frame: int,
     soccerdata_dir: str = "SoccerData",
+    lookback_frames: int = 300,
     window_frames: int = 120,
+    corner_radius_m: float = 2.5,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Load ball trajectory from SoccerData tracking.csv around (match_id, frame).
 
@@ -553,7 +555,10 @@ def load_ball_trajectory_from_tracking(
         df = pd.read_csv(tracking_path, usecols=usecols)
         # Ball candidate rows (empirically: HA==0, No==0, SysTarget==0)
         ball = df[(df["HA"] == 0) | (df["No"] == 0) | (df["SysTarget"] == 0)]
-        seg = ball[(ball["Frame"] >= int(frame)) & (ball["Frame"] <= int(frame) + int(window_frames))]
+        start_frame = int(frame)
+        end_frame = int(frame) + int(window_frames)
+        lb = max(0, int(frame) - int(lookback_frames))
+        seg = ball[(ball["Frame"] >= lb) & (ball["Frame"] <= end_frame)].copy()
         if len(seg) < 2:
             return np.array([]), np.array([])
 
@@ -564,6 +569,24 @@ def load_ball_trajectory_from_tracking(
         if max(np.max(np.abs(x)), np.max(np.abs(y))) > 200.0:
             x = x / 100.0
             y = y / 100.0
+
+        # Try to find a better "kick start" frame: last moment before `frame` when ball is near a corner.
+        hl = FIELD_LENGTH / 2
+        hw = FIELD_WIDTH / 2
+        corners = np.array([[-hl, -hw], [-hl, hw], [hl, -hw], [hl, hw]], dtype=float)
+        coords = np.stack([x, y], axis=1)
+        d2 = ((coords[:, None, :] - corners[None, :, :]) ** 2).sum(axis=2)  # [T,4]
+        near_corner = np.any(d2 <= float(corner_radius_m) ** 2, axis=1)
+        frames = seg["Frame"].to_numpy(dtype=int)
+        candidates = np.where(near_corner & (frames <= int(frame)))[0]
+        if candidates.size > 0:
+            k = int(candidates[-1])  # latest near-corner sample before the query frame
+            start_frame = int(frames[k])
+            # Slice trajectory from this start_frame onward
+            keep = (frames >= start_frame) & (frames <= start_frame + int(window_frames))
+            x = x[keep]
+            y = y[keep]
+
         return x, y
     except Exception:
         return np.array([]), np.array([])
@@ -633,16 +656,21 @@ def get_emphasized_swing_arc_from_start(
         x2 = goal_side * (half_length - 22.0)  # farther from goal
     y2 = 0.0
 
-    # Control point: strong lateral curvature
-    x1 = goal_side * (half_length - 10.0)
+    # Cubic Bezier with two control points for a visibly "curvy" arc
     sgn = 1.0 if cy >= 0 else -1.0
     if s == "in":
-        y1 = cy - sgn * float(delta_m)  # toward centerline
+        y_ctrl = cy - sgn * float(delta_m)  # bend toward centerline
     else:
-        y1 = cy + sgn * float(delta_m)  # toward sideline
+        y_ctrl = cy + sgn * float(delta_m)  # bend toward sideline
 
-    t = np.linspace(0.0, 1.0, int(num_points))
-    x = (1 - t) ** 2 * bx + 2 * (1 - t) * t * x1 + t**2 * x2
-    y = (1 - t) ** 2 * by + 2 * (1 - t) * t * y1 + t**2 * y2
-    return x, y
+    # Control points placed near start/end in x, but with large lateral offset for curvature.
+    p0 = np.array([bx, by], dtype=float)
+    p3 = np.array([x2, y2], dtype=float)
+    p1 = np.array([bx + goal_side * 10.0, y_ctrl], dtype=float)
+    p2 = np.array([x2 - goal_side * 12.0, y_ctrl], dtype=float)
+
+    t = np.linspace(0.0, 1.0, int(num_points))[:, None]
+    one = (1.0 - t)
+    pts = (one**3) * p0 + 3.0 * (one**2) * t * p1 + 3.0 * one * (t**2) * p2 + (t**3) * p3
+    return pts[:, 0], pts[:, 1]
 

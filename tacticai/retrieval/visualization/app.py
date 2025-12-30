@@ -225,7 +225,7 @@ def plot_ck_snapshot(
     ball_marker = None
     traj_x = traj_y = np.array([])
     swing = None
-    if show_ball_arc and (trajectory_source or "stylized").lower() == "tracking":
+        if show_ball_arc and (trajectory_source or "stylized").lower() == "tracking":
         try:
             match_id = str(df["match_id"].iloc[0]) if "match_id" in df.columns else None
             frame = int(df["frame"].iloc[0]) if "frame" in df.columns else None
@@ -236,6 +236,7 @@ def plot_ck_snapshot(
                 match_id=match_id,
                 frame=frame,
                 soccerdata_dir=soccerdata_dir,
+                    lookback_frames=300,
                 window_frames=traj_window_frames,
             )
         if len(traj_x) > 0:
@@ -472,7 +473,7 @@ def plot_ck_snapshot(
         # Attacking team vectors
         if len(attacking) > 0:
             for idx, row in attacking.iterrows():
-                if abs(row['vx']) > 0.001 or abs(row['vy']) > 0.001:  # show more often
+                if abs(row['vx']) > 1e-9 or abs(row['vy']) > 1e-9:
                     dx = float(row['vx']) * float(vector_scale)
                     dy = float(row['vy']) * float(vector_scale)
                     norm = (dx * dx + dy * dy) ** 0.5
@@ -489,7 +490,7 @@ def plot_ck_snapshot(
                     if norm > 1e-9:
                         ux = dx / norm
                         uy = dy / norm
-                        off = min(float(vector_offset_m), max(0.0, norm - 0.2))
+                        off = min(float(vector_offset_m), 0.5 * norm)
                     else:
                         ux = uy = 0.0
                         off = 0.0
@@ -512,7 +513,7 @@ def plot_ck_snapshot(
         # Defending team vectors
         if len(defending) > 0:
             for idx, row in defending.iterrows():
-                if abs(row['vx']) > 0.001 or abs(row['vy']) > 0.001:
+                if abs(row['vx']) > 1e-9 or abs(row['vy']) > 1e-9:
                     dx = float(row['vx']) * float(vector_scale)
                     dy = float(row['vy']) * float(vector_scale)
                     norm = (dx * dx + dy * dy) ** 0.5
@@ -528,7 +529,7 @@ def plot_ck_snapshot(
                     if norm > 1e-9:
                         ux = dx / norm
                         uy = dy / norm
-                        off = min(float(vector_offset_m), max(0.0, norm - 0.2))
+                        off = min(float(vector_offset_m), 0.5 * norm)
                     else:
                         ux = uy = 0.0
                         off = 0.0
