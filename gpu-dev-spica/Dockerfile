@@ -41,7 +41,8 @@ RUN /usr/local/bin/python3.10 -m venv ~/.venv && \
     ~/.venv/bin/pip install \
       ipython jupyter jupyterlab \
       numpy scipy pandas matplotlib \
-      scikit-learn tqdm rich
+      scikit-learn tqdm rich \
+      streamlit plotly
 
 # ---- PyTorch (CUDA 11.6) を使う場合 ----
 # RUN ~/.venv/bin/pip install --index-url https://download.pytorch.org/whl/cu116 torch torchvision torchaudio

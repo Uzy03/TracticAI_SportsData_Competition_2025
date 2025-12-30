@@ -1,0 +1,27 @@
+# gpu-dev Docker image dependencies (non-PyTorch)
+#
+# NOTE:
+# - PyTorch is installed separately in `gpu-dev/Dockerfile` using the CUDA-specific index URL.
+# - Keep this file in sync with what the repo actually imports for training/retrieval/visualization.
+#
+# Core
+numpy
+pandas
+pyyaml
+
+# ML / metrics / utilities
+scikit-learn
+tqdm
+
+# SciPy is used by analysis scripts (e.g. embedding diversity)
+scipy
+
+# Visualization (Streamlit app)
+streamlit
+plotly
+matplotlib
+
+# Optional: nice CLI outputs
+rich
+
+

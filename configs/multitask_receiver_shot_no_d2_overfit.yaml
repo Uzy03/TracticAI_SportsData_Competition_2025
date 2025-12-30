@@ -1,0 +1,103 @@
+# Multi-task learning (receiver + shot) - DEBUG OVERFIT config (D2 disabled)
+#
+# 目的:
+# - 少数サンプルに対して train=val=test を同一にし、損失が十分下がるかで実装の健全性を確認する
+#
+# 使い方:
+# python tacticai/train/train_multitask.py --config configs/multitask_receiver_shot_no_d2_overfit.yaml
+
+model:
+  input_dim: 16
+  hidden_dim: 512
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.0
+  num_classes: 22
+  edge_dim: 10
+  mlp_num_layers: 2
+
+optimizer:
+  type: "adam"
+  lr: 0.0001
+  weight_decay: 0.0
+
+scheduler:
+  type: "cosine"
+  T_max: 200
+  eta_min: 0.000001
+  warmup_epochs: 0
+
+train:
+  # debug_overfit用なので、subsetサイズに合わせて小さめに
+  batch_size: 1
+  epochs: 300
+  amp: false
+  grad_clip:
+    enabled: true
+    max_norm: 1.0
+
+multitask:
+  lambda_receiver: 1.0
+  lambda_shot: 1.0
+
+data:
+  receiver_train_path: "data/processed_ck/receiver_train/data.pickle"
+  receiver_val_path: "data/processed_ck/receiver_val/data.pickle"
+  receiver_test_path: "data/processed_ck/receiver_test/data.pickle"
+  shot_train_path: "data/processed_ck/shot_train/data.pickle"
+  shot_val_path: "data/processed_ck/shot_val/data.pickle"
+  shot_test_path: "data/processed_ck/shot_test/data.pickle"
+  format: "pickle"
+  merge_val_to_train: false
+
+loss:
+  receiver:
+    type: "cross_entropy"
+    label_smoothing: 0.0
+    weight: 1.0
+    focal_loss:
+      enabled: false
+      alpha: 0.25
+      gamma: 2.0
+    class_weights: null
+  shot:
+    type: "binary_cross_entropy"
+    label_smoothing: 0.0
+    weight: 1.0
+    pos_weight: 1.0
+    focal_loss:
+      enabled: false
+      alpha: 0.25
+      gamma: 2.0
+
+d2:
+  enabled: false
+  group_pool: false
+  transforms:
+    hflip: false
+    vflip: false
+
+early_stopping:
+  # overfit確認では基本的に止めたくないので超長め
+  patience: 99999
+  min_delta: 0.0
+  monitor: "val_receiver_top3"
+
+eval:
+  batch_size: 1
+
+device: "auto"
+seed: 42
+num_workers: 0
+log_level: "INFO"
+log_dir: "runs"
+checkpoint_dir: "checkpoints"
+model_save_dir: "checkpoints/receiver_shot"
+
+# train_multitask.py で解釈される overfit スイッチ（train=val=test を同一 subset にする）
+debug_overfit:
+  enabled: true
+  num_samples: 1
+  seed: 42
+
+

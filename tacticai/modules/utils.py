@@ -181,7 +181,8 @@ def load_checkpoint(
     if device is None:
         device = torch.device("cpu")
     
-    checkpoint = torch.load(filepath, map_location=device)
+    # weights_only=False for compatibility with checkpoints containing NumPy scalars (PyTorch 2.6+)
+    checkpoint = torch.load(filepath, map_location=device, weights_only=False)
     
     if model is not None and "model_state_dict" in checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -198,12 +199,15 @@ def load_checkpoint(
 def load_backbone_from_checkpoint(
     checkpoint_path: Union[str, Path],
     device: Optional[torch.device] = None,
+    metadata_override: Optional[Dict[str, Any]] = None,
 ) -> Tuple[nn.Module, Dict[str, Any]]:
     """Load pretrained backbone from checkpoint.
     
     Args:
         checkpoint_path: Path to backbone checkpoint file
         device: Device to load checkpoint on (default: cpu)
+        metadata_override: Metadata/config-derived parameters to construct backbone when the
+            checkpoint does not include `metadata` (e.g., full model checkpoints).
         
     Returns:
         Tuple of (backbone_model, metadata)
@@ -215,12 +219,19 @@ def load_backbone_from_checkpoint(
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Backbone checkpoint not found: {checkpoint_path}")
     
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # weights_only=False for compatibility with checkpoints containing NumPy scalars (PyTorch 2.6+)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
-    if "metadata" not in checkpoint:
-        raise ValueError(f"Checkpoint does not contain metadata: {checkpoint_path}")
-    
-    metadata = checkpoint["metadata"]
+    # Metadata can come from checkpoint (backbone-only ckpt) or be provided externally
+    if "metadata" in checkpoint:
+        metadata = checkpoint["metadata"]
+    elif metadata_override is not None:
+        metadata = metadata_override
+    else:
+        raise ValueError(
+            f"Checkpoint does not contain metadata: {checkpoint_path}. "
+            f"Pass metadata_override (e.g., derived from YAML config) to construct backbone."
+        )
     
     # Import models here to avoid circular imports
     from tacticai.models import GATv2Network, GATv2Network4View
@@ -258,8 +269,23 @@ def load_backbone_from_checkpoint(
     # Load state dict
     if "backbone_state_dict" in checkpoint:
         backbone.load_state_dict(checkpoint["backbone_state_dict"])
+    elif "model_state_dict" in checkpoint:
+        # Full model checkpoint: extract backbone.* parameters (e.g., MultiTaskModel)
+        full_sd = checkpoint["model_state_dict"]
+        backbone_sd = {}
+        prefix = "backbone."
+        for k, v in full_sd.items():
+            if k.startswith(prefix):
+                backbone_sd[k[len(prefix):]] = v
+        if len(backbone_sd) == 0:
+            raise ValueError(
+                f"Checkpoint contains model_state_dict but no '{prefix}*' keys were found: {checkpoint_path}"
+            )
+        backbone.load_state_dict(backbone_sd, strict=True)
     else:
-        raise ValueError(f"Checkpoint does not contain backbone_state_dict: {checkpoint_path}")
+        raise ValueError(
+            f"Checkpoint does not contain backbone_state_dict or model_state_dict: {checkpoint_path}"
+        )
     
     backbone = backbone.to(device)
     
@@ -480,6 +506,94 @@ def save_training_history_csv_shot(
         "epoch", "train_loss", "train_auc_roc", "train_auc_pr", "train_accuracy", "train_f1",
         "val_loss", "val_auc_roc", "val_auc_pr", "val_accuracy", "val_f1",
         "test_loss", "test_auc_roc", "test_auc_pr", "test_accuracy", "test_f1"
+    ]
+    
+    with open(filepath, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def save_training_history_csv_multitask(
+    train_history: Dict[str, list],
+    val_history: Dict[str, list],
+    test_history: Optional[Dict[str, float]] = None,
+    filepath: Union[str, Path] = "runs/training_history.csv"
+) -> None:
+    """Save training history to CSV file for multi-task learning (receiver + shot prediction).
+    
+    Args:
+        train_history: Training history dictionary with multitask metrics
+        val_history: Validation history dictionary with multitask metrics
+        test_history: Test metrics dictionary (optional, single values per metric)
+        filepath: Path to save CSV file
+    """
+    import csv
+    
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Get all epochs
+    num_epochs = len(train_history.get("total_loss", []))
+    
+    # Prepare CSV rows
+    rows = []
+    for epoch in range(num_epochs):
+        row = {
+            "epoch": epoch + 1,
+            "train_total_loss": train_history.get("total_loss", [0.0])[epoch] if epoch < len(train_history.get("total_loss", [])) else 0.0,
+            "train_receiver_loss": train_history.get("receiver_loss", [0.0])[epoch] if epoch < len(train_history.get("receiver_loss", [])) else 0.0,
+            "train_receiver_top1": train_history.get("receiver_top1", [0.0])[epoch] if epoch < len(train_history.get("receiver_top1", [])) else 0.0,
+            "train_receiver_top3": train_history.get("receiver_top3", [0.0])[epoch] if epoch < len(train_history.get("receiver_top3", [])) else 0.0,
+            "train_shot_loss": train_history.get("shot_loss", [0.0])[epoch] if epoch < len(train_history.get("shot_loss", [])) else 0.0,
+            "train_shot_acc": train_history.get("shot_acc", [0.0])[epoch] if epoch < len(train_history.get("shot_acc", [])) else 0.0,
+            "train_shot_auc_roc": train_history.get("shot_auc_roc", [0.0])[epoch] if epoch < len(train_history.get("shot_auc_roc", [])) else 0.0,
+            "train_shot_auc_pr": train_history.get("shot_auc_pr", [0.0])[epoch] if epoch < len(train_history.get("shot_auc_pr", [])) else 0.0,
+            "train_shot_f1": train_history.get("shot_f1", [0.0])[epoch] if epoch < len(train_history.get("shot_f1", [])) else 0.0,
+            "val_total_loss": val_history.get("total_loss", [0.0])[epoch] if epoch < len(val_history.get("total_loss", [])) else 0.0,
+            "val_receiver_loss": val_history.get("receiver_loss", [0.0])[epoch] if epoch < len(val_history.get("receiver_loss", [])) else 0.0,
+            "val_receiver_top1": val_history.get("receiver_top1", [0.0])[epoch] if epoch < len(val_history.get("receiver_top1", [])) else 0.0,
+            "val_receiver_top3": val_history.get("receiver_top3", [0.0])[epoch] if epoch < len(val_history.get("receiver_top3", [])) else 0.0,
+            "val_shot_loss": val_history.get("shot_loss", [0.0])[epoch] if epoch < len(val_history.get("shot_loss", [])) else 0.0,
+            "val_shot_acc": val_history.get("shot_acc", [0.0])[epoch] if epoch < len(val_history.get("shot_acc", [])) else 0.0,
+            "val_shot_auc_roc": val_history.get("shot_auc_roc", [0.0])[epoch] if epoch < len(val_history.get("shot_auc_roc", [])) else 0.0,
+            "val_shot_auc_pr": val_history.get("shot_auc_pr", [0.0])[epoch] if epoch < len(val_history.get("shot_auc_pr", [])) else 0.0,
+            "val_shot_f1": val_history.get("shot_f1", [0.0])[epoch] if epoch < len(val_history.get("shot_f1", [])) else 0.0,
+        }
+        
+        # Add test metrics if available (only for the last epoch)
+        if test_history is not None and epoch == num_epochs - 1:
+            row["test_total_loss"] = test_history.get("total_loss", 0.0)
+            row["test_receiver_loss"] = test_history.get("receiver_loss", 0.0)
+            row["test_receiver_top1"] = test_history.get("receiver_top1", 0.0)
+            row["test_receiver_top3"] = test_history.get("receiver_top3", 0.0)
+            row["test_shot_loss"] = test_history.get("shot_loss", 0.0)
+            row["test_shot_acc"] = test_history.get("shot_acc", 0.0)
+            row["test_shot_auc_roc"] = test_history.get("shot_auc_roc", 0.0)
+            row["test_shot_auc_pr"] = test_history.get("shot_auc_pr", 0.0)
+            row["test_shot_f1"] = test_history.get("shot_f1", 0.0)
+        else:
+            row["test_total_loss"] = ""
+            row["test_receiver_loss"] = ""
+            row["test_receiver_top1"] = ""
+            row["test_receiver_top3"] = ""
+            row["test_shot_loss"] = ""
+            row["test_shot_acc"] = ""
+            row["test_shot_auc_roc"] = ""
+            row["test_shot_auc_pr"] = ""
+            row["test_shot_f1"] = ""
+        
+        rows.append(row)
+    
+    # Write CSV file (overwrite mode)
+    fieldnames = [
+        "epoch",
+        "train_total_loss", "train_receiver_loss", "train_receiver_top1", "train_receiver_top3",
+        "train_shot_loss", "train_shot_acc", "train_shot_auc_roc", "train_shot_auc_pr", "train_shot_f1",
+        "val_total_loss", "val_receiver_loss", "val_receiver_top1", "val_receiver_top3",
+        "val_shot_loss", "val_shot_acc", "val_shot_auc_roc", "val_shot_auc_pr", "val_shot_f1",
+        "test_total_loss", "test_receiver_loss", "test_receiver_top1", "test_receiver_top3",
+        "test_shot_loss", "test_shot_acc", "test_shot_auc_roc", "test_shot_auc_pr", "test_shot_f1",
     ]
     
     with open(filepath, 'w', newline='', encoding='utf-8') as f:

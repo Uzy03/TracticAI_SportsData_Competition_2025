@@ -25,11 +25,14 @@ setup(
     install_requires=[
         "torch>=2.0.0",
         "numpy>=1.24.0",
+        "scipy>=1.10.0",
         "pandas>=2.0.0",
         "pyyaml>=6.0",
         "scikit-learn>=1.3.0",
         "tqdm>=4.65.0",
         "matplotlib>=3.7.0",
+        "streamlit>=1.28.0",
+        "plotly>=5.17.0",
     ],
     extras_require={
         "dev": [

@@ -912,7 +912,7 @@ class ShotSchema(DataSchema):
             use_edge_attributes=True,
         )
         return receiver_schema.get_edge_attributes(data)
-    
+
     def get_receiver_target(self, data: Dict[str, Any]) -> torch.Tensor:
         """Extract receiver target if available."""
         if not self.receiver_column:

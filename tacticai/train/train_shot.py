@@ -92,7 +92,7 @@ class ShotModelWithReceiver(nn.Module):
             if receiver_checkpoint_path is None:
                 raise ValueError("pretrained.receiver_checkpoint_path must be specified when use_receiver_for_conditioning is True")
             
-            receiver_checkpoint = torch.load(receiver_checkpoint_path, map_location=device)
+            receiver_checkpoint = torch.load(receiver_checkpoint_path, map_location=device, weights_only=False)
             self.receiver_head = ReceiverHead(
             input_dim=model_config["hidden_dim"],
             hidden_dim=model_config["hidden_dim"],
@@ -371,9 +371,9 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
             {"params": backbone_params, "lr": pretrained_config["lr_backbone"]},
             {"params": head_params, "lr": pretrained_config["lr_head"]},
         ]
-        
-        if opt_config["type"] == "adam":
-            optimizer = optim.Adam(
+    
+    if opt_config["type"] == "adam":
+        optimizer = optim.Adam(
                 param_groups,
                 weight_decay=opt_config.get("weight_decay", 0.0),
             )
@@ -390,11 +390,11 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
         if opt_config["type"] == "adam":
             optimizer = optim.Adam(
                 trainable_params,
-                lr=opt_config["lr"],
+            lr=opt_config["lr"],
                 weight_decay=opt_config.get("weight_decay", 0.0),
-            )
-        else:
-            raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
+        )
+    else:
+        raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
     
     return optimizer
 
@@ -561,7 +561,7 @@ def train_epoch(
     with torch.no_grad():
         all_predictions = torch.cat(all_predictions, dim=0)  # [N, 1]
         all_targets = torch.cat(all_targets, dim=0)  # [N] or [N, 1]
-        
+    
         # Convert targets to [N] if needed
         if all_targets.dim() > 1:
             all_targets = all_targets.squeeze(-1)
@@ -573,7 +573,7 @@ def train_epoch(
         
         # Compute AUC (works with probabilities/logits)
         try:
-            auc_roc, auc_pr = metrics["auc"](all_predictions, all_targets, compute_auc_pr=True)
+    auc_roc, auc_pr = metrics["auc"](all_predictions, all_targets, compute_auc_pr=True)
         except Exception:
             # AUC computation might fail for single class or too few samples
             auc_roc = torch.tensor(0.5)
@@ -673,7 +673,7 @@ def validate_epoch(
     
     # Compute AUC (works with probabilities/logits)
     try:
-        auc_roc, auc_pr = metrics["auc"](all_predictions, all_targets, compute_auc_pr=True)
+    auc_roc, auc_pr = metrics["auc"](all_predictions, all_targets, compute_auc_pr=True)
     except Exception:
         # AUC computation might fail for single class or too few samples
         auc_roc = torch.tensor(0.5)
@@ -817,10 +817,10 @@ def main():
                 train_dataset = train_dataset_base
                 
             # Create validation dataset
-            val_dataset = ShotDataset(
-                config["data"]["val_path"],
+        val_dataset = ShotDataset(
+            config["data"]["val_path"],
                 file_format=config["data"].get("format", "pickle")
-            )
+        )
     
     # Create data loaders
     train_loader = create_dataloader(
@@ -836,13 +836,13 @@ def main():
         val_loader = None
         logger.info("[MERGE-VAL] Val loader set to None (Val merged to Train)")
     else:
-        val_loader = create_dataloader(
-            val_dataset,
-            batch_size=config["train"]["batch_size"],
-            shuffle=False,
-            num_workers=config.get("num_workers", 0),
-            pin_memory=False,  # Disable pin_memory for MPS compatibility
-        )
+    val_loader = create_dataloader(
+        val_dataset,
+        batch_size=config["train"]["batch_size"],
+        shuffle=False,
+        num_workers=config.get("num_workers", 0),
+        pin_memory=False,  # Disable pin_memory for MPS compatibility
+    )
     
     # Create test dataset and loader (for final evaluation)
     test_dataset = None
@@ -920,7 +920,7 @@ def main():
     
     start_epoch = 0
     if args.resume:
-        checkpoint = torch.load(args.resume, map_location=device)
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
@@ -956,7 +956,7 @@ def main():
             }
             logger.info("[MERGE-VAL] Validation skipped (Val merged to Train)")
         else:
-            val_metrics = validate_epoch(model, val_loader, criterion, device, metrics)
+        val_metrics = validate_epoch(model, val_loader, criterion, device, metrics)
         
         # Update learning rate
         if scheduler is not None:
@@ -1036,28 +1036,28 @@ def main():
                 logger.info(f"New best model saved with Train AUC-ROC: {best_val_auc:.4f} (D2: {use_d2})")
         else:
             # Normal mode: use Val AUC-ROC
-            if val_metrics["auc_roc"] > best_val_auc:
-                best_val_auc = val_metrics["auc_roc"]
+        if val_metrics["auc_roc"] > best_val_auc:
+            best_val_auc = val_metrics["auc_roc"]
                 checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "shot" / checkpoint_filename
                 checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-                save_checkpoint(
-                    model, optimizer, epoch, val_metrics["loss"], val_metrics,
-                    checkpoint_path, scheduler
-                )
+            save_checkpoint(
+                model, optimizer, epoch, val_metrics["loss"], val_metrics,
+                checkpoint_path, scheduler
+            )
                 logger.info(f"New best model saved with AUC-ROC: {best_val_auc:.4f} (D2: {use_d2})")
         
         # Early stopping (skip if Val is merged to Train)
         merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
         if not merge_val_to_train:
-            if early_stopping(val_metrics["auc_roc"], model):
-                logger.info(f"Early stopping at epoch {epoch+1}")
-                break
+        if early_stopping(val_metrics["auc_roc"], model):
+            logger.info(f"Early stopping at epoch {epoch+1}")
+            break
     
     merge_val_to_train = config.get("data", {}).get("merge_val_to_train", False)
     if merge_val_to_train:
         logger.info(f"Training completed. Best Train AUC-ROC: {best_val_auc:.4f} (Val merged to Train)")
     else:
-        logger.info(f"Training completed. Best validation AUC-ROC: {best_val_auc:.4f}")
+    logger.info(f"Training completed. Best validation AUC-ROC: {best_val_auc:.4f}")
     
     # Evaluate on test set if available
     test_history = None

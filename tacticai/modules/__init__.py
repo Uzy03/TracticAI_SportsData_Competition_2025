@@ -19,6 +19,7 @@ from .metrics import (
     TopKAccuracy,
     Accuracy,
     F1Score,
+    BinaryF1,
     AUC,
     ECE,
 )
@@ -31,6 +32,7 @@ from .utils import (
     save_training_history,
     save_training_history_csv,
     save_training_history_csv_shot,
+    save_training_history_csv_multitask,
     CosineAnnealingScheduler,
     EarlyStopping,
 )
@@ -57,6 +59,7 @@ __all__ = [
     "TopKAccuracy",
     "Accuracy",
     "F1Score",
+    "BinaryF1",
     "AUC",
     "ECE",
     "set_seed",

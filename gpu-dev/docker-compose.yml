@@ -9,7 +9,7 @@ services:
       # 親ディレクトリ（プロジェクトルート）をマウント
       - ..:/workspace
     ports:
-      - "8888:8888"
+      - "8501:8501"  # Streamlit
     deploy:
       resources:
         reservations:

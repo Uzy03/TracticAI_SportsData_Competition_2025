@@ -202,6 +202,37 @@ class F1Score:
             return f1
 
 
+class BinaryF1:
+    """F1 score for binary classification from logits.
+
+    Uses sigmoid + threshold to produce binary predictions.
+    """
+
+    def __init__(self, threshold: float = 0.5):
+        self.threshold = float(threshold)
+
+    def __call__(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        # logits: [N] or [N, 1]
+        # targets: [N] or [N, 1]
+        if logits.dim() == 2 and logits.size(1) == 1:
+            logits = logits.squeeze(-1)
+        if targets.dim() == 2 and targets.size(1) == 1:
+            targets = targets.squeeze(-1)
+
+        probs = torch.sigmoid(logits)
+        preds = (probs > self.threshold).long()
+        targets = targets.long()
+
+        tp = ((preds == 1) & (targets == 1)).float().sum()
+        fp = ((preds == 1) & (targets == 0)).float().sum()
+        fn = ((preds == 0) & (targets == 1)).float().sum()
+
+        precision = tp / (tp + fp + 1e-8)
+        recall = tp / (tp + fn + 1e-8)
+        f1 = 2 * precision * recall / (precision + recall + 1e-8)
+        return f1
+
+
 class AUC:
     """Area Under Curve metric for binary classification.
     
@@ -236,9 +267,22 @@ class AUC:
         logits_np = logits.detach().cpu().numpy()
         targets_np = targets.detach().cpu().numpy()
         
-        # Handle binary classification
+        # Handle binary classification: ensure 1D array (not scalar)
         if logits.dim() == 2 and logits.size(1) == 1:
-            logits_np = logits_np.squeeze()
+            logits_np = logits_np.squeeze(-1)  # Only squeeze the last dimension
+        elif logits.dim() == 0:
+            # If scalar, convert to 1D array
+            logits_np = logits_np.reshape(1)
+
+        # Targets sometimes come as [N, 1]; squeeze to [N]
+        if targets.dim() == 2 and targets.size(1) == 1:
+            targets_np = targets_np.squeeze(-1)
+        
+        # Ensure 1D arrays (not scalars) for sklearn
+        if logits_np.ndim == 0:
+            logits_np = logits_np.reshape(1)
+        if targets_np.ndim == 0:
+            targets_np = targets_np.reshape(1)
         
         # Compute AUC-ROC
         try:
