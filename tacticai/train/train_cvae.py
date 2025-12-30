@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 import numpy as np
 from tqdm import tqdm
 
-from tacticai.models import CVAEModel
+from tacticai.models import CVAEGenerator
 from tacticai.dataio import CVAEDataset, create_dataloader, create_dummy_dataset
 from tacticai.modules import (
     CVAELoss, ReconstructionLoss, KLLoss,
@@ -49,11 +49,10 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
     """
     model_config = config["model"]
     
-    model = CVAEModel(
+    model = CVAEGenerator(
         input_dim=model_config["input_dim"],
         condition_dim=model_config["condition_dim"],
         latent_dim=model_config["latent_dim"],
-        output_dim=model_config["output_dim"],
         hidden_dim=model_config["hidden_dim"],
         num_layers=model_config["num_layers"],
         num_heads=model_config["num_heads"],
@@ -161,34 +160,40 @@ def train_epoch(
         
         if use_amp and scaler is not None:
             with torch.cuda.amp.autocast():
+                batch_size = int(data["batch"].max().item() + 1)
+                x_gt = targets.view(batch_size, -1, 4)
                 outputs, mean, log_var = model(
                     data["x"], data["edge_index"], data["batch"],
-                    data["conditions"], training=True
+                    data["conditions"], x_gt=x_gt, training=True
                 )
                 
                 # Reshape targets to match outputs (flatten player positions)
-                batch_size = data["batch"].max().item() + 1
                 targets_flat = targets.view(batch_size, -1)
+                outputs_flat = outputs.view(batch_size, -1)
                 
                 total_loss_batch, recon_loss, kl_loss = criterion(
-                    outputs, targets_flat, mean, log_var
+                    outputs_flat, targets_flat,
+                    mean.view(batch_size, -1), log_var.view(batch_size, -1)
                 )
             
             scaler.scale(total_loss_batch).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
+            batch_size = int(data["batch"].max().item() + 1)
+            x_gt = targets.view(batch_size, -1, 4)
             outputs, mean, log_var = model(
                 data["x"], data["edge_index"], data["batch"],
-                data["conditions"], training=True
+                data["conditions"], x_gt=x_gt, training=True
             )
             
             # Reshape targets to match outputs (flatten player positions)
-            batch_size = data["batch"].max().item() + 1
             targets_flat = targets.view(batch_size, -1)
+            outputs_flat = outputs.view(batch_size, -1)
             
             total_loss_batch, recon_loss, kl_loss = criterion(
-                outputs, targets_flat, mean, log_var
+                outputs_flat, targets_flat,
+                mean.view(batch_size, -1), log_var.view(batch_size, -1)
             )
             
             total_loss_batch.backward()
@@ -251,9 +256,11 @@ def validate_epoch(
             # Reshape targets to match outputs (flatten player positions)
             batch_size = data["batch"].max().item() + 1
             targets_flat = targets.view(batch_size, -1)
+            outputs_flat = outputs.view(batch_size, -1)
             
             total_loss_batch, recon_loss, kl_loss = criterion(
-                outputs, targets_flat, mean, log_var
+                outputs_flat, targets_flat,
+                mean.view(batch_size, -1), log_var.view(batch_size, -1)
             )
             
             total_loss += total_loss_batch.item()
