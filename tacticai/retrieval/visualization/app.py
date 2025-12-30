@@ -223,6 +223,8 @@ def plot_ck_snapshot(
     # NOTE: In processed data, ball==1 is often "ball holder player", not true ball location.
     # When using tracking, prefer the tracking start position as the ball marker.
     ball_marker = None
+    # Keep the actual ball-holder position (for short-corner decision), even if we snap the display marker.
+    ball_holder_pos = None
     traj_x = traj_y = np.array([])
     swing = None
     if show_ball_arc and (trajectory_source or "stylized").lower() == "tracking":
@@ -245,6 +247,23 @@ def plot_ck_snapshot(
 
     if ball_marker is None and len(ball_data) > 0:
         ball_marker = (float(ball_data.iloc[0]["x"]), float(ball_data.iloc[0]["y"]))
+    if len(ball_data) > 0:
+        ball_holder_pos = (float(ball_data.iloc[0]["x"]), float(ball_data.iloc[0]["y"]))
+
+    # If tracking is enabled but the detected start is far from a corner (common in short corners),
+    # snap the displayed marker to the nearest corner for clarity.
+    if (show_ball_arc and (trajectory_source or "stylized").lower() == "tracking") and (ball_marker is not None):
+        bx, by = float(ball_marker[0]), float(ball_marker[1])
+        hl = 105.0 / 2.0
+        hw = 68.0 / 2.0
+        corners = [(-hl, -hw), (-hl, hw), (hl, -hw), (hl, hw)]
+        cx, cy = min(corners, key=lambda c: (bx - c[0]) ** 2 + (by - c[1]) ** 2)
+        dist = ((bx - cx) ** 2 + (by - cy) ** 2) ** 0.5
+        if dist > 8.0 and (ball_holder_pos is not None):
+            # use ball-holder pos to choose corner side
+            rx, ry = ball_holder_pos
+            cx2, cy2 = min(corners, key=lambda c: (rx - c[0]) ** 2 + (ry - c[1]) ** 2)
+            ball_marker = (float(cx2), float(cy2))
 
     # Plot ball marker
     if ball_marker is not None:
@@ -308,6 +327,7 @@ def plot_ck_snapshot(
                                 df,
                                 receiver_idx=receiver_idx,
                                 start_override=ball_marker,
+                                short_corner_ref_point=ball_holder_pos,
                             )
                             if start is not None and end is not None:
                                 fig.add_trace(go.Scatter(
@@ -378,6 +398,7 @@ def plot_ck_snapshot(
                             df,
                             receiver_idx=receiver_idx,
                             start_override=ball_marker,
+                            short_corner_ref_point=ball_holder_pos,
                         )
                         if start is not None and end is not None:
                             is_in = (swing == "in")
@@ -441,6 +462,7 @@ def plot_ck_snapshot(
                         df,
                         receiver_idx=receiver_idx,
                         start_override=ball_marker,
+                        short_corner_ref_point=ball_holder_pos,
                     )
                     if start is not None and end is not None:
                         is_in = (swing == "in")
@@ -619,7 +641,7 @@ def main():
         "Vector scale",
         min_value=0.05,
         max_value=3.0,
-        value=0.6,
+        value=0.72,
         step=0.01,
         help="Scale factor for velocity vectors",
     )
@@ -627,7 +649,7 @@ def main():
         "Max vector length (m)",
         min_value=1.0,
         max_value=15.0,
-        value=10.0,
+        value=12.0,
         step=0.5,
         help="Clip velocity arrows to this maximum length for readability.",
     )

@@ -468,6 +468,7 @@ def get_short_pass_arrow(
     receiver_idx: Optional[int] = None,
     short_corner_threshold_m: float = 8.0,
     start_override: Optional[Tuple[float, float]] = None,
+    short_corner_ref_point: Optional[Tuple[float, float]] = None,
 ) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
     """If this looks like a short corner, return a short pass arrow (start,end).
 
@@ -485,8 +486,12 @@ def get_short_pass_arrow(
     else:
         bx = float(ball_rows.iloc[0]["x"])
         by = float(ball_rows.iloc[0]["y"])
-    cx, cy = _nearest_corner(bx, by)
-    dist_to_corner = float(((bx - cx) ** 2 + (by - cy) ** 2) ** 0.5)
+    # Decide whether this is a "short corner" based on a reference point.
+    # (We may snap the displayed ball marker to the corner for clarity, but the
+    #  short-corner decision should be based on the actual ball-holder/kicker location.)
+    rx, ry = (bx, by) if (short_corner_ref_point is None) else (float(short_corner_ref_point[0]), float(short_corner_ref_point[1]))
+    cx, cy = _nearest_corner(rx, ry)
+    dist_to_corner = float(((rx - cx) ** 2 + (ry - cy) ** 2) ** 0.5)
     if dist_to_corner <= float(short_corner_threshold_m):
         return None, None
 
@@ -649,11 +654,14 @@ def get_emphasized_swing_arc_from_start(
     half_length = FIELD_LENGTH / 2
     goal_side = 1.0 if cx > 0 else -1.0
 
+    def _clamp(v: float, lo: float, hi: float) -> float:
+        return float(max(lo, min(hi, v)))
+
     # End point (toward/away from goal for clarity)
     if s == "in":
-        x2 = goal_side * (half_length - 2.0)   # closer to goal
+        x2 = goal_side * (half_length - 4.0)   # closer to goal
     else:
-        x2 = goal_side * (half_length - 22.0)  # farther from goal
+        x2 = goal_side * (half_length - 28.0)  # farther from goal
     y2 = 0.0
 
     # Cubic Bezier with two control points for a visibly "curvy" arc
@@ -666,8 +674,16 @@ def get_emphasized_swing_arc_from_start(
     # Control points placed near start/end in x, but with large lateral offset for curvature.
     p0 = np.array([bx, by], dtype=float)
     p3 = np.array([x2, y2], dtype=float)
-    p1 = np.array([bx + goal_side * 10.0, y_ctrl], dtype=float)
-    p2 = np.array([x2 - goal_side * 12.0, y_ctrl], dtype=float)
+    # Make x-controls very different from linear interpolation to create a clear "hook".
+    if s == "in":
+        p1x = bx - goal_side * 18.0
+        p2x = x2 + goal_side * 10.0
+    else:
+        p1x = bx - goal_side * 10.0
+        p2x = x2 - goal_side * 18.0
+
+    p1 = np.array([_clamp(p1x, -half_length, half_length), y_ctrl], dtype=float)
+    p2 = np.array([_clamp(p2x, -half_length, half_length), y_ctrl], dtype=float)
 
     t = np.linspace(0.0, 1.0, int(num_points))[:, None]
     one = (1.0 - t)
