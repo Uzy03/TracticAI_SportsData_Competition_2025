@@ -1,15 +1,5 @@
-# CVAE overfit test (1 sample) for quick sanity-check
-#
-# Usage:
-# 1) Build CK CVAE dataset (if not yet built):
-#    python scripts/build_cvae_ck_dataset.py --in-dir data/processed_ck --out-dir data/processed_ck
-# 2) Create mini-1 subset:
-#    python tools/make_mini_subset.py \
-#      --src data/processed_ck/cvae_ck_train/data.pickle \
-#      --dst data/processed_ck/cvae_ck_train/mini1.pickle \
-#      --n 1 --seed 42
-# 3) Train:
-#    python -m tacticai.train.train_cvae --config configs/cvae_ck_overfit1.yaml
+# CVAE overfit test (1 sample) for quick sanity-check (D2 disabled)
+# Uses pretrained multitask backbone checkpoints/receiver_shot/best_no_d2.ckpt (frozen)
 
 model:
   input_dim: 16
@@ -18,7 +8,6 @@ model:
   latent_dim: 32
   output_dim: 88
 
-  # Make it easier to overfit
   # Must match the multitask backbone architecture (receiver_shot)
   hidden_dim: 512
   num_layers: 3
@@ -44,7 +33,6 @@ train:
   log_every_n_steps: 10
 
 data:
-  # Overfit test: train/val/test all point to the same 1-sample pickle
   train_path: "data/processed_ck/cvae_ck_train/mini1.pickle"
   val_path: "data/processed_ck/cvae_ck_train/mini1.pickle"
   test_path: "data/processed_ck/cvae_ck_train/mini1.pickle"
@@ -57,20 +45,17 @@ loss:
   kl_weight: 1.0
 
 early_stopping:
-  # Keep it running; stopping is not useful for overfit sanity checks.
   patience: 10000
 
 device: "auto"
 seed: 42
 num_workers: 0
 log_level: "INFO"
-
-# Write under existing writable directories
 log_dir: "runs/cvae_overfit"
 checkpoint_dir: "checkpoints/cvae_overfit"
 
 d2:
-  enabled: true
+  enabled: false
 
 pretrained_backbone:
   enabled: true

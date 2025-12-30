@@ -4,9 +4,12 @@ This script trains a CVAE model to generate tactical formations in football matc
 """
 
 import argparse
+import logging
+import time
+from datetime import datetime
 import yaml
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -57,9 +60,47 @@ def create_model(config: Dict[str, Any], device: torch.device) -> nn.Module:
         num_layers=model_config["num_layers"],
         num_heads=model_config["num_heads"],
         dropout=model_config["dropout"],
+        edge_dim=int(model_config.get("edge_dim", 0)),
+        use_d2_equivariance=bool(config.get("d2", {}).get("enabled", False)),
+        freeze_backbone=bool(model_config.get("freeze_backbone", True)),
     )
-    
-    return model.to(device)
+
+    model = model.to(device)
+
+    # Load pretrained multitask backbone (receiver+shot) and freeze it
+    pt_cfg = config.get("pretrained_backbone", {}) or {}
+    if bool(pt_cfg.get("enabled", False)):
+        use_d2 = bool(config.get("d2", {}).get("enabled", False))
+        ckpt_dir = Path(pt_cfg.get("checkpoint_dir", "checkpoints/receiver_shot"))
+        ckpt_name = "best_d2.ckpt" if use_d2 else "best_no_d2.ckpt"
+        ckpt_path = ckpt_dir / ckpt_name
+        if not ckpt_path.exists():
+            raise FileNotFoundError(
+                f"Pretrained backbone checkpoint not found: {ckpt_path} "
+                f"(d2.enabled={use_d2})"
+            )
+
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        if "backbone_state_dict" in ckpt:
+            backbone_sd = ckpt["backbone_state_dict"]
+        elif "model_state_dict" in ckpt:
+            full_sd = ckpt["model_state_dict"]
+            backbone_sd = {}
+            prefix = "backbone."
+            for k, v in full_sd.items():
+                if k.startswith(prefix):
+                    backbone_sd[k[len(prefix):]] = v
+        else:
+            raise ValueError(
+                f"Checkpoint does not contain backbone_state_dict or model_state_dict: {ckpt_path}"
+            )
+
+        strict = bool(pt_cfg.get("strict", True))
+        model.backbone.load_state_dict(backbone_sd, strict=strict)
+        for p in model.backbone.parameters():
+            p.requires_grad = False
+
+    return model
 
 
 def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimizer:
@@ -128,6 +169,8 @@ def train_epoch(
     criterion: nn.Module,
     device: torch.device,
     use_amp: bool = False,
+    logger: Optional[logging.Logger] = None,
+    log_every_n_steps: int = 0,
 ) -> Dict[str, float]:
     """Train model for one epoch.
     
@@ -151,12 +194,15 @@ def train_epoch(
     scaler = torch.cuda.amp.GradScaler() if use_amp else None
     
     progress_bar = tqdm(dataloader, desc="Training")
+    last_log_t = time.monotonic()
     for batch_idx, (data, targets) in enumerate(progress_bar):
         # Move data to device
         data = {k: v.to(device) for k, v in data.items()}
         targets = targets.to(device)
         
         optimizer.zero_grad()
+
+        edge_attr = data.get("edge_attr", None)
         
         if use_amp and scaler is not None:
             with torch.cuda.amp.autocast():
@@ -164,7 +210,7 @@ def train_epoch(
                 x_gt = targets.view(batch_size, -1, 4)
                 outputs, mean, log_var = model(
                     data["x"], data["edge_index"], data["batch"],
-                    data["conditions"], x_gt=x_gt, training=True
+                    data["conditions"], x_gt=x_gt, edge_attr=edge_attr, training=True
                 )
                 
                 # Reshape targets to match outputs (flatten player positions)
@@ -184,7 +230,7 @@ def train_epoch(
             x_gt = targets.view(batch_size, -1, 4)
             outputs, mean, log_var = model(
                 data["x"], data["edge_index"], data["batch"],
-                data["conditions"], x_gt=x_gt, training=True
+                data["conditions"], x_gt=x_gt, edge_attr=edge_attr, training=True
             )
             
             # Reshape targets to match outputs (flatten player positions)
@@ -209,6 +255,20 @@ def train_epoch(
             "recon": f"{recon_loss.item():.4f}",
             "kl": f"{kl_loss.item():.4f}"
         })
+
+        # Periodic file logging during an epoch (helps when tail-ing logs)
+        if logger is not None and int(log_every_n_steps) > 0:
+            if (batch_idx + 1) % int(log_every_n_steps) == 0:
+                now = time.monotonic()
+                dt = now - last_log_t
+                last_log_t = now
+                logger.info(
+                    f"Train step {batch_idx+1}/{len(dataloader)} "
+                    f"loss={total_loss_batch.item():.4f} "
+                    f"recon={recon_loss.item():.4f} "
+                    f"kl={kl_loss.item():.4f} "
+                    f"({dt:.1f}s since last log)"
+                )
     
     epoch_metrics = {
         "loss": total_loss / len(dataloader),
@@ -248,9 +308,10 @@ def validate_epoch(
             data = {k: v.to(device) for k, v in data.items()}
             targets = targets.to(device)
             
+            edge_attr = data.get("edge_attr", None)
             outputs, mean, log_var = model(
                 data["x"], data["edge_index"], data["batch"],
-                data["conditions"], training=False
+                data["conditions"], edge_attr=edge_attr, training=False
             )
             
             # Reshape targets to match outputs (flatten player positions)
@@ -294,14 +355,22 @@ def main():
     # Setup device
     device = get_device(config.get("device", "auto"))
     
-    # Setup logging
+    # Setup logging (timestamped, like other tasks)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = Path(config.get("log_dir", "runs"))
+    if str(log_dir) == "runs":
+        log_dir = Path("runs") / "cvae"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_filename = f"training_{timestamp}.log"
     logger = setup_logging(
-        config.get("log_dir", "runs"),
-        config.get("log_level", "INFO")
+        log_dir,
+        config.get("log_level", "INFO"),
+        log_file=log_filename,
     )
     
     logger.info(f"Training CVAE model on {device}")
     logger.info(f"Configuration: {config}")
+    logger.info(f"Log file: {log_dir / log_filename}")
     
     # Create datasets
     if args.debug_overfit:
@@ -378,7 +447,9 @@ def main():
         # Training
         train_metrics = train_epoch(
             model, train_loader, optimizer, criterion, device,
-            use_amp=config.get("train", {}).get("amp", False)
+            use_amp=config.get("train", {}).get("amp", False),
+            logger=logger,
+            log_every_n_steps=int(config.get("train", {}).get("log_every_n_steps", 10)),
         )
         
         # Validation
@@ -414,7 +485,11 @@ def main():
         if val_metrics["loss"] < best_val_loss:
             best_val_loss = val_metrics["loss"]
             
-            checkpoint_path = Path(config.get("checkpoint_dir", "checkpoints")) / "cvae" / "best.ckpt"
+            ckpt_dir = Path(config.get("checkpoint_dir", "checkpoints"))
+            if str(ckpt_dir) == "checkpoints":
+                ckpt_dir = Path("checkpoints") / "cvae"
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            checkpoint_path = ckpt_dir / "best.ckpt"
             save_checkpoint(
                 model, optimizer, epoch, val_metrics["loss"], val_metrics,
                 checkpoint_path, scheduler
@@ -429,7 +504,7 @@ def main():
     logger.info(f"Training completed. Best validation loss: {best_val_loss:.4f}")
     
     # Save training history
-    history_path = Path(config.get("log_dir", "runs")) / "cvae_training_history.json"
+    history_path = log_dir / f"training_history_{timestamp}.json"
     save_training_history(
         {"train": train_history, "val": val_history},
         history_path

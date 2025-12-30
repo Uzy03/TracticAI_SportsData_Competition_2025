@@ -14,7 +14,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
-from tacticai.models.gatv2 import GATv2Network
+from tacticai.models.gatv2 import GATv2Network, GATv2Network4View
 
 
 @dataclass(frozen=True)
@@ -97,6 +97,9 @@ class CVAEGenerator(nn.Module):
         num_layers: int = 3,
         num_heads: int = 4,
         dropout: float = 0.2,
+        edge_dim: int = 0,
+        use_d2_equivariance: bool = False,
+        view_mixing: str = "attention",
         num_players: int = 22,
         freeze_backbone: bool = True,
     ):
@@ -105,16 +108,34 @@ class CVAEGenerator(nn.Module):
         self.condition_dim = int(condition_dim)
         self.latent_dim = int(latent_dim)
 
-        self.backbone = GATv2Network(
-            input_dim=input_dim,
-            hidden_dim=hidden_dim,
-            output_dim=hidden_dim,
-            num_layers=num_layers,
-            num_heads=num_heads,
-            dropout=dropout,
-            readout="mean",
-            residual=True,
-        )
+        # NOTE:
+        # - no_d2: GATv2Network (single view)
+        # - d2:    GATv2Network4View (D2 equivariant 4-view interaction)
+        if bool(use_d2_equivariance):
+            self.backbone = GATv2Network4View(
+                input_dim=input_dim,
+                hidden_dim=hidden_dim,
+                output_dim=hidden_dim,
+                num_layers=num_layers,
+                num_heads=num_heads,
+                dropout=dropout,
+                readout="mean",
+                residual=True,
+                view_mixing=view_mixing,
+                edge_feature_dim=int(edge_dim),
+            )
+        else:
+            self.backbone = GATv2Network(
+                input_dim=input_dim,
+                hidden_dim=hidden_dim,
+                output_dim=hidden_dim,
+                num_layers=num_layers,
+                num_heads=num_heads,
+                dropout=dropout,
+                readout="mean",
+                residual=True,
+                edge_feature_dim=int(edge_dim),
+            )
 
         self.posterior = NodePosterior(
             context_dim=hidden_dim,

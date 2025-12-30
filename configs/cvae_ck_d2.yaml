@@ -1,7 +1,7 @@
 # CVAE config for Corner Kick (processed_ck-based) guided generation
+# D2 enabled: uses pretrained multitask backbone checkpoints/receiver_shot/best_d2.ckpt (frozen)
 
 model:
-  # Node feature dim produced by ReceiverSchema for processed_ck samples in this repo
   input_dim: 16
   edge_dim: 10
 
@@ -12,8 +12,8 @@ model:
   condition_dim: 26
 
   latent_dim: 32
-  # 22 players * (x,y,vx,vy)
-  output_dim: 88
+  output_dim: 88  # 22 players * (x,y,vx,vy)
+
   # Must match the multitask backbone architecture (receiver_shot)
   hidden_dim: 512
   num_layers: 3
@@ -36,7 +36,6 @@ train:
   batch_size: 4
   epochs: 50
   amp: false
-  # Write progress to log during an epoch (helps when tail -f)
   log_every_n_steps: 10
 
 data:
@@ -61,7 +60,6 @@ log_level: "INFO"
 log_dir: "runs/cvae"
 checkpoint_dir: "checkpoints/cvae"
 
-# Use D2 backbone when enabled (auto-selects best_d2.ckpt / best_no_d2.ckpt accordingly)
 d2:
   enabled: true
 
