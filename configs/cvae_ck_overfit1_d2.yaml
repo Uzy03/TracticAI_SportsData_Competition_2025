@@ -51,8 +51,8 @@ device: "auto"
 seed: 42
 num_workers: 0
 log_level: "INFO"
-log_dir: "runs/cvae_overfit"
-checkpoint_dir: "checkpoints/cvae_overfit"
+log_dir: "runs/cvae_overfit_d2"
+checkpoint_dir: "checkpoints/cvae_overfit_d2"
 
 d2:
   enabled: true

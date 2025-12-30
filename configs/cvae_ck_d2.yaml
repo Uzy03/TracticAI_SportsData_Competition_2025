@@ -57,8 +57,8 @@ device: "auto"
 seed: 42
 num_workers: 0
 log_level: "INFO"
-log_dir: "runs/cvae"
-checkpoint_dir: "checkpoints/cvae"
+log_dir: "runs/cvae_d2"
+checkpoint_dir: "checkpoints/cvae_d2"
 
 d2:
   enabled: true
