@@ -61,8 +61,8 @@ seed: 42
 num_workers: 0
 log_level: "INFO"
 
-# Separate dirs so it doesn't overwrite real runs
-log_dir: "runs_overfit"
-checkpoint_dir: "checkpoints_overfit"
+# Write under existing writable directories
+log_dir: "runs/cvae_overfit"
+checkpoint_dir: "checkpoints/cvae_overfit"
 
 
