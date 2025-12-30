@@ -304,7 +304,7 @@ def plot_ck_snapshot(
                                 y=arc_y,
                                 mode='lines',
                                 line=dict(color=arc_color, width=4, dash='solid' if is_in else 'dash'),
-                                name="Swing (emphasized)",
+                                name="Swing",
                             ))
                             fig.add_annotation(
                                 x=float(arc_x[-1]),
@@ -335,7 +335,7 @@ def plot_ck_snapshot(
                                     y=[start[1], end[1]],
                                     mode='lines',
                                     line=dict(color=arc_color, width=3, dash=('solid' if is_in else 'dash')),
-                                    name='Short pass',
+                                    name='Swing',
                                 ))
                                 fig.add_annotation(
                                     x=end[0],
@@ -376,7 +376,7 @@ def plot_ck_snapshot(
                                 width=3,
                                 dash='solid' if is_in else 'dash',
                             ),
-                            name=f"{'In' if is_in else 'Out'}-swing",
+                            name="Swing",
                         ))
                         fig.add_annotation(
                             x=float(arc_x[-1]),
@@ -408,7 +408,7 @@ def plot_ck_snapshot(
                                 y=[start[1], end[1]],
                                 mode='lines',
                                 line=dict(color=arc_color, width=3, dash=('solid' if is_in else 'dash')),
-                                name='Short pass',
+                                name="Swing",
                             ))
                             fig.add_annotation(
                                 x=end[0],
@@ -440,7 +440,7 @@ def plot_ck_snapshot(
                             width=3,
                             dash='solid' if is_in else 'dash',
                         ),
-                        name=f"{'In' if is_in else 'Out'}-swing",
+                        name="Swing",
                     ))
                     fig.add_annotation(
                         x=float(arc_x[-1]),
@@ -472,7 +472,7 @@ def plot_ck_snapshot(
                             y=[start[1], end[1]],
                             mode='lines',
                             line=dict(color=arc_color, width=3, dash=('solid' if is_in else 'dash')),
-                            name='Short pass',
+                            name="Swing",
                         ))
                         fig.add_annotation(
                             x=end[0],
