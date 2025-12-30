@@ -1,0 +1,68 @@
+# CVAE overfit test (1 sample) for quick sanity-check
+#
+# Usage:
+# 1) Build CK CVAE dataset (if not yet built):
+#    python scripts/build_cvae_ck_dataset.py --in-dir data/processed_ck --out-dir data/processed_ck
+# 2) Create mini-1 subset:
+#    python tools/make_mini_subset.py \
+#      --src data/processed_ck/cvae_ck_train/data.pickle \
+#      --dst data/processed_ck/cvae_ck_train/mini1.pickle \
+#      --n 1 --seed 42
+# 3) Train:
+#    python -m tacticai.train.train_cvae --config configs/cvae_ck_overfit1.yaml
+
+model:
+  input_dim: 16
+  condition_dim: 26
+  latent_dim: 32
+  output_dim: 88
+
+  # Make it easier to overfit
+  hidden_dim: 128
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.0
+
+optimizer:
+  type: "adam"
+  lr: 0.001
+  weight_decay: 0.0
+
+scheduler:
+  type: "cosine"
+  T_max: 300
+  eta_min: 0.000001
+  warmup_epochs: 0
+
+train:
+  batch_size: 1
+  epochs: 300
+  amp: false
+
+data:
+  # Overfit test: train/val/test all point to the same 1-sample pickle
+  train_path: "data/processed_ck/cvae_ck_train/mini1.pickle"
+  val_path: "data/processed_ck/cvae_ck_train/mini1.pickle"
+  test_path: "data/processed_ck/cvae_ck_train/mini1.pickle"
+  format: "pickle"
+
+loss:
+  recon_type: "mse"
+  recon_weight: 1.0
+  beta: 1.0
+  kl_weight: 1.0
+
+early_stopping:
+  # Keep it running; stopping is not useful for overfit sanity checks.
+  patience: 10000
+
+device: "auto"
+seed: 42
+num_workers: 0
+log_level: "INFO"
+
+# Separate dirs so it doesn't overwrite real runs
+log_dir: "runs_overfit"
+checkpoint_dir: "checkpoints_overfit"
+
+
