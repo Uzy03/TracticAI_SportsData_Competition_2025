@@ -224,8 +224,11 @@ def load_raw_sample_data(
     # Extract data from sample
     x = np.array(sample.get("x", []))
     y = np.array(sample.get("y", []))
+    x_raw = x.copy()
+    y_raw = y.copy()
     team = np.array(sample.get("team", []))
     ball = np.array(sample.get("ball", []))
+    mask = np.array(sample.get("mask", []))
     # Some samples may not have an explicit ball flag. Use kicker position as proxy.
     if (ball.size > 0) and (ball.sum() == 0) and ("kicker_idx" in sample) and (sample["kicker_idx"] is not None):
         try:
@@ -241,7 +244,10 @@ def load_raw_sample_data(
     vy = np.array(sample.get("vy", [0.0] * len(y)))
     
     # Ensure all arrays have the same length
-    min_len = min(len(x), len(y), len(team), len(ball))
+    lengths = [len(x), len(y), len(team), len(ball)]
+    if mask.size > 0:
+        lengths.append(len(mask))
+    min_len = min(lengths) if lengths else 0
     if len(vx) < min_len:
         vx = np.pad(vx, (0, min_len - len(vx)), mode='constant')
     if len(vy) < min_len:
@@ -249,10 +255,16 @@ def load_raw_sample_data(
     
     x = x[:min_len]
     y = y[:min_len]
+    x_raw = x_raw[:min_len]
+    y_raw = y_raw[:min_len]
     team = team[:min_len]
     ball = ball[:min_len]
     vx = vx[:min_len]
     vy = vy[:min_len]
+    if mask.size > 0:
+        mask = mask[:min_len]
+    else:
+        mask = np.ones(min_len, dtype=float)
     
     # Heuristic: many preprocessors store positions normalized to [0, 1] (or slightly beyond).
     # Plotly field is drawn in meters with origin at center, so convert if values look normalized.
@@ -263,7 +275,9 @@ def load_raw_sample_data(
         # Typical ranges we observed in this project: ~0.3..1.0 (sometimes slightly >1)
         return (a.min() >= -0.5) and (a.max() <= 1.5)
 
+    normalized = False
     if _looks_normalized(x) and _looks_normalized(y):
+        normalized = True
         # Convert normalized [0,1] -> meters centered at (0,0)
         x = (x - 0.5) * FIELD_LENGTH
         y = (y - 0.5) * FIELD_WIDTH
@@ -273,14 +287,27 @@ def load_raw_sample_data(
 
     # Some preprocess pipelines pad/mask a missing player by placing them exactly at a corner.
     # In this dataset, we observed a frequent dummy at (-FIELD_LENGTH/2, -FIELD_WIDTH/2).
+    # Also, we observed a center placeholder at normalized (0.5,0.5) -> meters (0,0).
     # Keep the row (to preserve indices) but mark it so visualization can ignore it.
-    is_dummy = (
+    is_corner_dummy = (
         np.isclose(x, -FIELD_LENGTH / 2, atol=1e-9)
         & np.isclose(y, -FIELD_WIDTH / 2, atol=1e-9)
         & np.isclose(vx, 0.0, atol=1e-6)
         & np.isclose(vy, 0.0, atol=1e-6)
         & (ball.astype(float) < 0.5)
     )
+    is_center_dummy = np.zeros(min_len, dtype=bool)
+    if normalized:
+        is_center_dummy = (
+            np.isclose(x_raw, 0.5, atol=1e-9)
+            & np.isclose(y_raw, 0.5, atol=1e-9)
+            & np.isclose(vx, 0.0, atol=1e-6)
+            & np.isclose(vy, 0.0, atol=1e-6)
+            & (ball.astype(float) < 0.5)
+        )
+
+    is_masked_out = (mask.astype(float) < 0.5)
+    is_dummy = is_corner_dummy | is_center_dummy | is_masked_out
 
     # Create DataFrame
     df = pd.DataFrame({
@@ -292,6 +319,7 @@ def load_raw_sample_data(
         'vx': vx,
         'vy': vy,
         'ball': ball.astype(float),
+        'mask': mask.astype(float),
         'is_dummy': is_dummy.astype(bool),
     })
 
