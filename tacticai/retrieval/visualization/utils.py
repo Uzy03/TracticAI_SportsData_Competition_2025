@@ -592,3 +592,52 @@ def infer_swing_from_ball_trajectory(x: np.ndarray, y: np.ndarray) -> str:
         return "in" if y_end < y_start else "out"
     return "in" if y_end > y_start else "out"
 
+
+def get_emphasized_swing_arc_from_start(
+    start_x: float,
+    start_y: float,
+    swing: str,
+    num_points: int = 40,
+    short_corner_threshold_m: float = 8.0,
+    delta_m: float = 18.0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Create a visually emphasized swing arc from a start position.
+
+    This is meant for *visual clarity*, not physical accuracy.
+    - in-swing: bends more toward the goal and toward the pitch centerline
+    - out-swing: bends away from the goal and toward the sideline
+    """
+    s = (swing or "in").lower()
+    if s not in {"in", "out"}:
+        return np.array([]), np.array([])
+
+    bx = float(start_x)
+    by = float(start_y)
+    cx, cy = _nearest_corner(bx, by)
+    dist_to_corner = float(((bx - cx) ** 2 + (by - cy) ** 2) ** 0.5)
+    if dist_to_corner > float(short_corner_threshold_m):
+        return np.array([]), np.array([])
+
+    half_length = FIELD_LENGTH / 2
+    goal_side = 1.0 if cx > 0 else -1.0
+
+    # End point (toward/away from goal for clarity)
+    if s == "in":
+        x2 = goal_side * (half_length - 6.0)   # closer to goal
+    else:
+        x2 = goal_side * (half_length - 16.0)  # farther from goal
+    y2 = 0.0
+
+    # Control point: strong lateral curvature
+    x1 = goal_side * (half_length - 8.0)
+    sgn = 1.0 if cy >= 0 else -1.0
+    if s == "in":
+        y1 = cy - sgn * float(delta_m)  # toward centerline
+    else:
+        y1 = cy + sgn * float(delta_m)  # toward sideline
+
+    t = np.linspace(0.0, 1.0, int(num_points))
+    x = (1 - t) ** 2 * bx + 2 * (1 - t) * t * x1 + t**2 * x2
+    y = (1 - t) ** 2 * by + 2 * (1 - t) * t * y1 + t**2 * y2
+    return x, y
+

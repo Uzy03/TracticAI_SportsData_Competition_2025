@@ -36,6 +36,10 @@ try:
     from .utils import load_ball_trajectory_from_tracking, infer_swing_from_ball_trajectory
 except ImportError:
     from tacticai.retrieval.visualization.utils import load_ball_trajectory_from_tracking, infer_swing_from_ball_trajectory
+try:
+    from .utils import get_emphasized_swing_arc_from_start
+except ImportError:
+    from tacticai.retrieval.visualization.utils import get_emphasized_swing_arc_from_start
 
 
 def _get_raw_sample(dataset: Any, idx: int) -> Dict[str, Any]:
@@ -104,12 +108,15 @@ def plot_ck_snapshot(
     show_vectors: bool = True,
     vector_scale: float = 0.5,
     max_vector_len: float = 6.0,
+    vector_offset_m: float = 1.0,
     show_ids: bool = False,
     show_ball_arc: bool = True,
     swing_mode: str = "auto",
     trajectory_source: str = "stylized",
     soccerdata_dir: str = "SoccerData",
     traj_window_frames: int = 120,
+    emphasize_swing: bool = True,
+    show_raw_tracking: bool = False,
     receiver_idx: Optional[int] = None,
 ) -> go.Figure:
     """Plot a single CK snapshot on the soccer field.
@@ -250,28 +257,71 @@ def plot_ck_snapshot(
                     swing = infer_swing_from_ball_trajectory(traj_x, traj_y)
                     is_in = (swing == "in")
                     arc_color = 'deepskyblue' if is_in else 'orange'
-                    fig.add_trace(go.Scatter(
-                        x=traj_x,
-                        y=traj_y,
-                        mode='lines',
-                        line=dict(color=arc_color, width=3, dash='solid' if is_in else 'dash'),
-                        name="Ball trajectory",
-                    ))
-                    fig.add_annotation(
-                        x=float(traj_x[-1]),
-                        y=float(traj_y[-1]),
-                        ax=float(traj_x[-2]),
-                        ay=float(traj_y[-2]),
-                        xref="x",
-                        yref="y",
-                        axref="x",
-                        ayref="y",
-                        showarrow=True,
-                        arrowhead=3,
-                        arrowsize=1.8,
-                        arrowwidth=2,
-                        arrowcolor=arc_color,
-                    )
+                    # For clarity, optionally show a stylized emphasized arc regardless of raw trajectory shape.
+                    if emphasize_swing:
+                        arc_x, arc_y = get_emphasized_swing_arc_from_start(
+                            start_x=float(traj_x[0]),
+                            start_y=float(traj_y[0]),
+                            swing=swing,
+                        )
+                        if len(arc_x) > 1:
+                            fig.add_trace(go.Scatter(
+                                x=arc_x,
+                                y=arc_y,
+                                mode='lines',
+                                line=dict(color=arc_color, width=4, dash='solid' if is_in else 'dash'),
+                                name="Swing (emphasized)",
+                            ))
+                            fig.add_annotation(
+                                x=float(arc_x[-1]),
+                                y=float(arc_y[-1]),
+                                ax=float(arc_x[-2]),
+                                ay=float(arc_y[-2]),
+                                xref="x",
+                                yref="y",
+                                axref="x",
+                                ayref="y",
+                                showarrow=True,
+                                arrowhead=3,
+                                arrowsize=2.0,
+                                arrowwidth=3,
+                                arrowcolor=arc_color,
+                            )
+                        else:
+                            # likely short corner -> fall back to short pass arrow
+                            start, end = get_short_pass_arrow(df, receiver_idx=receiver_idx)
+                            if start is not None and end is not None:
+                                fig.add_trace(go.Scatter(
+                                    x=[start[0], end[0]],
+                                    y=[start[1], end[1]],
+                                    mode='lines',
+                                    line=dict(color=arc_color, width=3, dash=('solid' if is_in else 'dash')),
+                                    name='Short pass',
+                                ))
+                                fig.add_annotation(
+                                    x=end[0],
+                                    y=end[1],
+                                    ax=start[0],
+                                    ay=start[1],
+                                    xref="x",
+                                    yref="y",
+                                    axref="x",
+                                    ayref="y",
+                                    showarrow=True,
+                                    arrowhead=3,
+                                    arrowsize=1.6,
+                                    arrowwidth=2,
+                                    arrowcolor=arc_color,
+                                )
+                    if show_raw_tracking:
+                        fig.add_trace(go.Scatter(
+                            x=traj_x,
+                            y=traj_y,
+                            mode='lines',
+                            line=dict(color='rgba(255,255,255,0.45)', width=2, dash='dot'),
+                            name="Ball trajectory (raw)",
+                            showlegend=False,
+                        ))
                 else:
                     # Fallback to stylized arc + short-pass arrow if tracking not available
                     arc_x, arc_y, swing = get_ball_swing_arc(df, mode=swing_mode)
@@ -404,19 +454,27 @@ def plot_ck_snapshot(
                         scale = float(max_vector_len) / norm
                         dx *= scale
                         dy *= scale
+                    # Offset arrow base so it doesn't overlap the player marker
+                    if norm > 1e-9:
+                        ux = dx / norm
+                        uy = dy / norm
+                        off = min(float(vector_offset_m), max(0.0, norm - 0.2))
+                    else:
+                        ux = uy = 0.0
+                        off = 0.0
                     fig.add_annotation(
                         x=float(row['x']) + dx,
                         y=float(row['y']) + dy,
-                        ax=row['x'],
-                        ay=row['y'],
+                        ax=float(row['x']) + ux * off,
+                        ay=float(row['y']) + uy * off,
                         xref="x",
                         yref="y",
                         axref="x",
                         ayref="y",
                         showarrow=True,
                         arrowhead=2,
-                        arrowsize=1.2,
-                        arrowwidth=1,
+                        arrowsize=1.4,
+                        arrowwidth=2,
                         arrowcolor="red",
                     )
         
@@ -431,19 +489,26 @@ def plot_ck_snapshot(
                         scale = float(max_vector_len) / norm
                         dx *= scale
                         dy *= scale
+                    if norm > 1e-9:
+                        ux = dx / norm
+                        uy = dy / norm
+                        off = min(float(vector_offset_m), max(0.0, norm - 0.2))
+                    else:
+                        ux = uy = 0.0
+                        off = 0.0
                     fig.add_annotation(
                         x=float(row['x']) + dx,
                         y=float(row['y']) + dy,
-                        ax=row['x'],
-                        ay=row['y'],
+                        ax=float(row['x']) + ux * off,
+                        ay=float(row['y']) + uy * off,
                         xref="x",
                         yref="y",
                         axref="x",
                         ayref="y",
                         showarrow=True,
                         arrowhead=2,
-                        arrowsize=1.2,
-                        arrowwidth=1,
+                        arrowsize=1.4,
+                        arrowwidth=2,
                         arrowcolor="blue",
                     )
     
@@ -515,9 +580,9 @@ def main():
     show_vectors = st.sidebar.checkbox("Show velocity vectors", value=True)
     vector_scale = st.sidebar.slider(
         "Vector scale",
-        min_value=0.02,
-        max_value=1.5,
-        value=0.25,
+        min_value=0.05,
+        max_value=3.0,
+        value=0.6,
         step=0.01,
         help="Scale factor for velocity vectors",
     )
@@ -525,9 +590,17 @@ def main():
         "Max vector length (m)",
         min_value=1.0,
         max_value=15.0,
-        value=6.0,
+        value=10.0,
         step=0.5,
         help="Clip velocity arrows to this maximum length for readability.",
+    )
+    vector_offset_m = st.sidebar.slider(
+        "Vector base offset (m)",
+        min_value=0.0,
+        max_value=3.0,
+        value=1.2,
+        step=0.1,
+        help="Shift arrow start away from the player marker to reduce overlap.",
     )
     show_ids = st.sidebar.checkbox("Show player IDs", value=False)
 
@@ -538,6 +611,16 @@ def main():
         options=["tracking", "stylized"],
         index=0,
         help="tracking: draw real ball trajectory from SoccerData tracking.csv (if available). stylized: draw a heuristic arc.",
+    )
+    emphasize_swing = st.sidebar.checkbox(
+        "Emphasize swing (easy to see)",
+        value=True,
+        help="When enabled, draws a clearly curved in/out arc for quick recognition (even if the real trajectory is subtle).",
+    )
+    show_raw_tracking = st.sidebar.checkbox(
+        "Show raw tracking trajectory (thin)",
+        value=False,
+        help="Overlay the real tracking trajectory as a thin dotted line (for reference).",
     )
     soccerdata_dir = st.sidebar.text_input(
         "SoccerData directory",
@@ -638,12 +721,15 @@ def main():
             show_vectors=show_vectors,
             vector_scale=vector_scale,
             max_vector_len=max_vector_len,
+            vector_offset_m=vector_offset_m,
             show_ids=show_ids,
             show_ball_arc=show_ball_arc,
             swing_mode=swing_mode,
             trajectory_source=trajectory_source,
             soccerdata_dir=soccerdata_dir,
             traj_window_frames=int(traj_window_frames),
+            emphasize_swing=emphasize_swing,
+            show_raw_tracking=show_raw_tracking,
             receiver_idx=int(query_target.item()),
         )
         st.plotly_chart(query_fig, use_container_width=True)
@@ -695,12 +781,15 @@ def main():
                                     show_vectors=show_vectors,
                                     vector_scale=vector_scale,
                                     max_vector_len=max_vector_len,
+                                    vector_offset_m=vector_offset_m,
                                     show_ids=show_ids,
                                     show_ball_arc=show_ball_arc,
                                     swing_mode=swing_mode,
                                     trajectory_source=trajectory_source,
                                     soccerdata_dir=soccerdata_dir,
                                     traj_window_frames=int(traj_window_frames),
+                                    emphasize_swing=emphasize_swing,
+                                    show_raw_tracking=show_raw_tracking,
                                     receiver_idx=int(similar_target.item()),
                                 )
                                 st.plotly_chart(similar_fig, use_container_width=True)
