@@ -225,7 +225,7 @@ def plot_ck_snapshot(
     ball_marker = None
     traj_x = traj_y = np.array([])
     swing = None
-        if show_ball_arc and (trajectory_source or "stylized").lower() == "tracking":
+    if show_ball_arc and (trajectory_source or "stylized").lower() == "tracking":
         try:
             match_id = str(df["match_id"].iloc[0]) if "match_id" in df.columns else None
             frame = int(df["frame"].iloc[0]) if "frame" in df.columns else None
@@ -236,7 +236,7 @@ def plot_ck_snapshot(
                 match_id=match_id,
                 frame=frame,
                 soccerdata_dir=soccerdata_dir,
-                    lookback_frames=300,
+                lookback_frames=300,
                 window_frames=traj_window_frames,
             )
         if len(traj_x) > 0:
