@@ -109,6 +109,7 @@ def plot_ck_snapshot(
     vector_scale: float = 0.5,
     max_vector_len: float = 6.0,
     vector_offset_m: float = 1.0,
+    min_vector_len: float = 0.0,
     show_ids: bool = False,
     show_ball_arc: bool = True,
     swing_mode: str = "auto",
@@ -117,6 +118,7 @@ def plot_ck_snapshot(
     traj_window_frames: int = 120,
     emphasize_swing: bool = True,
     show_raw_tracking: bool = False,
+    swing_curvature_m: float = 30.0,
     receiver_idx: Optional[int] = None,
 ) -> go.Figure:
     """Plot a single CK snapshot on the soccer field.
@@ -217,11 +219,37 @@ def plot_ck_snapshot(
             texttemplate='%{text}' if show_ids else None,
         ))
     
-    # Plot ball
-    if len(ball_data) > 0:
+    # Compute ball marker position.
+    # NOTE: In processed data, ball==1 is often "ball holder player", not true ball location.
+    # When using tracking, prefer the tracking start position as the ball marker.
+    ball_marker = None
+    traj_x = traj_y = np.array([])
+    swing = None
+    if show_ball_arc and (trajectory_source or "stylized").lower() == "tracking":
+        try:
+            match_id = str(df["match_id"].iloc[0]) if "match_id" in df.columns else None
+            frame = int(df["frame"].iloc[0]) if "frame" in df.columns else None
+        except Exception:
+            match_id, frame = None, None
+        if match_id is not None and frame is not None:
+            traj_x, traj_y = load_ball_trajectory_from_tracking(
+                match_id=match_id,
+                frame=frame,
+                soccerdata_dir=soccerdata_dir,
+                window_frames=traj_window_frames,
+            )
+        if len(traj_x) > 0:
+            ball_marker = (float(traj_x[0]), float(traj_y[0]))
+            swing = infer_swing_from_ball_trajectory(traj_x, traj_y) if len(traj_x) > 1 else None
+
+    if ball_marker is None and len(ball_data) > 0:
+        ball_marker = (float(ball_data.iloc[0]["x"]), float(ball_data.iloc[0]["y"]))
+
+    # Plot ball marker
+    if ball_marker is not None:
         fig.add_trace(go.Scatter(
-            x=ball_data['x'],
-            y=ball_data['y'],
+            x=[ball_marker[0]],
+            y=[ball_marker[1]],
             mode='markers',
             marker=dict(
                 size=15,
@@ -239,30 +267,16 @@ def plot_ck_snapshot(
         if show_ball_arc:
             if (trajectory_source or "stylized").lower() == "tracking":
                 # Use real ball trajectory from SoccerData tracking.csv
-                try:
-                    match_id = str(df["match_id"].iloc[0]) if "match_id" in df.columns else None
-                    frame = int(df["frame"].iloc[0]) if "frame" in df.columns else None
-                except Exception:
-                    match_id, frame = None, None
-
-                traj_x = traj_y = np.array([])
-                if match_id is not None and frame is not None:
-                    traj_x, traj_y = load_ball_trajectory_from_tracking(
-                        match_id=match_id,
-                        frame=frame,
-                        soccerdata_dir=soccerdata_dir,
-                        window_frames=traj_window_frames,
-                    )
                 if len(traj_x) > 1:
-                    swing = infer_swing_from_ball_trajectory(traj_x, traj_y)
                     is_in = (swing == "in")
                     arc_color = 'deepskyblue' if is_in else 'orange'
                     # For clarity, optionally show a stylized emphasized arc regardless of raw trajectory shape.
                     if emphasize_swing:
                         arc_x, arc_y = get_emphasized_swing_arc_from_start(
-                            start_x=float(traj_x[0]),
-                            start_y=float(traj_y[0]),
+                            start_x=float(ball_marker[0]),
+                            start_y=float(ball_marker[1]),
                             swing=swing,
+                            delta_m=float(swing_curvature_m),
                         )
                         if len(arc_x) > 1:
                             fig.add_trace(go.Scatter(
@@ -289,7 +303,11 @@ def plot_ck_snapshot(
                             )
                         else:
                             # likely short corner -> fall back to short pass arrow
-                            start, end = get_short_pass_arrow(df, receiver_idx=receiver_idx)
+                            start, end = get_short_pass_arrow(
+                                df,
+                                receiver_idx=receiver_idx,
+                                start_override=ball_marker,
+                            )
                             if start is not None and end is not None:
                                 fig.add_trace(go.Scatter(
                                     x=[start[0], end[0]],
@@ -355,7 +373,11 @@ def plot_ck_snapshot(
                             arrowcolor=arc_color,
                         )
                     else:
-                        start, end = get_short_pass_arrow(df, receiver_idx=receiver_idx)
+                        start, end = get_short_pass_arrow(
+                            df,
+                            receiver_idx=receiver_idx,
+                            start_override=ball_marker,
+                        )
                         if start is not None and end is not None:
                             is_in = (swing == "in")
                             arc_color = 'deepskyblue' if is_in else 'orange'
@@ -414,7 +436,11 @@ def plot_ck_snapshot(
                         arrowcolor=arc_color,
                     )
                 else:
-                    start, end = get_short_pass_arrow(df, receiver_idx=receiver_idx)
+                    start, end = get_short_pass_arrow(
+                        df,
+                        receiver_idx=receiver_idx,
+                        start_override=ball_marker,
+                    )
                     if start is not None and end is not None:
                         is_in = (swing == "in")
                         arc_color = 'deepskyblue' if is_in else 'orange'
@@ -446,10 +472,15 @@ def plot_ck_snapshot(
         # Attacking team vectors
         if len(attacking) > 0:
             for idx, row in attacking.iterrows():
-                if abs(row['vx']) > 0.01 or abs(row['vy']) > 0.01:  # Only show if significant
+                if abs(row['vx']) > 0.001 or abs(row['vy']) > 0.001:  # show more often
                     dx = float(row['vx']) * float(vector_scale)
                     dy = float(row['vy']) * float(vector_scale)
                     norm = (dx * dx + dy * dy) ** 0.5
+                    if norm < float(min_vector_len) and norm > 1e-9:
+                        up = float(min_vector_len) / norm
+                        dx *= up
+                        dy *= up
+                        norm = float(min_vector_len)
                     if norm > float(max_vector_len) and norm > 1e-9:
                         scale = float(max_vector_len) / norm
                         dx *= scale
@@ -481,10 +512,15 @@ def plot_ck_snapshot(
         # Defending team vectors
         if len(defending) > 0:
             for idx, row in defending.iterrows():
-                if abs(row['vx']) > 0.01 or abs(row['vy']) > 0.01:
+                if abs(row['vx']) > 0.001 or abs(row['vy']) > 0.001:
                     dx = float(row['vx']) * float(vector_scale)
                     dy = float(row['vy']) * float(vector_scale)
                     norm = (dx * dx + dy * dy) ** 0.5
+                    if norm < float(min_vector_len) and norm > 1e-9:
+                        up = float(min_vector_len) / norm
+                        dx *= up
+                        dy *= up
+                        norm = float(min_vector_len)
                     if norm > float(max_vector_len) and norm > 1e-9:
                         scale = float(max_vector_len) / norm
                         dx *= scale
@@ -594,6 +630,14 @@ def main():
         step=0.5,
         help="Clip velocity arrows to this maximum length for readability.",
     )
+    min_vector_len = st.sidebar.slider(
+        "Min vector length (m)",
+        min_value=0.0,
+        max_value=6.0,
+        value=2.0,
+        step=0.5,
+        help="If non-zero, scales up small vectors so arrows are visible (for visualization clarity).",
+    )
     vector_offset_m = st.sidebar.slider(
         "Vector base offset (m)",
         min_value=0.0,
@@ -616,6 +660,14 @@ def main():
         "Emphasize swing (easy to see)",
         value=True,
         help="When enabled, draws a clearly curved in/out arc for quick recognition (even if the real trajectory is subtle).",
+    )
+    swing_curvature_m = st.sidebar.slider(
+        "Swing curvature (m)",
+        min_value=10.0,
+        max_value=45.0,
+        value=30.0,
+        step=1.0,
+        help="Bigger value = more 'curvy' in/out swing arc (for easy recognition).",
     )
     show_raw_tracking = st.sidebar.checkbox(
         "Show raw tracking trajectory (thin)",
@@ -722,6 +774,7 @@ def main():
             vector_scale=vector_scale,
             max_vector_len=max_vector_len,
             vector_offset_m=vector_offset_m,
+            min_vector_len=min_vector_len,
             show_ids=show_ids,
             show_ball_arc=show_ball_arc,
             swing_mode=swing_mode,
@@ -730,6 +783,7 @@ def main():
             traj_window_frames=int(traj_window_frames),
             emphasize_swing=emphasize_swing,
             show_raw_tracking=show_raw_tracking,
+            swing_curvature_m=float(swing_curvature_m),
             receiver_idx=int(query_target.item()),
         )
         st.plotly_chart(query_fig, use_container_width=True)
@@ -782,6 +836,7 @@ def main():
                                     vector_scale=vector_scale,
                                     max_vector_len=max_vector_len,
                                     vector_offset_m=vector_offset_m,
+                                    min_vector_len=min_vector_len,
                                     show_ids=show_ids,
                                     show_ball_arc=show_ball_arc,
                                     swing_mode=swing_mode,
@@ -790,6 +845,7 @@ def main():
                                     traj_window_frames=int(traj_window_frames),
                                     emphasize_swing=emphasize_swing,
                                     show_raw_tracking=show_raw_tracking,
+                                    swing_curvature_m=float(swing_curvature_m),
                                     receiver_idx=int(similar_target.item()),
                                 )
                                 st.plotly_chart(similar_fig, use_container_width=True)

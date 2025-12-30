@@ -467,6 +467,7 @@ def get_short_pass_arrow(
     df: pd.DataFrame,
     receiver_idx: Optional[int] = None,
     short_corner_threshold_m: float = 8.0,
+    start_override: Optional[Tuple[float, float]] = None,
 ) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
     """If this looks like a short corner, return a short pass arrow (start,end).
 
@@ -474,12 +475,16 @@ def get_short_pass_arrow(
     - End: receiver_idx if provided; otherwise nearest same-team player (excluding kicker)
     """
     ball_rows = df[df["ball"] > 0.5]
-    if len(ball_rows) == 0:
+    if (start_override is None) and (len(ball_rows) == 0):
         return None, None
 
     # Kicker/ball position
-    bx = float(ball_rows.iloc[0]["x"])
-    by = float(ball_rows.iloc[0]["y"])
+    if start_override is not None:
+        bx = float(start_override[0])
+        by = float(start_override[1])
+    else:
+        bx = float(ball_rows.iloc[0]["x"])
+        by = float(ball_rows.iloc[0]["y"])
     cx, cy = _nearest_corner(bx, by)
     dist_to_corner = float(((bx - cx) ** 2 + (by - cy) ** 2) ** 0.5)
     if dist_to_corner <= float(short_corner_threshold_m):
@@ -504,7 +509,7 @@ def get_short_pass_arrow(
             pass
 
     # Fallback: nearest same-team player (exclude kicker)
-    kicker_team = int(ball_rows.iloc[0]["team_id"]) if "team_id" in df.columns else 0
+    kicker_team = int(ball_rows.iloc[0]["team_id"]) if (len(ball_rows) > 0 and "team_id" in df.columns) else 0
     kicker_pos = np.array([bx, by], dtype=float)
 
     candidates = df[df["team_id"] == kicker_team].copy() if "team_id" in df.columns else df.copy()
@@ -599,7 +604,7 @@ def get_emphasized_swing_arc_from_start(
     swing: str,
     num_points: int = 40,
     short_corner_threshold_m: float = 8.0,
-    delta_m: float = 18.0,
+    delta_m: float = 30.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Create a visually emphasized swing arc from a start position.
 
@@ -623,13 +628,13 @@ def get_emphasized_swing_arc_from_start(
 
     # End point (toward/away from goal for clarity)
     if s == "in":
-        x2 = goal_side * (half_length - 6.0)   # closer to goal
+        x2 = goal_side * (half_length - 2.0)   # closer to goal
     else:
-        x2 = goal_side * (half_length - 16.0)  # farther from goal
+        x2 = goal_side * (half_length - 22.0)  # farther from goal
     y2 = 0.0
 
     # Control point: strong lateral curvature
-    x1 = goal_side * (half_length - 8.0)
+    x1 = goal_side * (half_length - 10.0)
     sgn = 1.0 if cy >= 0 else -1.0
     if s == "in":
         y1 = cy - sgn * float(delta_m)  # toward centerline
