@@ -1,0 +1,974 @@
+"""Dataset classes for TacticAI tasks.
+
+This module provides PyTorch dataset classes for different TacticAI tasks
+including receiver prediction, shot prediction, and tactic generation.
+"""
+
+from abc import ABC, abstractmethod
+from typing import Dict, List, Optional, Union, Any, Tuple
+from pathlib import Path
+import torch
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+import pandas as pd
+import pickle
+from typing import Any
+
+from .schema import DataSchema, create_schema_mapping
+
+
+class TacticAIDataset(Dataset, ABC):
+    """Abstract base class for TacticAI datasets.
+    
+    Provides common functionality for all TacticAI dataset implementations.
+    """
+    
+    def __init__(
+        self,
+        data_path: Union[str, Path],
+        schema: DataSchema,
+        transform: Optional[Any] = None,
+        target_transform: Optional[Any] = None,
+        phase: str = "train",
+    ):
+        """Initialize TacticAI dataset.
+        
+        Args:
+            data_path: Path to data files
+            schema: Data schema for parsing
+            transform: Optional transform for input data
+            target_transform: Optional transform for target data
+        """
+        self.data_path = Path(data_path)
+        self.schema = schema
+        self.transform = transform
+        self.target_transform = target_transform
+        
+        # Load data
+        self.data = self._load_data()
+    
+    @abstractmethod
+    def _load_data(self) -> List[Dict[str, Any]]:
+        """Load data from files.
+        
+        Returns:
+            List of data samples
+        """
+        pass
+    
+    @abstractmethod
+    def __getitem__(self, idx: int) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+        """Get a single data sample.
+        
+        Args:
+            idx: Sample index
+            
+        Returns:
+            Tuple of (input_data, target)
+        """
+        pass
+    
+    def __len__(self) -> int:
+        """Get dataset length."""
+        return len(self.data)
+    
+    def _apply_transforms(
+        self, 
+        input_data: Dict[str, torch.Tensor], 
+        target: torch.Tensor
+    ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+        """Apply transforms to data.
+        
+        Args:
+            input_data: Input data dictionary
+            target: Target tensor
+            
+        Returns:
+            Transformed (input_data, target)
+        """
+        if self.transform is not None:
+            input_data = self.transform(input_data)
+        
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        
+        return input_data, target
+
+
+class ReceiverDataset(TacticAIDataset):
+    """Dataset for receiver prediction task.
+    
+    Loads and processes data for predicting pass receivers.
+    """
+    
+    def __init__(
+        self,
+        data_path: Union[str, Path],
+        schema: Optional[DataSchema] = None,
+        transform: Optional[Any] = None,
+        target_transform: Optional[Any] = None,
+        file_format: str = "parquet",
+        phase: str = "train",
+    ):
+        """Initialize receiver dataset.
+        
+        Args:
+            data_path: Path to data files
+            schema: Data schema (optional, will create default if None)
+            transform: Optional transform for input data
+            target_transform: Optional transform for target data
+            file_format: Data file format ('parquet', 'csv', 'pickle')
+        """
+        if schema is None:
+            schema = create_schema_mapping("receiver")
+        
+        self.file_format = file_format
+        phase_alias = {
+            "train": "train",
+            "training": "train",
+            "val": "val",
+            "valid": "val",
+            "validation": "val",
+            "eval": "val",
+            "test": "test",
+            "testing": "test",
+            "infer": "test",
+            "inference": "test",
+        }
+        phase_key = phase.lower() if isinstance(phase, str) else "train"
+        self.phase = phase_alias.get(phase_key, "train")
+        self.preprocess_versions: set[str] = set()
+        super().__init__(data_path, schema, transform, target_transform)
+        self.preprocess_version: Optional[str] = (
+            next(iter(self.preprocess_versions)) if len(self.preprocess_versions) == 1 else None
+        )
+
+    def _prepare_sample(self, sample: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize candidate information per sample and enforce target inclusion."""
+        if not isinstance(sample, dict):
+            return sample
+
+        sample = dict(sample)
+        team = sample.get("team")
+        ball = sample.get("ball")
+        mask = sample.get("mask")
+
+        if team is None or ball is None:
+            sample["valid"] = False
+            return sample
+
+        team_arr = np.asarray(team, dtype=np.int64)
+        ball_arr = np.asarray(ball, dtype=np.float32)
+        if team_arr.ndim != 1:
+            team_arr = team_arr.reshape(-1)
+        if ball_arr.ndim != 1:
+            ball_arr = ball_arr.reshape(-1)
+
+        num_nodes = team_arr.shape[0]
+        if ball_arr.shape[0] != num_nodes:
+            sample["valid"] = False
+            return sample
+
+        if mask is None:
+            mask_arr = np.ones(num_nodes, dtype=bool)
+        else:
+            mask_arr = np.asarray(mask)
+            if mask_arr.ndim != 1:
+                mask_arr = mask_arr.reshape(-1)
+            mask_arr = mask_arr.astype(bool)
+            if mask_arr.shape[0] != num_nodes:
+                sample["valid"] = False
+                return sample
+
+        kicker_idx = None
+        if ball_arr.sum() > 0:
+            kicker_idx = int(np.argmax(ball_arr))
+        elif "kicker_idx" in sample and sample["kicker_idx"] is not None:
+            kicker_idx = int(sample["kicker_idx"])
+        else:
+            valid_nodes = np.where(mask_arr)[0]
+            if valid_nodes.size > 0:
+                kicker_idx = int(valid_nodes[0])
+        if kicker_idx is None:
+            sample["valid"] = False
+            return sample
+        kicker_idx = max(0, min(kicker_idx, num_nodes - 1))
+        kicker_team = int(team_arr[kicker_idx])
+
+        target_idx_raw = sample.get("receiver_node_index")
+        if isinstance(target_idx_raw, float) and np.isnan(target_idx_raw):
+            target_idx_raw = None
+        if target_idx_raw is None:
+            fallback_id = sample.get("receiver_id")
+            if isinstance(fallback_id, (int, np.integer)) and 0 <= fallback_id < num_nodes:
+                target_idx_raw = int(fallback_id)
+        try:
+            target_idx = int(target_idx_raw) if target_idx_raw is not None else None
+        except (TypeError, ValueError):
+            target_idx = None
+
+        if target_idx is None or target_idx < 0 or target_idx >= num_nodes:
+            sample["valid"] = False
+            return sample
+
+        # Always apply team constraint to ensure consistency across train/val/test
+        # This ensures model is trained and evaluated on the same task: selecting from same-team candidates only
+        phase_with_team_constraint = True  # Changed: always True to maintain consistency
+        candidates: List[int] = []
+        for idx in range(num_nodes):
+            if not mask_arr[idx]:
+                continue
+            if ball_arr[idx] > 0.5:
+                continue
+            if phase_with_team_constraint and team_arr[idx] != kicker_team:
+                continue
+            candidates.append(idx)
+
+        if target_idx not in candidates:
+            candidates.append(target_idx)
+
+        if len(candidates) == 0:
+            sample["valid"] = False
+            return sample
+
+        cand_mask = np.zeros(num_nodes, dtype=bool)
+        cand_mask[candidates] = True
+
+        sample["team"] = team_arr
+        sample["ball"] = ball_arr
+        sample["mask"] = mask_arr.astype(np.float32)
+        sample["candidate_ids"] = [int(i) for i in candidates]
+        sample["cand_mask"] = cand_mask
+        sample["kicker_idx"] = int(kicker_idx)
+        sample["kicker_team"] = int(kicker_team)
+        sample["target_idx"] = int(target_idx)
+        sample["valid"] = True
+        return sample
+    
+    def _load_data(self) -> List[Dict[str, Any]]:
+        """Load receiver prediction data.
+        
+        Returns:
+            List of data samples
+        """
+        if self.data_path.is_file():
+            # Single file
+            return self._load_single_file(self.data_path)
+        else:
+            # Directory of files
+            data = []
+            pattern = f"*.{self.file_format}"
+            for file_path in self.data_path.glob(pattern):
+                data.extend(self._load_single_file(file_path))
+            return data
+    
+    def _load_single_file(self, file_path: Path) -> List[Dict[str, Any]]:
+        """Load a single data file.
+        
+        Args:
+            file_path: Path to data file
+            
+        Returns:
+            List of data samples
+        """
+        if self.file_format == "parquet":
+            df = pd.read_parquet(file_path)
+            return [df.iloc[[i]].to_dict('list') for i in range(len(df))]
+        elif self.file_format == "csv":
+            df = pd.read_csv(file_path)
+            return [df.iloc[[i]].to_dict('list') for i in range(len(df))]
+        elif self.file_format == "pickle":
+            with open(file_path, 'rb') as f:
+                data = pickle.load(f)
+                version = None
+                samples: List[Dict[str, Any]]
+                if isinstance(data, dict) and "samples" in data:
+                    version = data.get("preprocess_version") or data.get("version")
+                    samples = data.get("samples", [])
+                elif isinstance(data, list):
+                    samples = data
+                else:
+                    samples = [data]
+                if version is not None:
+                    self.preprocess_versions.add(version)
+                processed_samples: List[Dict[str, Any]] = []
+                for sample in samples:
+                    if isinstance(sample, dict):
+                        sample = self._prepare_sample(sample)
+                        if sample.get("valid", True):
+                            processed_samples.append(sample)
+                    else:
+                        processed_samples.append(sample)
+                return processed_samples
+        else:
+            raise ValueError(f"Unsupported file format: {self.file_format}")
+    
+    def __getitem__(self, idx: int) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+        """Get a single receiver prediction sample.
+        
+        Args:
+            idx: Sample index
+            
+        Returns:
+            Tuple of (input_data, receiver_target)
+        """
+        sample = self.data[idx]
+        
+        # Extract features using schema
+        # TacticAI paper baseline: Receiver task uses 7-dim node features and 1-dim edge features
+        # No global features for Receiver task (may be used in Shot/Guided generation tasks)
+        node_features = self.schema.get_node_features(sample)
+        edge_index = self.schema.get_edge_index(sample)
+        edge_attr = self.schema.get_edge_attributes(sample)  # TacticAI paper baseline: 1-dim (same_team only)
+        target = self.schema.get_targets(sample)
+        
+        # Create batch tensor (all nodes belong to same graph)
+        batch = torch.zeros(node_features.size(0), dtype=torch.long)
+        
+        input_data = {
+            "x": node_features,
+            "edge_index": edge_index,
+            "batch": batch,
+        }
+        
+        # Add edge_attr if available (TacticAI paper baseline: 1-dimensional edge features)
+        if edge_attr is not None:
+            input_data["edge_attr"] = edge_attr
+        
+        # Note: Receiver task does NOT use global_x (TacticAI paper baseline)
+        # global_x may be used in other tasks (Shot, Guided generation) but not in Receiver
+        
+        # Add mask, team, ball if available in sample
+        if isinstance(sample, dict):
+            if "mask" in sample:
+                mask = np.array(sample["mask"])
+                input_data["mask"] = torch.tensor(mask, dtype=torch.float32)
+            if "team" in sample:
+                team = np.array(sample["team"])
+                input_data["team"] = torch.tensor(team, dtype=torch.long)
+            if "ball" in sample:
+                ball = np.array(sample["ball"])
+                input_data["ball"] = torch.tensor(ball, dtype=torch.float32)
+            if "cand_mask" in sample:
+                cand_mask = np.array(sample["cand_mask"])
+                input_data["cand_mask"] = torch.tensor(cand_mask, dtype=torch.bool)
+        
+        # Apply transforms
+        input_data, target = self._apply_transforms(input_data, target)
+        
+        return input_data, target
+
+
+class ShotDataset(TacticAIDataset):
+    """Dataset for shot prediction task.
+    
+    Loads and processes data for predicting shot occurrence.
+    """
+    
+    def __init__(
+        self,
+        data_path: Union[str, Path],
+        schema: Optional[DataSchema] = None,
+        transform: Optional[Any] = None,
+        target_transform: Optional[Any] = None,
+        file_format: str = "parquet",
+    ):
+        """Initialize shot dataset.
+        
+        Args:
+            data_path: Path to data files
+            schema: Data schema (optional, will create default if None)
+            transform: Optional transform for input data
+            target_transform: Optional transform for target data
+            file_format: Data file format ('parquet', 'csv', 'pickle')
+        """
+        if schema is None:
+            schema = create_schema_mapping("shot")
+        
+        self.file_format = file_format
+        super().__init__(data_path, schema, transform, target_transform)
+    
+    def _load_data(self) -> List[Dict[str, Any]]:
+        """Load shot prediction data.
+        
+        Returns:
+            List of data samples
+        """
+        if self.data_path.is_file():
+            # Single file
+            return self._load_single_file(self.data_path)
+        else:
+            # Directory of files
+            data = []
+            pattern = f"*.{self.file_format}"
+            for file_path in self.data_path.glob(pattern):
+                data.extend(self._load_single_file(file_path))
+            return data
+    
+    def _load_single_file(self, file_path: Path) -> List[Dict[str, Any]]:
+        """Load a single data file.
+        
+        Args:
+            file_path: Path to data file
+            
+        Returns:
+            List of data samples
+        """
+        if self.file_format == "parquet":
+            df = pd.read_parquet(file_path)
+            return [df.iloc[[i]].to_dict('list') for i in range(len(df))]
+        elif self.file_format == "csv":
+            df = pd.read_csv(file_path)
+            return [df.iloc[[i]].to_dict('list') for i in range(len(df))]
+        elif self.file_format == "pickle":
+            with open(file_path, 'rb') as f:
+                data = pickle.load(f)
+                # Same logic as ReceiverDataset: handle dict with "samples" key
+                samples: List[Dict[str, Any]]
+                if isinstance(data, dict) and "samples" in data:
+                    # Format: {"preprocess_version": ..., "samples": [...]}
+                    samples = data.get("samples", [])
+                elif isinstance(data, list):
+                    # Format: [...]
+                    samples = data
+                elif isinstance(data, dict):
+                    # Format: single sample dict, wrap it
+                    samples = [data]
+                else:
+                    samples = [data]
+                return samples
+        else:
+            raise ValueError(f"Unsupported file format: {self.file_format}")
+    
+    def __getitem__(self, idx: int) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+        """Get a single shot prediction sample.
+        
+        Args:
+            idx: Sample index
+            
+        Returns:
+            Tuple of (input_data, shot_target)
+        """
+        sample = self.data[idx]
+        
+        # Debug information (commented out for production)
+        # print(f"Dataset __getitem__ called with idx={idx}")
+        # print(f"Sample type: {type(sample)}")
+        # print(f"Sample keys: {list(sample.keys()) if isinstance(sample, dict) else 'Not a dict'}")
+        # print(f"Sample content: {sample}")
+        
+        # Extract features using schema
+        try:
+            node_features = self.schema.get_node_features(sample)
+        except Exception as e:
+            print(f"Error in get_node_features: {e}")
+            print(f"Sample type: {type(sample)}")
+            print(f"Sample keys: {list(sample.keys()) if isinstance(sample, dict) else 'Not a dict'}")
+            print(f"Sample content: {sample}")
+            print(f"Schema position_columns: {self.schema.position_columns}")
+            print(f"Schema velocity_columns: {self.schema.velocity_columns}")
+            print(f"Schema type: {type(self.schema)}")
+            print(f"Schema dir: {dir(self.schema)}")
+            print(f"Schema vars: {vars(self.schema)}")
+            print(f"Schema repr: {repr(self.schema)}")
+            print(f"Schema str: {str(self.schema)}")
+            print(f"Schema getattr: {getattr(self.schema, 'position_columns', 'NOT_FOUND')}")
+            print(f"Schema hasattr: {hasattr(self.schema, 'position_columns')}")
+            print(f"Schema __dict__: {self.schema.__dict__}")
+            print(f"Schema __class__: {self.schema.__class__}")
+            print(f"Schema __bases__: {self.schema.__class__.__bases__}")
+            print(f"Schema __mro__: {self.schema.__class__.__mro__}")
+            print(f"Schema __module__: {self.schema.__class__.__module__}")
+            print(f"Schema __qualname__: {self.schema.__class__.__qualname__}")
+            print(f"Schema __name__: {self.schema.__class__.__name__}")
+            print(f"Schema __doc__: {self.schema.__class__.__doc__}")
+            print(f"Schema __init__: {self.schema.__class__.__init__}")
+            print(f"Schema __new__: {self.schema.__class__.__new__}")
+            print(f"Schema __call__: {self.schema.__class__.__call__}")
+            print(f"Schema __getattribute__: {self.schema.__class__.__getattribute__}")
+            print(f"Schema __setattr__: {self.schema.__class__.__setattr__}")
+            print(f"Schema __delattr__: {self.schema.__class__.__delattr__}")
+            print(f"Schema __hash__: {self.schema.__class__.__hash__}")
+            print(f"Schema __eq__: {self.schema.__class__.__eq__}")
+            raise
+        edge_index = self.schema.get_edge_index(sample)
+        edge_attr = self.schema.get_edge_attributes(sample)  # Get edge attributes if available
+        target = self.schema.get_targets(sample)
+        
+        # Create batch tensor (all nodes belong to same graph)
+        batch = torch.zeros(node_features.size(0), dtype=torch.long)
+        
+        input_data = {
+            "x": node_features,
+            "edge_index": edge_index,
+            "batch": batch,
+        }
+        
+        # Add edge_attr if available
+        if edge_attr is not None:
+            input_data["edge_attr"] = edge_attr
+        
+        # Apply transforms
+        input_data, target = self._apply_transforms(input_data, target)
+        
+        return input_data, target
+
+
+class CVAEDataset(TacticAIDataset):
+    """Dataset for CVAE tactic generation task.
+    
+    Loads and processes data for generating tactical formations.
+    """
+    
+    def __init__(
+        self,
+        data_path: Union[str, Path],
+        schema: Optional[DataSchema] = None,
+        transform: Optional[Any] = None,
+        target_transform: Optional[Any] = None,
+        file_format: str = "parquet",
+    ):
+        """Initialize CVAE dataset.
+        
+        Args:
+            data_path: Path to data files
+            schema: Data schema (optional, will create default if None)
+            transform: Optional transform for input data
+            target_transform: Optional transform for target data
+            file_format: Data file format ('parquet', 'csv', 'pickle')
+        """
+        if schema is None:
+            schema = create_schema_mapping("cvae")
+        
+        self.file_format = file_format
+        super().__init__(data_path, schema, transform, target_transform)
+    
+    def _load_data(self) -> List[Dict[str, Any]]:
+        """Load CVAE data.
+        
+        Returns:
+            List of data samples
+        """
+        if self.data_path.is_file():
+            # Single file
+            return self._load_single_file(self.data_path)
+        else:
+            # Directory of files
+            data = []
+            pattern = f"*.{self.file_format}"
+            for file_path in self.data_path.glob(pattern):
+                data.extend(self._load_single_file(file_path))
+            return data
+    
+    def _load_single_file(self, file_path: Path) -> List[Dict[str, Any]]:
+        """Load a single data file.
+        
+        Args:
+            file_path: Path to data file
+            
+        Returns:
+            List of data samples
+        """
+        if self.file_format == "parquet":
+            df = pd.read_parquet(file_path)
+            return [df.iloc[[i]].to_dict('list') for i in range(len(df))]
+        elif self.file_format == "csv":
+            df = pd.read_csv(file_path)
+            return [df.iloc[[i]].to_dict('list') for i in range(len(df))]
+        elif self.file_format == "pickle":
+            with open(file_path, 'rb') as f:
+                data = pickle.load(f)
+                # If it's already a list, return it; otherwise convert to list
+                if isinstance(data, list):
+                    return data
+                else:
+                    return [data]
+        else:
+            raise ValueError(f"Unsupported file format: {self.file_format}")
+    
+    def __getitem__(self, idx: int) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+        """Get a single CVAE sample.
+        
+        Args:
+            idx: Sample index
+            
+        Returns:
+            Tuple of (input_data, target_positions)
+        """
+        sample = self.data[idx]
+        
+        # Extract features using schema
+        node_features = self.schema.get_node_features(sample)
+        edge_index = self.schema.get_edge_index(sample)
+        target = self.schema.get_targets(sample)
+        
+        # Extract conditions if schema supports it
+        # Conditions for guided generation (design):
+        # c = [ shot(1), swing_onehot(3: in/out/short), receiver_onehot(22) ] => 26 dims
+        conditions = self._build_conditions(sample)
+        
+        # Create batch tensor (all nodes belong to same graph)
+        batch = torch.zeros(node_features.size(0), dtype=torch.long)
+        
+        input_data = {
+            "x": node_features,
+            "edge_index": edge_index,
+            "batch": batch,
+            "conditions": conditions,
+        }
+
+        # Optional per-node fields (mask/team/ball) for downstream use (e.g., masked loss)
+        # Keep them 1D [N] so collate_fn can concatenate.
+        if isinstance(sample, dict):
+            if "mask" in sample:
+                input_data["mask"] = torch.tensor(sample["mask"], dtype=torch.float32)
+            if "team" in sample:
+                input_data["team"] = torch.tensor(sample["team"], dtype=torch.float32)
+            if "ball" in sample:
+                input_data["ball"] = torch.tensor(sample["ball"], dtype=torch.float32)
+
+            # Build a robust valid-player mask to ignore dummy players in loss.
+            # Many processed samples include "dummy" players at normalized (0,0) or (0.5,0.5) with zero velocity.
+            # This mask is computed from raw sample fields (preferred) so it works even if `mask` is unreliable.
+            try:
+                x_raw = np.asarray(sample.get("x", []), dtype=np.float32)
+                y_raw = np.asarray(sample.get("y", []), dtype=np.float32)
+                vx_raw = np.asarray(sample.get("vx", []), dtype=np.float32) if "vx" in sample else None
+                vy_raw = np.asarray(sample.get("vy", []), dtype=np.float32) if "vy" in sample else None
+                ball_raw = np.asarray(sample.get("ball", []), dtype=np.float32) if "ball" in sample else None
+
+                n = int(node_features.size(0))
+                valid = np.ones(n, dtype=np.float32)
+
+                if x_raw.size >= n and y_raw.size >= n:
+                    # dummy patterns in normalized coordinates
+                    is_corner_dummy = (np.isclose(x_raw[:n], 0.0, atol=1e-6) & np.isclose(y_raw[:n], 0.0, atol=1e-6))
+                    is_center_dummy = (np.isclose(x_raw[:n], 0.5, atol=1e-6) & np.isclose(y_raw[:n], 0.5, atol=1e-6))
+
+                    is_zero_vel = np.zeros(n, dtype=bool)
+                    if vx_raw is not None and vy_raw is not None and vx_raw.size >= n and vy_raw.size >= n:
+                        is_zero_vel = (np.isclose(vx_raw[:n], 0.0, atol=1e-6) & np.isclose(vy_raw[:n], 0.0, atol=1e-6))
+
+                    is_not_ball = np.ones(n, dtype=bool)
+                    if ball_raw is not None and ball_raw.size >= n:
+                        is_not_ball = np.isclose(ball_raw[:n], 0.0, atol=1e-6)
+
+                    is_dummy = (is_corner_dummy | is_center_dummy) & is_zero_vel & is_not_ball
+                    valid[is_dummy] = 0.0
+
+                input_data["valid_mask"] = torch.tensor(valid, dtype=torch.float32)
+            except Exception:
+                # Fallback: treat all nodes as valid
+                input_data["valid_mask"] = torch.ones(node_features.size(0), dtype=torch.float32)
+        
+        # Apply transforms
+        input_data, target = self._apply_transforms(input_data, target)
+        
+        return input_data, target
+
+    def _build_conditions(self, sample: Dict[str, Any]) -> torch.Tensor:
+        # Defaults
+        shot = 0.0
+        swing_onehot = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32)  # default: in
+        receiver_onehot = torch.zeros(22, dtype=torch.float32)
+
+        # receiver (prefer node index 0-21 if present)
+        ridx = None
+        for k in ("receiver_node_index", "receiver_id", "target_idx"):
+            if k in sample:
+                try:
+                    v = int(sample[k])
+                    if 0 <= v <= 21:
+                        ridx = v
+                        break
+                except Exception:
+                    pass
+        if ridx is not None:
+            receiver_onehot[ridx] = 1.0
+
+        # shot label (if present or can be joined later)
+        if "shot_occurred" in sample:
+            try:
+                shot = float(sample["shot_occurred"])
+            except Exception:
+                shot = 0.0
+
+        # swing: try to read if present, else infer from tracking if available
+        if "swing" in sample:
+            try:
+                s = int(sample["swing"])
+                # allow 0=in,1=out,2=short
+                if s == 0:
+                    swing_onehot = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32)
+                elif s == 1:
+                    swing_onehot = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)
+                else:
+                    swing_onehot = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32)
+            except Exception:
+                pass
+
+        c = torch.cat([torch.tensor([shot], dtype=torch.float32), swing_onehot, receiver_onehot], dim=0)
+        return c
+
+
+def collate_fn(batch: List[Tuple[Dict[str, torch.Tensor], torch.Tensor]]) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+    """Collate function for batching graph data.
+    
+    Args:
+        batch: List of (input_data, target) tuples
+        
+    Returns:
+        Batched (input_data, targets)
+    """
+    input_data_list, targets = zip(*batch)
+    
+    # Concatenate node features
+    node_features = torch.cat([data["x"] for data in input_data_list], dim=0)
+    
+    # Concatenate edge indices with offset
+    edge_indices = []
+    node_offset = 0
+    
+    for data in input_data_list:
+        edge_index = data["edge_index"] + node_offset
+        edge_indices.append(edge_index)
+        node_offset += data["x"].size(0)
+    
+    edge_index = torch.cat(edge_indices, dim=1)
+    
+    # Create batch assignment
+    batch_tensor = torch.cat([
+        torch.full((data["x"].size(0),), i, dtype=torch.long)
+        for i, data in enumerate(input_data_list)
+    ])
+    
+    # Handle conditions if present
+    conditions = None
+    if "conditions" in input_data_list[0]:
+        conditions = torch.stack([data["conditions"] for data in input_data_list])
+    
+    batched_input = {
+        "x": node_features,
+        "edge_index": edge_index,
+        "batch": batch_tensor,
+    }
+    
+    # Concatenate edge_attr if present
+    # TacticAI paper baseline: Receiver task uses 1-dim edge features (same_team only)
+    if all("edge_attr" in data and data["edge_attr"] is not None for data in input_data_list):
+        edge_attrs = []
+        for data in input_data_list:
+            edge_attrs.append(data["edge_attr"])
+        batched_input["edge_attr"] = torch.cat(edge_attrs, dim=0)
+    
+    # Note: Receiver task does NOT batch global_x (TacticAI paper baseline)
+    # global_x batching may be needed for other tasks (Shot, Guided generation) but not for Receiver
+    
+    # Optional per-node fields: mask, team, ball
+    # Concatenate if present in all items
+    opt_keys = ["mask", "team", "ball", "cand_mask", "valid_mask"]
+    for k in opt_keys:
+        if all(k in data for data in input_data_list):
+            batched_input[k] = torch.cat([data[k] for data in input_data_list], dim=0)
+    
+    if conditions is not None:
+        batched_input["conditions"] = conditions
+    
+    # Handle different target shapes
+    if all(t.dim() == 0 for t in targets):
+        batched_targets = torch.stack(targets)
+    elif all(t.dim() == 1 for t in targets):
+        batched_targets = torch.stack(targets)
+    else:
+        # For multi-dimensional targets (like CVAE), flatten and stack
+        batched_targets = torch.stack([t.flatten() for t in targets])
+    
+    return batched_input, batched_targets
+
+
+def collate_fn_multitask(
+    batch: List[Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]]
+) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    """Collate function for multi-task datasets.
+    
+    Args:
+        batch: List of (input_data, targets_dict) tuples
+        
+    Returns:
+        Tuple of (batched_input, batched_targets_dict)
+    """
+    input_data_list, targets_list = zip(*batch)
+    
+    # Batch input data (same as regular collate_fn)
+    node_features = torch.cat([data["x"] for data in input_data_list], dim=0)
+    
+    # Batch edge indices with proper offsets
+    edge_indices = []
+    node_offset = 0
+    for data in input_data_list:
+        edge_idx = data["edge_index"]
+        edge_indices.append(edge_idx + node_offset)
+        node_offset += data["x"].size(0)
+    edge_index = torch.cat(edge_indices, dim=1)
+    
+    # Create batch assignment
+    batch_tensor = torch.cat([
+        torch.full((data["x"].size(0),), i, dtype=torch.long)
+        for i, data in enumerate(input_data_list)
+    ])
+    
+    batched_input = {
+        "x": node_features,
+        "edge_index": edge_index,
+        "batch": batch_tensor,
+    }
+    
+    # Concatenate edge_attr if present
+    if all("edge_attr" in data and data["edge_attr"] is not None for data in input_data_list):
+        edge_attrs = []
+        for data in input_data_list:
+            edge_attrs.append(data["edge_attr"])
+        batched_input["edge_attr"] = torch.cat(edge_attrs, dim=0)
+    
+    # Optional per-node fields: mask, team, ball
+    opt_keys = ["mask", "team", "ball", "cand_mask"]
+    for k in opt_keys:
+        if all(k in data for data in input_data_list):
+            batched_input[k] = torch.cat([data[k] for data in input_data_list], dim=0)
+    
+    # Batch targets (dict of tensors)
+    batched_targets = {}
+    for key in targets_list[0].keys():
+        targets = [t[key] for t in targets_list]
+        # Handle different target shapes
+        if all(t.dim() == 0 for t in targets):
+            batched_targets[key] = torch.stack(targets)
+        elif all(t.dim() == 1 for t in targets):
+            batched_targets[key] = torch.stack(targets)
+        else:
+            batched_targets[key] = torch.stack([t.flatten() for t in targets])
+    
+    return batched_input, batched_targets
+
+
+def create_dataloader(
+    dataset: TacticAIDataset,
+    batch_size: int = 32,
+    shuffle: bool = True,
+    num_workers: int = 0,
+    pin_memory: bool = True,
+    prefetch_factor: int = 2,
+    persistent_workers: bool = False,
+) -> DataLoader:
+    """Create a DataLoader for TacticAI dataset.
+    
+    Args:
+        dataset: TacticAI dataset
+        batch_size: Batch size
+        shuffle: Whether to shuffle data
+        num_workers: Number of worker processes
+        pin_memory: Whether to pin memory (for GPU acceleration)
+        prefetch_factor: Number of batches prefetched per worker
+        persistent_workers: Whether to keep workers alive between epochs
+        
+    Returns:
+        DataLoader instance
+    """
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        persistent_workers=persistent_workers if num_workers > 0 else False,
+        collate_fn=collate_fn,
+    )
+
+
+def create_dummy_dataset(
+    task: str,
+    num_samples: int = 100,
+    num_players: int = 22,
+    device: Optional[torch.device] = None,
+) -> TacticAIDataset:
+    """Create dummy dataset for testing.
+    
+    Args:
+        task: Task type ('receiver', 'shot', 'cvae')
+        num_samples: Number of samples to generate
+        num_players: Number of players per sample
+        device: Device to place tensors on
+        
+    Returns:
+        Dummy dataset
+    """
+    if device is None:
+        device = torch.device('cpu')
+    
+    # Generate dummy data
+    dummy_data = []
+    for _ in range(num_samples):
+        sample = {}
+        
+        # Generate random positions
+        positions = torch.rand(num_players, 2) * 100  # Rough field size
+        sample["x"] = positions[:, 0].numpy()
+        sample["y"] = positions[:, 1].numpy()
+        
+        # Generate random velocities
+        velocities = torch.randn(num_players, 2) * 2
+        sample["vx"] = velocities[:, 0].numpy()
+        sample["vy"] = velocities[:, 1].numpy()
+        
+        # Generate team information
+        sample["team"] = np.random.randint(0, 2, num_players)
+        
+        # Generate ball information
+        ball_owner = np.random.randint(0, num_players)
+        sample["ball"] = np.zeros(num_players)
+        sample["ball"][ball_owner] = 1
+        
+        # Generate task-specific targets
+        if task == "receiver":
+            sample["receiver_id"] = np.random.randint(0, num_players)
+        elif task == "shot":
+            sample["shot_occurred"] = np.random.randint(0, 2)
+        elif task == "cvae":
+            # Target positions (slightly different from input)
+            target_pos = positions + torch.randn_like(positions) * 5
+            sample["target_x"] = target_pos[:, 0].numpy()
+            sample["target_y"] = target_pos[:, 1].numpy()
+            
+            # Conditions
+            conditions = np.random.randn(8)
+            sample["condition"] = conditions
+        
+        dummy_data.append(sample)
+    
+    # Create temporary directory and save dummy data
+    import tempfile
+    import os
+    
+    temp_dir = tempfile.mkdtemp()
+    temp_file = os.path.join(temp_dir, "dummy_data.pickle")
+    
+    with open(temp_file, 'wb') as f:
+        pickle.dump(dummy_data, f)
+    
+    # Create dataset
+    if task == "receiver":
+        dataset = ReceiverDataset(temp_file, file_format="pickle")
+    elif task == "shot":
+        dataset = ShotDataset(temp_file, file_format="pickle")
+    elif task == "cvae":
+        dataset = CVAEDataset(temp_file, file_format="pickle")
+    else:
+        raise ValueError(f"Unknown task: {task}")
+    
+    # Clean up temp file
+    import os
+    os.remove(temp_file)
+    os.rmdir(temp_dir)
+    
+    return dataset
