@@ -22,6 +22,12 @@ import numpy as np
 import torch
 import yaml
 
+# Allow running as a script without installing the package (so `import tacticai` works)
+import sys
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from tacticai.dataio import CVAEDataset
 from tacticai.modules import get_device, set_seed
 from tacticai.train.train_cvae import create_model
