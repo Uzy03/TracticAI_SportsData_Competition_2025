@@ -1050,6 +1050,22 @@ class CVAESchema(DataSchema):
                 target_positions[:, 0] = x / float(self.field_length)
                 target_positions[:, 1] = y / float(self.field_width)
 
+        # Normalize velocities (vx, vy) similarly to ReceiverSchema if they look unnormalized.
+        # ReceiverSchema uses max_velocity=70.0 (m/s) to map to roughly [-1, 1].
+        if target_positions.shape[1] >= 4:
+            vx = target_positions[:, 2]
+            vy = target_positions[:, 3]
+            looks_v_normalized = (
+                np.isfinite(vx).all()
+                and np.isfinite(vy).all()
+                and (np.abs(vx).max() <= 1.5)
+                and (np.abs(vy).max() <= 1.5)
+            )
+            if not looks_v_normalized:
+                max_velocity = 70.0
+                target_positions[:, 2] = vx / max_velocity
+                target_positions[:, 3] = vy / max_velocity
+
         return torch.tensor(target_positions, dtype=torch.float32)
     
     def get_conditions(self, data: Dict[str, Any]) -> torch.Tensor:

@@ -22,7 +22,7 @@ from tacticai.dataio import CVAEDataset, create_dataloader, create_dummy_dataset
 from tacticai.modules import (
     CVAELoss, ReconstructionLoss, KLLoss,
     set_seed, get_device, save_checkpoint, setup_logging,
-    CosineAnnealingScheduler, EarlyStopping, save_training_history,
+    CosineAnnealingScheduler, EarlyStopping, save_training_history_csv_cvae,
 )
 
 
@@ -433,9 +433,13 @@ def main():
     
     # Training loop
     best_val_loss = float('inf')
-    train_history = {"loss": [], "recon_loss": [], "kl_loss": []}
+    train_history = {"loss": [], "recon_loss": [], "kl_loss": [], "lr": []}
     val_history = {"loss": [], "recon_loss": [], "kl_loss": []}
     
+    # CSV history (overwrite after each epoch, like receiver/shot)
+    history_csv_path = log_dir / f"training_history_{timestamp}.csv"
+    logger.info(f"History CSV: {history_csv_path}")
+
     start_epoch = 0
     if args.resume:
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
@@ -482,8 +486,18 @@ def main():
         
         # Update history
         for key in train_history:
+            if key == "lr":
+                continue
             train_history[key].append(train_metrics[key])
             val_history[key].append(val_metrics[key])
+        train_history["lr"].append(float(current_lr))
+
+        # Save CSV history after each epoch (overwrite)
+        save_training_history_csv_cvae(
+            train_history,
+            val_history,
+            filepath=history_csv_path,
+        )
         
         # Save best model
         if val_metrics["loss"] < best_val_loss:
@@ -507,12 +521,7 @@ def main():
     
     logger.info(f"Training completed. Best validation loss: {best_val_loss:.4f}")
     
-    # Save training history
-    history_path = log_dir / f"training_history_{timestamp}.json"
-    save_training_history(
-        {"train": train_history, "val": val_history},
-        history_path
-    )
+    # Final CSV already up-to-date (written each epoch)
 
 
 if __name__ == "__main__":

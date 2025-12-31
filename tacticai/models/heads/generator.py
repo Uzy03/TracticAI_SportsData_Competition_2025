@@ -138,6 +138,9 @@ class CVAEGenerator(nn.Module):
                 edge_feature_dim=int(edge_dim),
             )
 
+        # Normalization for frozen-backbone outputs (helps scale mismatch / optimization stability)
+        self.context_norm = nn.LayerNorm(hidden_dim)
+
         self.posterior = NodePosterior(
             context_dim=hidden_dim,
             condition_dim=condition_dim,
@@ -229,6 +232,7 @@ class CVAEGenerator(nn.Module):
             x_hat: [B,N,4], mu: [B,N,Z], logvar: [B,N,Z]
         """
         context = self._node_context(x, edge_index, batch, edge_attr=edge_attr)  # [B,N,D]
+        context = self.context_norm(context)
         B, N, _D = context.shape
 
         # Broadcast conditions to nodes
