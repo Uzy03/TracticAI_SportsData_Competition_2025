@@ -308,14 +308,18 @@ def validate_epoch(
             data = {k: v.to(device) for k, v in data.items()}
             targets = targets.to(device)
             
+            # IMPORTANT:
+            # Validate reconstruction with posterior q(z|x_gt), same as training,
+            # otherwise KL becomes identically zero (prior) and val metrics are misleading.
+            batch_size = int(data["batch"].max().item() + 1)
+            x_gt = targets.view(batch_size, -1, 4)
             edge_attr = data.get("edge_attr", None)
             outputs, mean, log_var = model(
                 data["x"], data["edge_index"], data["batch"],
-                data["conditions"], edge_attr=edge_attr, training=False
+                data["conditions"], x_gt=x_gt, edge_attr=edge_attr, training=True
             )
             
             # Reshape targets to match outputs (flatten player positions)
-            batch_size = data["batch"].max().item() + 1
             targets_flat = targets.view(batch_size, -1)
             outputs_flat = outputs.view(batch_size, -1)
             
