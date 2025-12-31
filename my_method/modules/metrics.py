@@ -283,6 +283,17 @@ class AUC:
             logits_np = logits_np.reshape(1)
         if targets_np.ndim == 0:
             targets_np = targets_np.reshape(1)
+
+        # Guard: AUC is undefined if only one class exists in targets.
+        # sklearn sometimes raises ValueError, but in some versions/edge cases it can return nan.
+        # For stable logging in small/overfit runs, we short-circuit here.
+        unique_targets = np.unique(targets_np)
+        if unique_targets.size < 2:
+            auc_roc = torch.tensor(0.5, device=logits.device)
+            if compute_auc_pr:
+                auc_pr = torch.tensor(0.0, device=logits.device)
+                return auc_roc, auc_pr
+            return auc_roc
         
         # Compute AUC-ROC
         try:
