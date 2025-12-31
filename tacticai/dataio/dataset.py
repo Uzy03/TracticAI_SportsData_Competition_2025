@@ -626,6 +626,40 @@ class CVAEDataset(TacticAIDataset):
                 input_data["team"] = torch.tensor(sample["team"], dtype=torch.float32)
             if "ball" in sample:
                 input_data["ball"] = torch.tensor(sample["ball"], dtype=torch.float32)
+
+            # Build a robust valid-player mask to ignore dummy players in loss.
+            # Many processed samples include "dummy" players at normalized (0,0) or (0.5,0.5) with zero velocity.
+            # This mask is computed from raw sample fields (preferred) so it works even if `mask` is unreliable.
+            try:
+                x_raw = np.asarray(sample.get("x", []), dtype=np.float32)
+                y_raw = np.asarray(sample.get("y", []), dtype=np.float32)
+                vx_raw = np.asarray(sample.get("vx", []), dtype=np.float32) if "vx" in sample else None
+                vy_raw = np.asarray(sample.get("vy", []), dtype=np.float32) if "vy" in sample else None
+                ball_raw = np.asarray(sample.get("ball", []), dtype=np.float32) if "ball" in sample else None
+
+                n = int(node_features.size(0))
+                valid = np.ones(n, dtype=np.float32)
+
+                if x_raw.size >= n and y_raw.size >= n:
+                    # dummy patterns in normalized coordinates
+                    is_corner_dummy = (np.isclose(x_raw[:n], 0.0, atol=1e-6) & np.isclose(y_raw[:n], 0.0, atol=1e-6))
+                    is_center_dummy = (np.isclose(x_raw[:n], 0.5, atol=1e-6) & np.isclose(y_raw[:n], 0.5, atol=1e-6))
+
+                    is_zero_vel = np.zeros(n, dtype=bool)
+                    if vx_raw is not None and vy_raw is not None and vx_raw.size >= n and vy_raw.size >= n:
+                        is_zero_vel = (np.isclose(vx_raw[:n], 0.0, atol=1e-6) & np.isclose(vy_raw[:n], 0.0, atol=1e-6))
+
+                    is_not_ball = np.ones(n, dtype=bool)
+                    if ball_raw is not None and ball_raw.size >= n:
+                        is_not_ball = np.isclose(ball_raw[:n], 0.0, atol=1e-6)
+
+                    is_dummy = (is_corner_dummy | is_center_dummy) & is_zero_vel & is_not_ball
+                    valid[is_dummy] = 0.0
+
+                input_data["valid_mask"] = torch.tensor(valid, dtype=torch.float32)
+            except Exception:
+                # Fallback: treat all nodes as valid
+                input_data["valid_mask"] = torch.ones(node_features.size(0), dtype=torch.float32)
         
         # Apply transforms
         input_data, target = self._apply_transforms(input_data, target)
@@ -732,7 +766,7 @@ def collate_fn(batch: List[Tuple[Dict[str, torch.Tensor], torch.Tensor]]) -> Tup
     
     # Optional per-node fields: mask, team, ball
     # Concatenate if present in all items
-    opt_keys = ["mask", "team", "ball", "cand_mask"]
+    opt_keys = ["mask", "team", "ball", "cand_mask", "valid_mask"]
     for k in opt_keys:
         if all(k in data for data in input_data_list):
             batched_input[k] = torch.cat([data[k] for data in input_data_list], dim=0)

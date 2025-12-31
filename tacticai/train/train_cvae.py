@@ -203,6 +203,7 @@ def train_epoch(
         optimizer.zero_grad()
 
         edge_attr = data.get("edge_attr", None)
+        valid_mask = data.get("valid_mask", None)  # [N_total] float32 in {0,1}
         
         if use_amp and scaler is not None:
             with torch.cuda.amp.autocast():
@@ -217,10 +218,17 @@ def train_epoch(
                 targets_flat = targets.view(batch_size, -1)
                 outputs_flat = outputs.view(batch_size, -1)
                 
-                total_loss_batch, recon_loss, kl_loss = criterion(
-                    outputs_flat, targets_flat,
-                    mean.reshape(batch_size, -1), log_var.reshape(batch_size, -1)
-                )
+                # Masked reconstruction: ignore dummy players (valid_mask==0)
+                if valid_mask is not None:
+                    vm = valid_mask.view(batch_size, -1)  # [B,N]
+                    vm4 = vm.unsqueeze(-1).expand(-1, -1, 4).reshape(batch_size, -1)  # [B, N*4]
+                    se = (outputs_flat - targets_flat) ** 2
+                    denom = vm4.sum().clamp(min=1.0)
+                    recon_loss = (se * vm4).sum() / denom
+                else:
+                    recon_loss = criterion.recon_loss(outputs_flat, targets_flat)
+                kl_loss = criterion.kl_loss(mean.reshape(batch_size, -1), log_var.reshape(batch_size, -1))
+                total_loss_batch = criterion.recon_weight * recon_loss + criterion.kl_weight * kl_loss
             
             scaler.scale(total_loss_batch).backward()
             scaler.step(optimizer)
@@ -237,10 +245,16 @@ def train_epoch(
             targets_flat = targets.view(batch_size, -1)
             outputs_flat = outputs.view(batch_size, -1)
             
-            total_loss_batch, recon_loss, kl_loss = criterion(
-                outputs_flat, targets_flat,
-                mean.reshape(batch_size, -1), log_var.reshape(batch_size, -1)
-            )
+            if valid_mask is not None:
+                vm = valid_mask.view(batch_size, -1)
+                vm4 = vm.unsqueeze(-1).expand(-1, -1, 4).reshape(batch_size, -1)
+                se = (outputs_flat - targets_flat) ** 2
+                denom = vm4.sum().clamp(min=1.0)
+                recon_loss = (se * vm4).sum() / denom
+            else:
+                recon_loss = criterion.recon_loss(outputs_flat, targets_flat)
+            kl_loss = criterion.kl_loss(mean.reshape(batch_size, -1), log_var.reshape(batch_size, -1))
+            total_loss_batch = criterion.recon_weight * recon_loss + criterion.kl_weight * kl_loss
             
             total_loss_batch.backward()
             optimizer.step()
@@ -314,6 +328,7 @@ def validate_epoch(
             batch_size = int(data["batch"].max().item() + 1)
             x_gt = targets.view(batch_size, -1, 4)
             edge_attr = data.get("edge_attr", None)
+            valid_mask = data.get("valid_mask", None)
             outputs, mean, log_var = model(
                 data["x"], data["edge_index"], data["batch"],
                 data["conditions"], x_gt=x_gt, edge_attr=edge_attr, training=True
@@ -323,10 +338,16 @@ def validate_epoch(
             targets_flat = targets.view(batch_size, -1)
             outputs_flat = outputs.view(batch_size, -1)
             
-            total_loss_batch, recon_loss, kl_loss = criterion(
-                outputs_flat, targets_flat,
-                mean.reshape(batch_size, -1), log_var.reshape(batch_size, -1)
-            )
+            if valid_mask is not None:
+                vm = valid_mask.view(batch_size, -1)
+                vm4 = vm.unsqueeze(-1).expand(-1, -1, 4).reshape(batch_size, -1)
+                se = (outputs_flat - targets_flat) ** 2
+                denom = vm4.sum().clamp(min=1.0)
+                recon_loss = (se * vm4).sum() / denom
+            else:
+                recon_loss = criterion.recon_loss(outputs_flat, targets_flat)
+            kl_loss = criterion.kl_loss(mean.reshape(batch_size, -1), log_var.reshape(batch_size, -1))
+            total_loss_batch = criterion.recon_weight * recon_loss + criterion.kl_weight * kl_loss
             
             total_loss += total_loss_batch.item()
             total_recon_loss += recon_loss.item()
