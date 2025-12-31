@@ -1,12 +1,11 @@
-# my_method: Multi-task learning (receiver + shot) - DEBUG OVERFIT (1 sample, D2 enabled)
+# my_method: Multi-task learning configuration for receiver + shot prediction (D2 disabled)
 #
-# 目的:
-# - 1サンプルに対して train=val=test を同一にし、損失が十分下がるかで実装の健全性を確認する
+# Baseline (no_D2): D2等変性なしでのマルチタスク学習。
 #
 # 使い方（例）:
-#   python -m my_method.train.train_multitask --config configs_my_method/multitask_receiver_shot_d2_overfit1_baseline.yaml
+#   python -m my_method.train.train_multitask --config configs_my_method/multitask_receiver_shot_no_d2_baseline.yaml
 
-run_name: "overfit1_baseline"
+run_name: "baseline_no_d2"
 
 model:
   input_dim: 16
@@ -20,24 +19,27 @@ model:
 
 optimizer:
   type: "adam"
-  lr: 0.0005
-  weight_decay: 0.0
+  lr: 0.001
+  weight_decay: 0.0001
 
 scheduler:
-  type: "none"
+  type: "cosine"
+  T_max: 100
+  eta_min: 0.000001
+  warmup_epochs: 5
 
 train:
-  batch_size: 1
-  epochs: 300
+  batch_size: 32
+  epochs: 100
   amp: false
   grad_clip:
     enabled: true
-    max_norm: 0.5
+    max_norm: 1.0  # no_D2は1.0を推奨
 
 multitask:
   lambda_receiver: 1.0
-  lambda_shot: 1.0
-  # Baseline (OFF)
+  lambda_shot: 2.0
+  # no_D2 baselineではConsistencyは対象外（D2 4-viewが無い）
   lambda_consistency: 0.0
 
 data:
@@ -71,19 +73,19 @@ loss:
       gamma: 2.0
 
 d2:
-  enabled: true
+  enabled: false
   group_pool: false
   transforms:
     hflip: false
     vflip: false
 
 early_stopping:
-  patience: 99999
-  min_delta: 0.0
+  patience: 15
+  min_delta: 0.001
   monitor: "val_total_loss"
 
 eval:
-  batch_size: 1
+  batch_size: 32
 
 device: "auto"
 seed: 42
@@ -93,10 +95,5 @@ log_level: "INFO"
 log_dir: "runs/my_method"
 checkpoint_dir: "checkpoints/my_method"
 model_save_dir: "checkpoints/my_method/receiver_shot"
-
-debug_overfit:
-  enabled: true
-  num_samples: 1
-  seed: 42
 
 

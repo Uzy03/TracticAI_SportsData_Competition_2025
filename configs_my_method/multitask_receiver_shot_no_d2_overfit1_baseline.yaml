@@ -1,12 +1,9 @@
-# my_method: Multi-task learning (receiver + shot) - DEBUG OVERFIT (1 sample, D2 enabled)
-#
-# 目的:
-# - 1サンプルに対して train=val=test を同一にし、損失が十分下がるかで実装の健全性を確認する
+# my_method: Multi-task learning (receiver + shot) - DEBUG OVERFIT (1 sample, D2 disabled)
 #
 # 使い方（例）:
-#   python -m my_method.train.train_multitask --config configs_my_method/multitask_receiver_shot_d2_overfit1_baseline.yaml
+#   python -m my_method.train.train_multitask --config configs_my_method/multitask_receiver_shot_no_d2_overfit1_baseline.yaml
 
-run_name: "overfit1_baseline"
+run_name: "overfit1_baseline_no_d2"
 
 model:
   input_dim: 16
@@ -32,12 +29,11 @@ train:
   amp: false
   grad_clip:
     enabled: true
-    max_norm: 0.5
+    max_norm: 1.0
 
 multitask:
   lambda_receiver: 1.0
   lambda_shot: 1.0
-  # Baseline (OFF)
   lambda_consistency: 0.0
 
 data:
@@ -71,7 +67,7 @@ loss:
       gamma: 2.0
 
 d2:
-  enabled: true
+  enabled: false
   group_pool: false
   transforms:
     hflip: false

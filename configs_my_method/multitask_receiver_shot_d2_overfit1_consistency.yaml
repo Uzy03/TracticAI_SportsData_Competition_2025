@@ -5,6 +5,8 @@
 # 使い方（例）:
 #   python -m my_method.train.train_multitask --config configs_my_method/multitask_receiver_shot_d2_overfit1_consistency.yaml
 
+run_name: "overfit1_consistency"
+
 model:
   input_dim: 16
   hidden_dim: 512

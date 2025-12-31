@@ -514,8 +514,13 @@ def main():
     # Setup device
     device = get_device(config.get("device", "auto"))
     
-    # Setup logging (save to runs/receiver_shot/)
+    # Setup logging
+    # If config includes run_name, separate outputs like:
+    #   runs/my_method/receiver_shot/<run_name>/
+    run_name = str(config.get("run_name", "")).strip()
     log_dir = Path(config.get("log_dir", "runs")) / "receiver_shot"
+    if run_name:
+        log_dir = log_dir / run_name
     log_dir.mkdir(parents=True, exist_ok=True)
     log_filename = f"training_{timestamp}.log"
     logger = setup_logging(
@@ -722,8 +727,12 @@ def main():
     val_history = defaultdict(list)
     test_history = {}  # Test metrics are saved only once at the end
     
-    # Model save directory (checkpoints/receiver_shot/)
+    # Model save directory
+    # If config includes run_name, separate outputs like:
+    #   checkpoints/my_method/receiver_shot/<run_name>/
     model_save_dir = Path(config.get("model_save_dir", "checkpoints/receiver_shot"))
+    if run_name:
+        model_save_dir = model_save_dir / run_name
     model_save_dir.mkdir(parents=True, exist_ok=True)
     
     # Determine checkpoint filename based on D2 setting
