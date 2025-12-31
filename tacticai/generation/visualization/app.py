@@ -67,6 +67,16 @@ def _infer_attacking_team_id(df: pd.DataFrame) -> int:
     return 0
 
 
+def _mean_pos_err_m(a_n4: np.ndarray, b_n4: np.ndarray) -> float:
+    """Mean Euclidean position error in meters between two [N,4] normalized states."""
+    a = np.asarray(a_n4, dtype=np.float32).reshape(22, 4)
+    b = np.asarray(b_n4, dtype=np.float32).reshape(22, 4)
+    a_xy = _to_meter_xy(a[:, :2])
+    b_xy = _to_meter_xy(b[:, :2])
+    d = np.sqrt(((a_xy - b_xy) ** 2).sum(axis=1))
+    return float(d.mean())
+
+
 def plot_snapshot(
     df: pd.DataFrame,
     title: str,
@@ -191,6 +201,21 @@ S = int(generated.shape[1])
 
 st.caption(f"Loaded: {pickle_path} | generated: {tuple(generated.shape)}")
 
+# Quick numeric sanity checks
+with st.expander("数値チェック（正規化/学習崩壊の切り分け）", expanded=False):
+    try:
+        tgt_xy = targets.reshape(22, 4)[:, :2]
+        st.write(
+            {
+                "targets_xy_min": float(np.min(tgt_xy)),
+                "targets_xy_max": float(np.max(tgt_xy)),
+                "targets_v_min": float(np.min(targets.reshape(22, 4)[:, 2:])),
+                "targets_v_max": float(np.max(targets.reshape(22, 4)[:, 2:])),
+            }
+        )
+    except Exception as e:
+        st.write(f"targets統計の計算に失敗: {e}")
+
 # Target / Posterior recon (debug)
 try:
     target_df = _make_df(targets.reshape(22, 4), x_input)
@@ -202,6 +227,8 @@ except Exception as e:
 if "recon_posterior" in obj:
     try:
         recon = np.asarray(obj["recon_posterior"], dtype=np.float32)  # [1,N,4]
+        with st.expander("Target vs Posterior recon の誤差（位置）", expanded=True):
+            st.write({"mean_pos_err_m": _mean_pos_err_m(targets.reshape(22, 4), recon.reshape(22, 4))})
         recon_df = _make_df(recon.reshape(22, 4), x_input)
         fig_r = plot_snapshot(recon_df, title="Posterior recon (x_gtあり / デバッグ)", show_vectors=show_vectors, vector_scale=vector_scale, max_vector_len=max_vec)
         st.plotly_chart(fig_r, use_container_width=True)
