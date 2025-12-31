@@ -958,12 +958,21 @@ class CVAESchema(DataSchema):
             field_width: Field width for normalization
         """
         self.position_columns = position_columns
-        self.velocity_columns = velocity_columns or []
+        # Default: CVAE dataset in this repo includes vx/vy.
+        self.velocity_columns = velocity_columns or ["vx", "vy"]
         self.player_attr_columns = player_attr_columns or []
         self.team_column = team_column
         self.ball_column = ball_column
         self.condition_columns = condition_columns or []
-        self.target_position_columns = target_position_columns or position_columns
+        # Default target: absolute state at t=0 (x,y,vx,vy) in the same units as the dataset.
+        # If velocity columns are not available in the dataset, caller may override.
+        if target_position_columns is not None:
+            self.target_position_columns = target_position_columns
+        else:
+            if self.velocity_columns:
+                self.target_position_columns = [*position_columns, *self.velocity_columns]
+            else:
+                self.target_position_columns = position_columns
         self.field_length = field_length
         self.field_width = field_width
     
@@ -1016,19 +1025,48 @@ class CVAESchema(DataSchema):
             data: Raw data dictionary
             
         Returns:
-            Target positions tensor [N, 2]
+            Target tensor [N, D] where D is len(target_position_columns)
         """
         if isinstance(data, pd.DataFrame):
             target_positions = data[self.target_position_columns].values
         else:
             target_positions = np.array([data[col] for col in self.target_position_columns]).T
-        
-        # Normalize positions to [0, 1]
-        normalized_positions = target_positions.copy()
-        normalized_positions[:, 0] = target_positions[:, 0] / self.field_length
-        normalized_positions[:, 1] = target_positions[:, 1] / self.field_width
-        
-        return torch.tensor(normalized_positions, dtype=torch.float32)
+
+        target_positions = np.asarray(target_positions, dtype=np.float32)
+
+        # If positions look like meters (large magnitude), optionally normalize.
+        # In this project, many processed datasets already store x,y normalized to [0,1],
+        # so we avoid re-normalizing in that case.
+        if target_positions.shape[1] >= 2:
+            x = target_positions[:, 0]
+            y = target_positions[:, 1]
+            looks_normalized = (
+                np.isfinite(x).all()
+                and np.isfinite(y).all()
+                and (x.min() >= -0.5) and (x.max() <= 1.5)
+                and (y.min() >= -0.5) and (y.max() <= 1.5)
+            )
+            if not looks_normalized:
+                target_positions[:, 0] = x / float(self.field_length)
+                target_positions[:, 1] = y / float(self.field_width)
+
+        # Normalize velocities (vx, vy) similarly to ReceiverSchema if they look unnormalized.
+        # ReceiverSchema uses max_velocity=70.0 (m/s) to map to roughly [-1, 1].
+        if target_positions.shape[1] >= 4:
+            vx = target_positions[:, 2]
+            vy = target_positions[:, 3]
+            looks_v_normalized = (
+                np.isfinite(vx).all()
+                and np.isfinite(vy).all()
+                and (np.abs(vx).max() <= 1.5)
+                and (np.abs(vy).max() <= 1.5)
+            )
+            if not looks_v_normalized:
+                max_velocity = 70.0
+                target_positions[:, 2] = vx / max_velocity
+                target_positions[:, 3] = vy / max_velocity
+
+        return torch.tensor(target_positions, dtype=torch.float32)
     
     def get_conditions(self, data: Dict[str, Any]) -> torch.Tensor:
         """Extract conditions for CVAE.

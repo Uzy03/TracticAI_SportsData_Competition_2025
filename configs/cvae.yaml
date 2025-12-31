@@ -2,10 +2,17 @@
 
 # Model configuration
 model:
-  input_dim: 8  # Node feature dimension (x, y, vx, vy, height, weight, ball, team)
-  condition_dim: 8  # Condition feature dimension
+  # Node feature dim is determined by ReceiverSchema features used by CVAESchema in this repo.
+  # Current processed CVAE dataset yields 16-dim node features.
+  input_dim: 16
+  # Condition feature dim:
+  # - shot(1)
+  # - swing one-hot (in/out/short = 3)
+  # - receiver one-hot (22)
+  condition_dim: 26
   latent_dim: 32  # Latent space dimension
-  output_dim: 44  # Output dimension (22 players * 2 coordinates)
+  # Output: 22 players * 4 (x, y, vx, vy)
+  output_dim: 88
   hidden_dim: 128
   num_layers: 3
   num_heads: 4

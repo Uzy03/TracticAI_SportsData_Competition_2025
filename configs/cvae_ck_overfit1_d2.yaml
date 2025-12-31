@@ -1,0 +1,65 @@
+# CVAE overfit test (1 sample) for quick sanity-check (D2 enabled)
+# Uses pretrained multitask backbone checkpoints/receiver_shot/best_d2.ckpt (frozen)
+
+model:
+  input_dim: 16
+  edge_dim: 10
+  condition_dim: 26
+  latent_dim: 32
+  output_dim: 88
+
+  # Must match the multitask backbone architecture (receiver_shot)
+  hidden_dim: 512
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.0
+  freeze_backbone: true
+
+optimizer:
+  type: "adam"
+  lr: 0.001
+  weight_decay: 0.0
+
+scheduler:
+  type: "cosine"
+  T_max: 300
+  eta_min: 0.000001
+  warmup_epochs: 0
+
+train:
+  batch_size: 1
+  epochs: 300
+  amp: false
+  log_every_n_steps: 10
+
+data:
+  train_path: "data/processed_ck/cvae_ck_train/mini1.pickle"
+  val_path: "data/processed_ck/cvae_ck_train/mini1.pickle"
+  test_path: "data/processed_ck/cvae_ck_train/mini1.pickle"
+  format: "pickle"
+
+loss:
+  recon_type: "mse"
+  recon_weight: 1.0
+  beta: 1.0
+  kl_weight: 1.0
+
+early_stopping:
+  patience: 10000
+
+device: "auto"
+seed: 42
+num_workers: 0
+log_level: "INFO"
+log_dir: "runs/cvae_overfit_d2"
+checkpoint_dir: "checkpoints/cvae_overfit_d2"
+
+d2:
+  enabled: true
+
+pretrained_backbone:
+  enabled: true
+  checkpoint_dir: "checkpoints/receiver_shot"
+  strict: true
+
+

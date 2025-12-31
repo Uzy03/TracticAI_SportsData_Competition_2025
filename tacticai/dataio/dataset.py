@@ -12,6 +12,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import pandas as pd
 import pickle
+from typing import Any
 
 from .schema import DataSchema, create_schema_mapping
 
@@ -602,9 +603,9 @@ class CVAEDataset(TacticAIDataset):
         target = self.schema.get_targets(sample)
         
         # Extract conditions if schema supports it
-        conditions = torch.zeros(8, dtype=torch.float32)  # Default condition size
-        if hasattr(self.schema, 'get_conditions'):
-            conditions = self.schema.get_conditions(sample)
+        # Conditions for guided generation (design):
+        # c = [ shot(1), swing_onehot(3: in/out/short), receiver_onehot(22) ] => 26 dims
+        conditions = self._build_conditions(sample)
         
         # Create batch tensor (all nodes belong to same graph)
         batch = torch.zeros(node_features.size(0), dtype=torch.long)
@@ -615,11 +616,99 @@ class CVAEDataset(TacticAIDataset):
             "batch": batch,
             "conditions": conditions,
         }
+
+        # Optional per-node fields (mask/team/ball) for downstream use (e.g., masked loss)
+        # Keep them 1D [N] so collate_fn can concatenate.
+        if isinstance(sample, dict):
+            if "mask" in sample:
+                input_data["mask"] = torch.tensor(sample["mask"], dtype=torch.float32)
+            if "team" in sample:
+                input_data["team"] = torch.tensor(sample["team"], dtype=torch.float32)
+            if "ball" in sample:
+                input_data["ball"] = torch.tensor(sample["ball"], dtype=torch.float32)
+
+            # Build a robust valid-player mask to ignore dummy players in loss.
+            # Many processed samples include "dummy" players at normalized (0,0) or (0.5,0.5) with zero velocity.
+            # This mask is computed from raw sample fields (preferred) so it works even if `mask` is unreliable.
+            try:
+                x_raw = np.asarray(sample.get("x", []), dtype=np.float32)
+                y_raw = np.asarray(sample.get("y", []), dtype=np.float32)
+                vx_raw = np.asarray(sample.get("vx", []), dtype=np.float32) if "vx" in sample else None
+                vy_raw = np.asarray(sample.get("vy", []), dtype=np.float32) if "vy" in sample else None
+                ball_raw = np.asarray(sample.get("ball", []), dtype=np.float32) if "ball" in sample else None
+
+                n = int(node_features.size(0))
+                valid = np.ones(n, dtype=np.float32)
+
+                if x_raw.size >= n and y_raw.size >= n:
+                    # dummy patterns in normalized coordinates
+                    is_corner_dummy = (np.isclose(x_raw[:n], 0.0, atol=1e-6) & np.isclose(y_raw[:n], 0.0, atol=1e-6))
+                    is_center_dummy = (np.isclose(x_raw[:n], 0.5, atol=1e-6) & np.isclose(y_raw[:n], 0.5, atol=1e-6))
+
+                    is_zero_vel = np.zeros(n, dtype=bool)
+                    if vx_raw is not None and vy_raw is not None and vx_raw.size >= n and vy_raw.size >= n:
+                        is_zero_vel = (np.isclose(vx_raw[:n], 0.0, atol=1e-6) & np.isclose(vy_raw[:n], 0.0, atol=1e-6))
+
+                    is_not_ball = np.ones(n, dtype=bool)
+                    if ball_raw is not None and ball_raw.size >= n:
+                        is_not_ball = np.isclose(ball_raw[:n], 0.0, atol=1e-6)
+
+                    is_dummy = (is_corner_dummy | is_center_dummy) & is_zero_vel & is_not_ball
+                    valid[is_dummy] = 0.0
+
+                input_data["valid_mask"] = torch.tensor(valid, dtype=torch.float32)
+            except Exception:
+                # Fallback: treat all nodes as valid
+                input_data["valid_mask"] = torch.ones(node_features.size(0), dtype=torch.float32)
         
         # Apply transforms
         input_data, target = self._apply_transforms(input_data, target)
         
         return input_data, target
+
+    def _build_conditions(self, sample: Dict[str, Any]) -> torch.Tensor:
+        # Defaults
+        shot = 0.0
+        swing_onehot = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32)  # default: in
+        receiver_onehot = torch.zeros(22, dtype=torch.float32)
+
+        # receiver (prefer node index 0-21 if present)
+        ridx = None
+        for k in ("receiver_node_index", "receiver_id", "target_idx"):
+            if k in sample:
+                try:
+                    v = int(sample[k])
+                    if 0 <= v <= 21:
+                        ridx = v
+                        break
+                except Exception:
+                    pass
+        if ridx is not None:
+            receiver_onehot[ridx] = 1.0
+
+        # shot label (if present or can be joined later)
+        if "shot_occurred" in sample:
+            try:
+                shot = float(sample["shot_occurred"])
+            except Exception:
+                shot = 0.0
+
+        # swing: try to read if present, else infer from tracking if available
+        if "swing" in sample:
+            try:
+                s = int(sample["swing"])
+                # allow 0=in,1=out,2=short
+                if s == 0:
+                    swing_onehot = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32)
+                elif s == 1:
+                    swing_onehot = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)
+                else:
+                    swing_onehot = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32)
+            except Exception:
+                pass
+
+        c = torch.cat([torch.tensor([shot], dtype=torch.float32), swing_onehot, receiver_onehot], dim=0)
+        return c
 
 
 def collate_fn(batch: List[Tuple[Dict[str, torch.Tensor], torch.Tensor]]) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
@@ -677,7 +766,7 @@ def collate_fn(batch: List[Tuple[Dict[str, torch.Tensor], torch.Tensor]]) -> Tup
     
     # Optional per-node fields: mask, team, ball
     # Concatenate if present in all items
-    opt_keys = ["mask", "team", "ball", "cand_mask"]
+    opt_keys = ["mask", "team", "ball", "cand_mask", "valid_mask"]
     for k in opt_keys:
         if all(k in data for data in input_data_list):
             batched_input[k] = torch.cat([data[k] for data in input_data_list], dim=0)

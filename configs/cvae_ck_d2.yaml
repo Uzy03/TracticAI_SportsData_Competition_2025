@@ -1,0 +1,71 @@
+# CVAE config for Corner Kick (processed_ck-based) guided generation
+# D2 enabled: uses pretrained multitask backbone checkpoints/receiver_shot/best_d2.ckpt (frozen)
+
+model:
+  input_dim: 16
+  edge_dim: 10
+
+  # Condition:
+  # - shot(1)
+  # - swing one-hot (in/out/short = 3)
+  # - receiver one-hot (22)
+  condition_dim: 26
+
+  latent_dim: 32
+  output_dim: 88  # 22 players * (x,y,vx,vy)
+
+  # Must match the multitask backbone architecture (receiver_shot)
+  hidden_dim: 512
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.0
+  freeze_backbone: true
+
+optimizer:
+  type: "adam"
+  lr: 0.0003
+  weight_decay: 0.0001
+
+scheduler:
+  type: "cosine"
+  T_max: 50
+  eta_min: 0.000001
+  warmup_epochs: 5
+
+train:
+  batch_size: 4
+  epochs: 50
+  amp: false
+  log_every_n_steps: 10
+
+data:
+  train_path: "data/processed_ck/cvae_ck_train/data.pickle"
+  val_path: "data/processed_ck/cvae_ck_val/data.pickle"
+  test_path: "data/processed_ck/cvae_ck_test/data.pickle"
+  format: "pickle"
+
+loss:
+  recon_type: "mse"
+  recon_weight: 1.0
+  beta: 1.0
+  kl_weight: 1.0
+
+early_stopping:
+  patience: 15
+
+device: "auto"
+seed: 42
+num_workers: 0
+log_level: "INFO"
+log_dir: "runs/cvae_d2"
+checkpoint_dir: "checkpoints/cvae_d2"
+
+d2:
+  enabled: true
+
+pretrained_backbone:
+  enabled: true
+  checkpoint_dir: "checkpoints/receiver_shot"
+  strict: true
+
+

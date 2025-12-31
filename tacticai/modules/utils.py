@@ -514,6 +514,49 @@ def save_training_history_csv_shot(
         writer.writerows(rows)
 
 
+def save_training_history_csv_cvae(
+    train_history: Dict[str, list],
+    val_history: Dict[str, list],
+    filepath: Union[str, Path],
+) -> None:
+    """Save training history to CSV file for CVAE task (overwrite mode)."""
+    import csv
+
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+
+    num_epochs = len(train_history.get("loss", []))
+    rows = []
+    for epoch in range(num_epochs):
+        row = {
+            "epoch": epoch + 1,
+            "lr": train_history.get("lr", [""])[epoch] if epoch < len(train_history.get("lr", [])) else "",
+            "train_loss": train_history.get("loss", [0.0])[epoch] if epoch < len(train_history.get("loss", [])) else 0.0,
+            "train_recon_loss": train_history.get("recon_loss", [0.0])[epoch] if epoch < len(train_history.get("recon_loss", [])) else 0.0,
+            "train_kl_loss": train_history.get("kl_loss", [0.0])[epoch] if epoch < len(train_history.get("kl_loss", [])) else 0.0,
+            "val_loss": val_history.get("loss", [0.0])[epoch] if epoch < len(val_history.get("loss", [])) else 0.0,
+            "val_recon_loss": val_history.get("recon_loss", [0.0])[epoch] if epoch < len(val_history.get("recon_loss", [])) else 0.0,
+            "val_kl_loss": val_history.get("kl_loss", [0.0])[epoch] if epoch < len(val_history.get("kl_loss", [])) else 0.0,
+        }
+        rows.append(row)
+
+    fieldnames = [
+        "epoch",
+        "lr",
+        "train_loss",
+        "train_recon_loss",
+        "train_kl_loss",
+        "val_loss",
+        "val_recon_loss",
+        "val_kl_loss",
+    ]
+
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def save_training_history_csv_multitask(
     train_history: Dict[str, list],
     val_history: Dict[str, list],

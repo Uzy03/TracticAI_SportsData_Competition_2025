@@ -14,6 +14,7 @@ from .mlp_heads import (
     CVAEHead,
     marginalize_shot,
 )
+from .heads.generator import CVAEGenerator, ConditionLayout
 from .cvae import CVAEEncoder, CVAEDecoder, CVAEModel
 from .multitask_model import MultiTaskModel
 
@@ -28,6 +29,8 @@ __all__ = [
     "ShotHeadNodeBased",
     "CVAEHead",
     "marginalize_shot",
+    "CVAEGenerator",
+    "ConditionLayout",
     "CVAEEncoder",
     "CVAEDecoder",
     "CVAEModel",
