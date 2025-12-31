@@ -103,6 +103,18 @@ def main() -> None:
     model.eval()
 
     with torch.no_grad():
+        # Posterior reconstruction (debug): uses x_gt and should match target if training worked.
+        x_gt = targets.to(device).view(1, -1, 4)
+        recon, mu_post, logvar_post = model(
+            x=x,
+            edge_index=edge_index,
+            batch=batch,
+            conditions=cond,
+            x_gt=x_gt,
+            edge_attr=edge_attr,
+            training=True,
+        )  # recon: [1,N,4]
+
         samples = model.generate(
             x=x,
             edge_index=edge_index,
@@ -126,10 +138,14 @@ def main() -> None:
         "edge_index": edge_index.detach().cpu().numpy().astype(np.int64),
         "edge_attr": edge_attr.detach().cpu().numpy().astype(np.float32) if edge_attr is not None else None,
         "targets": targets.detach().cpu().numpy().astype(np.float32),
+        "recon_posterior": recon.detach().cpu().numpy().astype(np.float32),
+        "posterior_mu": mu_post.detach().cpu().numpy().astype(np.float32),
+        "posterior_logvar": logvar_post.detach().cpu().numpy().astype(np.float32),
         "generated": samples.detach().cpu().numpy().astype(np.float32),
     }
     if args.denormalize:
         out_obj["targets_denorm"] = denormalize_states(out_obj["targets"].reshape(1, -1, 4)).reshape(-1, 4)
+        out_obj["recon_posterior_denorm"] = denormalize_states(out_obj["recon_posterior"])
         out_obj["generated_denorm"] = denormalize_states(out_obj["generated"])
 
     with open(out_path, "wb") as f:

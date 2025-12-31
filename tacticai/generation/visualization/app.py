@@ -191,13 +191,22 @@ S = int(generated.shape[1])
 
 st.caption(f"Loaded: {pickle_path} | generated: {tuple(generated.shape)}")
 
-# Target
+# Target / Posterior recon (debug)
 try:
     target_df = _make_df(targets.reshape(22, 4), x_input)
     fig_t = plot_snapshot(target_df, title="Target (GT)", show_vectors=show_vectors, vector_scale=vector_scale, max_vector_len=max_vec)
     st.plotly_chart(fig_t, use_container_width=True)
 except Exception as e:
     st.error(f"Targetの描画に失敗: {e}")
+
+if "recon_posterior" in obj:
+    try:
+        recon = np.asarray(obj["recon_posterior"], dtype=np.float32)  # [1,N,4]
+        recon_df = _make_df(recon.reshape(22, 4), x_input)
+        fig_r = plot_snapshot(recon_df, title="Posterior recon (x_gtあり / デバッグ)", show_vectors=show_vectors, vector_scale=vector_scale, max_vector_len=max_vec)
+        st.plotly_chart(fig_r, use_container_width=True)
+    except Exception as e:
+        st.error(f"Posterior reconの描画に失敗: {e}")
 
 st.subheader("Generated samples")
 
