@@ -252,7 +252,12 @@ def train_epoch(
         
         # Check for NaN/Inf
         if torch.isnan(total_batch_loss) or torch.isinf(total_batch_loss):
-            logger.warning(f"NaN/Inf loss detected! Skipping batch {batch_idx}")
+            logger.warning(
+                f"NaN/Inf loss detected! Skipping batch {batch_idx} | "
+                f"receiver_loss={float(receiver_loss.detach().cpu()):.6f}, "
+                f"shot_loss={float(shot_loss.detach().cpu()):.6f}, "
+                f"consistency_loss={float(consistency_loss_t.detach().cpu()):.6f}"
+            )
             continue
         
         if use_amp and scaler is not None:
@@ -289,6 +294,27 @@ def train_epoch(
         })
     
     # Compute shot metrics
+    # If all batches were skipped due to NaN/Inf, shot_predictions can be empty.
+    if len(shot_predictions) == 0 or len(shot_targets) == 0:
+        logger.error(
+            "All training batches were skipped due to NaN/Inf losses; "
+            "skipping metric aggregation for this epoch."
+        )
+        # Return sentinel metrics so training loop can continue / early stopping can react.
+        epoch_metrics = {
+            "total_loss": float("inf"),
+            "receiver_loss": float("inf"),
+            "shot_loss": float("inf"),
+            "consistency_loss": float("inf"),
+            "receiver_top1": 0.0,
+            "receiver_top3": 0.0,
+            "shot_acc": 0.0,
+            "shot_auc_roc": 0.5,
+            "shot_auc_pr": 0.0,
+            "shot_f1": 0.0,
+        }
+        return epoch_metrics
+
     with torch.no_grad():
         shot_logits_all = torch.cat(shot_predictions, dim=0)
         shot_targets_all = torch.cat(shot_targets, dim=0)
