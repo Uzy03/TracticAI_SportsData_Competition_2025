@@ -250,27 +250,85 @@ def train_epoch(
             + float(lambda_consistency) * consistency_loss_t
         )
         
-        # Check for NaN/Inf
+        # Check for NaN/Inf with detailed diagnostics
         if torch.isnan(total_batch_loss) or torch.isinf(total_batch_loss):
-            logger.warning(
-                f"NaN/Inf loss detected! Skipping batch {batch_idx} | "
-                f"receiver_loss={float(receiver_loss.detach().cpu()):.6f}, "
-                f"shot_loss={float(shot_loss.detach().cpu()):.6f}, "
-                f"consistency_loss={float(consistency_loss_t.detach().cpu()):.6f}"
+            # Detailed NaN diagnostics
+            rec_val = float(receiver_loss.detach().cpu())
+            shot_val = float(shot_loss.detach().cpu())
+            cons_val = float(consistency_loss_t.detach().cpu())
+            
+            # Check individual components
+            rec_nan = torch.isnan(receiver_loss) or torch.isinf(receiver_loss)
+            shot_nan = torch.isnan(shot_loss) or torch.isinf(shot_loss)
+            cons_nan = torch.isnan(consistency_loss_t) or torch.isinf(consistency_loss_t)
+            
+            # Check for extreme values (potential explosion)
+            rec_extreme = abs(rec_val) > 1e6 if not rec_nan else False
+            shot_extreme = abs(shot_val) > 1e6 if not shot_nan else False
+            cons_extreme = abs(cons_val) > 1e6 if not cons_nan else False
+            
+            logger.error(
+                f"NaN/Inf loss detected! Batch {batch_idx} | "
+                f"receiver_loss={rec_val:.6f} (nan={rec_nan}, extreme={rec_extreme}), "
+                f"shot_loss={shot_val:.6f} (nan={shot_nan}, extreme={shot_extreme}), "
+                f"consistency_loss={cons_val:.6f} (nan={cons_nan}, extreme={cons_extreme})"
             )
+            
+            # Additional diagnostics: check model parameters for NaN
+            with torch.no_grad():
+                param_nan_count = 0
+                param_inf_count = 0
+                for name, param in model.named_parameters():
+                    if param.requires_grad:
+                        nan_count = torch.isnan(param).sum().item()
+                        inf_count = torch.isinf(param).sum().item()
+                        if nan_count > 0 or inf_count > 0:
+                            logger.error(f"  Parameter '{name}' has NaN={nan_count}, Inf={inf_count}")
+                            param_nan_count += nan_count
+                            param_inf_count += inf_count
+                
+                if param_nan_count > 0 or param_inf_count > 0:
+                    logger.error(f"  Total NaN params: {param_nan_count}, Inf params: {param_inf_count}")
+            
+            skipped_batches += 1
             continue
+        
+        # Check for extreme (but not NaN) loss values that might indicate instability
+        if abs(float(total_batch_loss.item())) > 1e5:
+            logger.warning(
+                f"Extremely large loss detected (not NaN): {total_batch_loss.item():.2e} at batch {batch_idx} | "
+                f"rec={receiver_loss.item():.4f}, shot={shot_loss.item():.4f}, cons={consistency_loss_t.item():.4f}"
+            )
         
         if use_amp and scaler is not None:
             scaler.scale(total_batch_loss).backward()
             if grad_clip_enabled:
                 scaler.unscale_(optimizer)
+                # Check gradient norm before clipping
+                grad_norm_before = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
+                if grad_norm_before > 100.0:  # Warn if gradient is very large
+                    logger.warning(
+                        f"Large gradient norm before clipping: {grad_norm_before:.2f} at batch {batch_idx}"
+                    )
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
+                grad_norm_after = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
+                if batch_idx % 50 == 0:  # Log every 50 batches to avoid spam
+                    logger.debug(f"Gradient norm: before={grad_norm_before:.4f}, after={grad_norm_after:.4f}")
             scaler.step(optimizer)
             scaler.update()
         else:
             total_batch_loss.backward()
             if grad_clip_enabled:
+                # Check gradient norm before clipping
+                grad_norm_before = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
+                if grad_norm_before > 100.0:  # Warn if gradient is very large
+                    logger.warning(
+                        f"Large gradient norm before clipping: {grad_norm_before:.2f} at batch {batch_idx}"
+                    )
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
+                grad_norm_after = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
+                if batch_idx % 50 == 0:  # Log every 50 batches to avoid spam
+                    logger.debug(f"Gradient norm: before={grad_norm_before:.4f}, after={grad_norm_after:.4f}")
             optimizer.step()
         
         # Accumulate metrics

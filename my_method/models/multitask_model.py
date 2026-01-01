@@ -143,10 +143,19 @@ class MultiTaskModel(nn.Module):
                 pairs = 0
                 for i in range(V):
                     for j in range(i + 1, V):
-                        cons = cons + F.mse_loss(node_emb_4view[:, i], node_emb_4view[:, j], reduction="mean")
+                        pair_loss = F.mse_loss(node_emb_4view[:, i], node_emb_4view[:, j], reduction="mean")
+                        # Safety check: skip if pair_loss is NaN/Inf
+                        if torch.isnan(pair_loss) or torch.isinf(pair_loss):
+                            # Return a zero loss to prevent NaN propagation
+                            consistency_loss = torch.tensor(0.0, device=node_emb_4view.device, dtype=node_emb_4view.dtype)
+                            break
+                        cons = cons + pair_loss
                         pairs += 1
                 if pairs > 0:
                     consistency_loss = cons / float(pairs)
+                    # Final safety check
+                    if torch.isnan(consistency_loss) or torch.isinf(consistency_loss):
+                        consistency_loss = torch.tensor(0.0, device=node_emb_4view.device, dtype=node_emb_4view.dtype)
 
             H = node_emb_4view.mean(dim=1)  # Average over 4 views: [B, N_per_graph, hidden_dim]
         else:
