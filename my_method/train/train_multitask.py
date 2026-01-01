@@ -513,6 +513,21 @@ def main():
     
     # Setup device
     device = get_device(config.get("device", "auto"))
+
+    # Performance knobs (safe defaults for NVIDIA Ampere+; no effect on CPU)
+    train_cfg = config.get("train", {})
+    if device.type == "cuda":
+        try:
+            if bool(train_cfg.get("tf32", True)):
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                # PyTorch 2.x matmul precision hint
+                try:
+                    torch.set_float32_matmul_precision("high")
+                except Exception:
+                    pass
+        except Exception:
+            pass
     
     # Setup logging
     # If config includes run_name, separate outputs like:
@@ -634,12 +649,19 @@ def main():
     
     # Create dataloaders (use multitask collate_fn)
     train_shuffle = False if use_debug_overfit else True
+    num_workers = int(config.get("num_workers", 0))
+    # pin_memory tends to help host->GPU transfer; persistent_workers avoids worker respawn each epoch
+    pin_memory = bool(config.get("pin_memory", True)) and (device.type == "cuda")
+    persistent_workers = bool(config.get("persistent_workers", True)) and (num_workers > 0)
+    prefetch_factor = int(config.get("prefetch_factor", 2))
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=config["train"]["batch_size"],
         shuffle=train_shuffle,
-        num_workers=config.get("num_workers", 0),
-        pin_memory=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
         collate_fn=collate_fn_multitask,
     )
     
@@ -647,8 +669,10 @@ def main():
         val_dataset,
         batch_size=config["eval"]["batch_size"],
         shuffle=False,
-        num_workers=config.get("num_workers", 0),
-        pin_memory=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
         collate_fn=collate_fn_multitask,
     )
     
@@ -656,8 +680,10 @@ def main():
         test_dataset,
         batch_size=config["eval"]["batch_size"],
         shuffle=False,
-        num_workers=config.get("num_workers", 0),
-        pin_memory=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
         collate_fn=collate_fn_multitask,
     )
     
