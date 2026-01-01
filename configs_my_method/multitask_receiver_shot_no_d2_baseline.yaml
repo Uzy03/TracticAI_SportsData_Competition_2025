@@ -24,14 +24,14 @@ optimizer:
 
 scheduler:
   type: "cosine"
-  T_max: 100
+  T_max: 50
   eta_min: 0.000001
   warmup_epochs: 5
 
 train:
   batch_size: 32
-  epochs: 100
-  amp: false
+  epochs: 50
+  amp: true
   grad_clip:
     enabled: true
     max_norm: 1.0  # no_D2は1.0を推奨
@@ -89,7 +89,7 @@ eval:
 
 device: "auto"
 seed: 42
-num_workers: 0
+num_workers: 4
 log_level: "INFO"
 
 log_dir: "runs/my_method"

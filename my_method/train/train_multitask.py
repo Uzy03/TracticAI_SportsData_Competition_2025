@@ -739,7 +739,8 @@ def main():
     checkpoint_filename = "best_d2.ckpt" if use_d2 else "best_no_d2.ckpt"
     checkpoint_path = model_save_dir / checkpoint_filename
     
-    best_val_metric = float('-inf')
+    # Track best metric for checkpointing (direction depends on early_stopping mode)
+    best_val_metric = float('inf') if mode == "min" else float('-inf')
     
     # Training loop
     num_epochs = config["train"]["epochs"]
@@ -837,7 +838,8 @@ def main():
                 logger.error(f"All val_metrics: {val_metrics}")
                 raise ValueError(f"Monitor metric '{monitor_key}' is NaN or Inf: {monitor_metric}")
 
-            if monitor_metric > best_val_metric:
+            is_better = (monitor_metric < best_val_metric) if mode == "min" else (monitor_metric > best_val_metric)
+            if is_better:
                 best_val_metric = monitor_metric
                 logger.info(f"Saving checkpoint for epoch {epoch+1}...")
                 save_checkpoint(
@@ -875,7 +877,7 @@ def main():
     test_metrics = validate_epoch(
         model, test_dataloader,
         criterion_receiver, criterion_shot, device, metrics,
-        lambda_receiver, lambda_shot,
+        lambda_receiver, lambda_shot, lambda_consistency,
         receiver_loss_weight, shot_loss_weight,
     )
     
