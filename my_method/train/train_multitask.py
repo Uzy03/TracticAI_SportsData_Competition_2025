@@ -304,31 +304,25 @@ def train_epoch(
             scaler.scale(total_batch_loss).backward()
             if grad_clip_enabled:
                 scaler.unscale_(optimizer)
-                # Check gradient norm before clipping
-                grad_norm_before = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
-                if grad_norm_before > 100.0:  # Warn if gradient is very large
-                    logger.warning(
-                        f"Large gradient norm before clipping: {grad_norm_before:.2f} at batch {batch_idx}"
-                    )
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
-                grad_norm_after = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
-                if batch_idx % 50 == 0:  # Log every 50 batches to avoid spam
-                    logger.debug(f"Gradient norm: before={grad_norm_before:.4f}, after={grad_norm_after:.4f}")
+                # NOTE: clip_grad_norm_ returns the total norm *before* clipping.
+                # Avoid extra passes over parameters (this can be a major slowdown).
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
+                if grad_norm > 100.0:  # Warn if gradient is very large
+                    logger.warning(f"Large gradient norm: {grad_norm:.2f} at batch {batch_idx}")
+                if batch_idx % 50 == 0:  # Avoid log spam
+                    logger.debug(f"Gradient norm (pre-clip): {grad_norm:.4f}")
             scaler.step(optimizer)
             scaler.update()
         else:
             total_batch_loss.backward()
             if grad_clip_enabled:
-                # Check gradient norm before clipping
-                grad_norm_before = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
-                if grad_norm_before > 100.0:  # Warn if gradient is very large
-                    logger.warning(
-                        f"Large gradient norm before clipping: {grad_norm_before:.2f} at batch {batch_idx}"
-                    )
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
-                grad_norm_after = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
-                if batch_idx % 50 == 0:  # Log every 50 batches to avoid spam
-                    logger.debug(f"Gradient norm: before={grad_norm_before:.4f}, after={grad_norm_after:.4f}")
+                # NOTE: clip_grad_norm_ returns the total norm *before* clipping.
+                # Avoid extra passes over parameters (this can be a major slowdown).
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_max_norm)
+                if grad_norm > 100.0:
+                    logger.warning(f"Large gradient norm: {grad_norm:.2f} at batch {batch_idx}")
+                if batch_idx % 50 == 0:
+                    logger.debug(f"Gradient norm (pre-clip): {grad_norm:.4f}")
             optimizer.step()
         
         # Accumulate metrics
