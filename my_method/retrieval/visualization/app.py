@@ -624,26 +624,67 @@ def main():
     # Sidebar configuration
     st.sidebar.header("Configuration")
     
-    # Config file selection
-    config_path = st.sidebar.text_input(
-        "Config file path",
-        value="configs_my_method/multitask_receiver_shot_d2_consistency_stable.yaml",
-        help="Path to YAML config file",
+    # ---- Easy selectors (recommended) ----
+    # Config selection (dropdown)
+    default_config = "configs_my_method/multitask_receiver_shot_d2_consistency_stable.yaml"
+    try:
+        cfg_candidates = sorted([str(p.as_posix()) for p in Path("configs_my_method").glob("*.yaml")])
+    except Exception:
+        cfg_candidates = []
+    if default_config not in cfg_candidates:
+        cfg_candidates = [default_config] + cfg_candidates
+
+    config_path = st.sidebar.selectbox(
+        "Config（選択）",
+        options=cfg_candidates,
+        index=0,
+        help="普段はここだけ選べばOK（my_method用config）",
     )
-    
-    # Index file selection
-    index_path = st.sidebar.text_input(
-        "Index file path",
-        value="runs/my_method/consistency_stable/indices/index_d2.pkl",
-        help="Path to search index file",
+
+    # Infer default index path from selected config (run_name + d2)
+    inferred_index_path = None
+    try:
+        with open(config_path, "r") as f:
+            _cfg_tmp = yaml.safe_load(f)
+        rn = _cfg_tmp.get("run_name", "default_run")
+        d2_enabled = _cfg_tmp.get("d2", {}).get("enabled", False)
+        inferred_index_path = f"runs/my_method/{rn}/indices/index_{'d2' if d2_enabled else 'no_d2'}.pkl"
+    except Exception:
+        inferred_index_path = "runs/my_method/consistency_stable/indices/index_d2.pkl"
+
+    # Index selection (dropdown)
+    try:
+        idx_candidates = sorted([str(p.as_posix()) for p in Path("runs/my_method").glob("*/indices/index_*.pkl")])
+    except Exception:
+        idx_candidates = []
+    if inferred_index_path not in idx_candidates:
+        idx_candidates = [inferred_index_path] + idx_candidates
+
+    index_path = st.sidebar.selectbox(
+        "Index（選択）",
+        options=idx_candidates,
+        index=0,
+        help="consistency_stable / baseline_stable など run_name ごとの index を選択",
     )
-    
-    # Data path selection
-    data_path = st.sidebar.text_input(
-        "Data path",
-        value="data/processed_ck/receiver_train/data.pickle",
-        help="Path to receiver dataset",
-    )
+
+    # Advanced: allow manual override (optional)
+    with st.sidebar.expander("詳細設定（手入力したい場合）", expanded=False):
+        custom_config_path = st.text_input("Config file path（手入力）", value=config_path)
+        custom_index_path = st.text_input("Index file path（手入力）", value=index_path)
+        use_custom_paths = st.checkbox("手入力のパスを使う", value=False)
+
+    if "use_custom_paths" in locals() and use_custom_paths:
+        config_path = custom_config_path
+        index_path = custom_index_path
+
+    # Data path is rarely needed; keep it in advanced section
+    data_path = "data/processed_ck/receiver_train/data.pickle"
+    with st.sidebar.expander("データセット設定（通常は触らない）", expanded=False):
+        data_path = st.text_input(
+            "Data path（手入力）",
+            value=data_path,
+            help="通常は下の「configのreceiver_train/val/testを使う」をONにしておけばOK",
+        )
 
     use_config_splits = st.sidebar.checkbox(
         "Use config receiver_train/val/test paths (recommended for index=373)",
