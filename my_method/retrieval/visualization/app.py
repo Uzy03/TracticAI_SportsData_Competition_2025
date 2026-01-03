@@ -20,27 +20,27 @@ import math
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from tacticai.retrieval import SimilarCKSearch, SimilarCKIndex
-from tacticai.dataio import ReceiverDataset
-from tacticai.modules import get_device
+from my_method.retrieval import SimilarCKSearch, SimilarCKIndex
+from my_method.dataio import ReceiverDataset
+from my_method.modules import get_device
 
 # Import utils (handle both relative and absolute imports)
 try:
     from .utils import draw_soccer_field, load_raw_sample_data, get_ball_swing_arc
 except ImportError:
-    from tacticai.retrieval.visualization.utils import draw_soccer_field, load_raw_sample_data, get_ball_swing_arc
+    from my_method.retrieval.visualization.utils import draw_soccer_field, load_raw_sample_data, get_ball_swing_arc
 try:
     from .utils import get_short_pass_arrow
 except ImportError:
-    from tacticai.retrieval.visualization.utils import get_short_pass_arrow
+    from my_method.retrieval.visualization.utils import get_short_pass_arrow
 try:
     from .utils import load_ball_trajectory_from_tracking, infer_swing_from_ball_trajectory
 except ImportError:
-    from tacticai.retrieval.visualization.utils import load_ball_trajectory_from_tracking, infer_swing_from_ball_trajectory
+    from my_method.retrieval.visualization.utils import load_ball_trajectory_from_tracking, infer_swing_from_ball_trajectory
 try:
     from .utils import get_emphasized_swing_arc_from_start
 except ImportError:
-    from tacticai.retrieval.visualization.utils import get_emphasized_swing_arc_from_start
+    from my_method.retrieval.visualization.utils import get_emphasized_swing_arc_from_start
 
 
 def _get_raw_sample(dataset: Any, idx: int) -> Dict[str, Any]:
@@ -79,6 +79,9 @@ def load_search_system(config_path: str, checkpoint_path: Optional[str] = None):
         d2_enabled = config.get("d2", {}).get("enabled", False)
         checkpoint_dir = config.get("checkpoint_dir", "checkpoints")
         model_save_dir = config.get("model_save_dir", f"{checkpoint_dir}/receiver_shot")
+        run_name = config.get("run_name", None)
+        if run_name:
+            model_save_dir = f"{model_save_dir}/{run_name}"
         if d2_enabled:
             checkpoint_path = f"{model_save_dir}/best_d2.ckpt"
         else:
@@ -624,14 +627,14 @@ def main():
     # Config file selection
     config_path = st.sidebar.text_input(
         "Config file path",
-        value="configs/multitask_receiver_shot_d2.yaml",
+        value="configs_my_method/multitask_receiver_shot_d2_consistency_stable.yaml",
         help="Path to YAML config file",
     )
     
     # Index file selection
     index_path = st.sidebar.text_input(
         "Index file path",
-        value="runs/retrieval/index_d2.pkl",
+        value="runs/my_method/consistency_stable/indices/index_d2.pkl",
         help="Path to search index file",
     )
     
