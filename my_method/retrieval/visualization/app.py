@@ -891,19 +891,23 @@ def main():
             help="画面が狭い場合に左右の結果が潰れないよう、横スクロールで表示します。",
         )
     # Results rendering: avoid squished plots by forcing horizontal scrolling rows with a minimum card width.
+    # NOTE: 横スクロール表示は環境差（Streamlitのレイアウト/ブラウザ）で崩れやすいので、
+    # デフォルトは「縦に並べて大きく表示」にしています。
     results_horizontal_scroll = st.sidebar.checkbox(
-        "検索結果を横スクロール（Queryと同じくらい大きく表示）",
-        value=True,
-        help="Top-k / Bottom-k を1行横並びにして、各カードを潰さず横スクロールで見られるようにします。",
+        "（任意）検索結果を横スクロールで表示",
+        value=False,
+        help="環境によっては崩れることがあるため、基本はOFF推奨です。",
     )
-    result_card_min_width_px = st.sidebar.slider(
-        "結果カード最小幅（px）",
-        min_value=500,
-        max_value=1400,
-        value=900,
-        step=50,
-        help="Query CKと同じくらいの見た目にしたい場合は大きめ（例: 900〜1200）にしてください。",
-    )
+    result_card_min_width_px = 900
+    if results_horizontal_scroll:
+        result_card_min_width_px = st.sidebar.slider(
+            "結果カード最小幅（px）",
+            min_value=500,
+            max_value=1400,
+            value=900,
+            step=50,
+            help="横スクロールのときだけ使います。",
+        )
     with st.sidebar.expander("Proposed similarity settings", expanded=False):
         w_att = st.slider("Weight: attacking", 0.0, 3.0, 1.0, 0.1)
         w_def = st.slider("Weight: defending", 0.0, 3.0, 1.0, 0.1)
@@ -1145,27 +1149,27 @@ def main():
                 if idx >= len(dataset):
                     continue
                 _d, similar_target = dataset[idx]
-                similar_raw_sample = _get_raw_sample(dataset, idx)
-                similar_df = load_raw_sample_data(similar_raw_sample)
+                                similar_raw_sample = _get_raw_sample(dataset, idx)
+                                similar_df = load_raw_sample_data(similar_raw_sample)
                 fig_i = plot_ck_snapshot(
-                    similar_df,
+                                    similar_df,
                     title=f"Idx {idx}",
-                    show_vectors=show_vectors,
-                    vector_scale=vector_scale,
-                    max_vector_len=max_vector_len,
-                    vector_offset_m=vector_offset_m,
-                    min_vector_len=min_vector_len,
-                    show_ids=show_ids,
-                    show_ball_arc=show_ball_arc,
-                    swing_mode=swing_mode,
-                    trajectory_source=trajectory_source,
-                    soccerdata_dir=soccerdata_dir,
-                    traj_window_frames=int(traj_window_frames),
-                    emphasize_swing=emphasize_swing,
-                    show_raw_tracking=show_raw_tracking,
-                    swing_curvature_m=float(swing_curvature_m),
-                    receiver_idx=int(similar_target.item()),
-                )
+                                    show_vectors=show_vectors,
+                                    vector_scale=vector_scale,
+                                    max_vector_len=max_vector_len,
+                                    vector_offset_m=vector_offset_m,
+                                    min_vector_len=min_vector_len,
+                                    show_ids=show_ids,
+                                    show_ball_arc=show_ball_arc,
+                                    swing_mode=swing_mode,
+                                    trajectory_source=trajectory_source,
+                                    soccerdata_dir=soccerdata_dir,
+                                    traj_window_frames=int(traj_window_frames),
+                                    emphasize_swing=emphasize_swing,
+                                    show_raw_tracking=show_raw_tracking,
+                                    swing_curvature_m=float(swing_curvature_m),
+                                    receiver_idx=int(similar_target.item()),
+                                )
                 per_figs.append(fig_i)
                 per_meta.append(
                     {
@@ -1306,17 +1310,9 @@ def main():
                     st.info("No valid results to display.")
                 return
 
-            # Default grid layout
-        num_rows = (num_results + num_cols - 1) // num_cols
-        for row in range(num_rows):
-            cols = st.columns(num_cols)
-            for col_idx in range(num_cols):
-                    r_i = row * num_cols + col_idx
-                    if r_i >= num_results:
-                        continue
-                    result = results[r_i]
-                    idx = int(result["index"])
-                    with cols[col_idx]:
+            # Default (recommended): vertical layout (no squish, no overlap)
+            for r_i, result in enumerate(results):
+                idx = int(result["index"])
                         sim_val = result.get("similarity", None)
                         sim_str = "N/A"
                         try:
@@ -1325,16 +1321,16 @@ def main():
                                 sim_str = f"{sim_f:.4f}"
                         except Exception:
                             pass
-                        st.markdown(f"**Rank {r_i + 1}** (Similarity: {sim_str})")
-                        st.caption(f"Index: {idx}")
+
+                st.markdown(f"**Rank {r_i + 1}** (Similarity: {sim_str})  |  Index: {idx}")
                         try:
                             if idx < len(dataset):
-                                _d, similar_target = dataset[idx]
+                        _d, similar_target = dataset[idx]
                                 similar_raw_sample = _get_raw_sample(dataset, idx)
                                 similar_df = load_raw_sample_data(similar_raw_sample)
-                                fig = plot_ck_snapshot(
+                        fig = plot_ck_snapshot(
                                     similar_df,
-                                    title=f"Idx {idx}",
+                            title=f"Idx {idx}",
                                     show_vectors=show_vectors,
                                     vector_scale=vector_scale,
                                     max_vector_len=max_vector_len,
@@ -1351,16 +1347,17 @@ def main():
                                     swing_curvature_m=float(swing_curvature_m),
                                     receiver_idx=int(similar_target.item()),
                                 )
-                                st.plotly_chart(
-                                    fig,
-                                    use_container_width=True,
-                                    key=f"{panel_key}_rank{r_i+1}_idx{idx}",
-                                )
-                                st.caption(f"Receiver: {int(similar_target.item())}")
+                        st.plotly_chart(
+                            fig,
+                            use_container_width=True,
+                            key=f"{panel_key}_rank{r_i+1}_idx{idx}",
+                        )
+                        st.caption(f"Receiver: {int(similar_target.item())}")
                             else:
                                 st.warning(f"Index {idx} out of dataset range")
                         except Exception as e:
                             st.error(f"Error loading sample {idx}: {str(e)}")
+                st.divider()
 
         if compare_mode == "Side-by-side (Cosine vs Proposed)":
             if enable_horizontal_scroll:
