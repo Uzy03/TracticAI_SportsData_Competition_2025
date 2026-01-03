@@ -16,6 +16,7 @@ import yaml
 import torch
 from torch.utils.data import ConcatDataset
 import math
+import copy
 
 # Proposed structural similarity (optional dependency)
 try:
@@ -850,7 +851,7 @@ def main():
             "Data path（手入力）",
             value=data_path,
             help="通常は下の「configのreceiver_train/val/testを使う」をONにしておけばOK",
-        )
+    )
 
     use_config_splits = st.sidebar.checkbox(
         "Use config receiver_train/val/test paths (recommended for index=373)",
@@ -1063,14 +1064,14 @@ def main():
                     bottom_indices = np.argsort(sims_arr)[:k]
                     top_r = [{
                         "similarity": float(sims_arr[i]),
-                        "metadata": index.metadata[int(i)].copy() if (index.metadata and int(i) < len(index.metadata)) else {},
-                        "index": int(i),
-                    } for i in top_indices]
+                    "metadata": index.metadata[int(i)].copy() if (index.metadata and int(i) < len(index.metadata)) else {},
+                    "index": int(i),
+                } for i in top_indices]
                     bot_r = [{
                         "similarity": float(sims_arr[i]),
-                        "metadata": index.metadata[int(i)].copy() if (index.metadata and int(i) < len(index.metadata)) else {},
-                        "index": int(i),
-                    } for i in bottom_indices]
+                    "metadata": index.metadata[int(i)].copy() if (index.metadata and int(i) < len(index.metadata)) else {},
+                    "index": int(i),
+                } for i in bottom_indices]
                     return top_r, bot_r
 
                 top_cos, bottom_cos = _pack_results(sims_cos)
@@ -1123,57 +1124,32 @@ def main():
         )
         st.plotly_chart(query_fig, use_container_width=True, key=f"query_fig_{int(query_idx)}")
 
-        def _render_result_grid(
+        def _build_tiled_row_figure(
             results: list[dict],
-            header: str,
             panel_key: str,
             *,
-            horizontal_scroll: bool,
             card_min_width_px: int,
-        ):
-            st.subheader(header)
-            num_results = len(results)
-            if horizontal_scroll and num_results > 0:
-                # Put all results in a single horizontal row and scroll instead of shrinking.
-                marker_id = f"{panel_key}_results_row_marker"
-                st.markdown(
-                    f"""
-<style>
-#{marker_id} + div[data-testid="stHorizontalBlock"] {{
-  overflow-x: auto;
-  flex-wrap: nowrap;
-  gap: 1rem;
-}}
-#{marker_id} + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {{
-  min-width: {int(card_min_width_px)}px;
-}}
-</style>
-<div id="{marker_id}"></div>
-""",
-                    unsafe_allow_html=True,
-                )
-                cols = st.columns(num_results)
-                for r_i, result in enumerate(results):
-                    idx = int(result["index"])
-                    with cols[r_i]:
-                        sim_val = result.get("similarity", None)
-                        sim_str = "N/A"
-                        try:
-                            sim_f = float(sim_val)
-                            if math.isfinite(sim_f):
-                                sim_str = f"{sim_f:.4f}"
-                        except Exception:
-                            pass
-                        st.markdown(f"**Rank {r_i + 1}** (Similarity: {sim_str})")
-                        st.caption(f"Index: {idx}")
-                        try:
-                            if idx < len(dataset):
-                                _d, similar_target = dataset[idx]
+        ) -> Optional[go.Figure]:
+            """Build a single wide Plotly figure by tiling multiple CK snapshot figures horizontally.
+
+            This avoids Streamlit's `st.columns` shrink behavior (which squashes plots on narrow screens).
+            """
+            if not results:
+                return None
+
+            # Build per-sample figures first (re-using the same snapshot function).
+            per_figs: list[go.Figure] = []
+            per_meta: list[dict] = []
+            for r_i, result in enumerate(results):
+                idx = int(result["index"])
+                if idx >= len(dataset):
+                    continue
+                _d, similar_target = dataset[idx]
                                 similar_raw_sample = _get_raw_sample(dataset, idx)
                                 similar_df = load_raw_sample_data(similar_raw_sample)
-                                fig = plot_ck_snapshot(
+                fig_i = plot_ck_snapshot(
                                     similar_df,
-                                    title=f"Idx {idx}",
+                    title=f"Idx {idx}",
                                     show_vectors=show_vectors,
                                     vector_scale=vector_scale,
                                     max_vector_len=max_vector_len,
@@ -1190,23 +1166,151 @@ def main():
                                     swing_curvature_m=float(swing_curvature_m),
                                     receiver_idx=int(similar_target.item()),
                                 )
-                                st.plotly_chart(
-                                    fig,
-                                    use_container_width=True,
-                                    key=f"{panel_key}_rank{r_i+1}_idx{idx}",
-                                )
-                                st.caption(f"Receiver: {int(similar_target.item())}")
-                            else:
-                                st.warning(f"Index {idx} out of dataset range")
-                        except Exception as e:
-                            st.error(f"Error loading sample {idx}: {str(e)}")
+                per_figs.append(fig_i)
+                per_meta.append(
+                    {
+                        "rank": r_i + 1,
+                        "idx": idx,
+                        "receiver": int(similar_target.item()),
+                        "similarity": result.get("similarity", None),
+                    }
+                )
+
+            if not per_figs:
+                return None
+
+            # Determine base axis ranges from the first figure.
+            base_xrange = [-60.0, 60.0]
+            base_yrange = [-39.0, 39.0]
+            try:
+                xr = per_figs[0].layout.xaxis.range
+                yr = per_figs[0].layout.yaxis.range
+                if xr is not None and len(xr) == 2:
+                    base_xrange = [float(xr[0]), float(xr[1])]
+                if yr is not None and len(yr) == 2:
+                    base_yrange = [float(yr[0]), float(yr[1])]
+            except Exception:
+                pass
+
+            pitch_span = (base_xrange[1] - base_xrange[0]) + 15.0  # add gap between pitches
+
+            big = go.Figure()
+
+            # Helper to shift a trace's x coordinates
+            def _shift_trace_x(tr: go.BaseTraceType, dx: float, showlegend: bool) -> go.BaseTraceType:
+                tr2 = copy.deepcopy(tr)
+                try:
+                    if hasattr(tr2, "x") and tr2.x is not None:
+                        x_arr = np.asarray(tr2.x, dtype=float)
+                        tr2.x = (x_arr + float(dx)).tolist()
+                except Exception:
+                    pass
+                tr2.showlegend = bool(showlegend and getattr(tr2, "showlegend", True))
+                return tr2
+
+            # Helper to shift a shape dict's x coordinates
+            def _shift_shape_x(shape_obj: Any, dx: float) -> dict:
+                s = shape_obj.to_plotly_json() if hasattr(shape_obj, "to_plotly_json") else dict(shape_obj)
+                if "x0" in s:
+                    s["x0"] = float(s["x0"]) + float(dx)
+                if "x1" in s:
+                    s["x1"] = float(s["x1"]) + float(dx)
+                # Keep xref/yref default ("x","y") since we tile on a single axis.
+                s.pop("xref", None)
+                s.pop("yref", None)
+                return s
+
+            for i, (fig_i, meta) in enumerate(zip(per_figs, per_meta)):
+                dx = float(i) * float(pitch_span)
+                showlegend = (i == 0)  # show legend only once to avoid clutter
+
+                # Add shapes (field markings etc.)
+                try:
+                    for sh in (fig_i.layout.shapes or []):
+                        big.add_shape(**_shift_shape_x(sh, dx))
+                except Exception:
+                    pass
+
+                # Add traces (players, ball, swing, corner arcs etc.)
+                for tr in fig_i.data:
+                    big.add_trace(_shift_trace_x(tr, dx, showlegend=showlegend))
+
+                # Add a clear title annotation above each pitch
+                sim_val = meta.get("similarity", None)
+                sim_str = "N/A"
+                try:
+                    sim_f = float(sim_val)
+                    if math.isfinite(sim_f):
+                        sim_str = f"{sim_f:.4f}"
+                except Exception:
+                    pass
+                big.add_annotation(
+                    x=dx + 0.5 * (base_xrange[0] + base_xrange[1]),
+                    y=base_yrange[1] + 2.5,
+                    xref="x",
+                    yref="y",
+                    text=f"Rank {meta['rank']} | idx {meta['idx']} | sim {sim_str} | recv {meta['receiver']}",
+                    showarrow=False,
+                    font=dict(size=12),
+                )
+
+            # Layout: wide fixed width so the browser can scroll horizontally
+            n = len(per_figs)
+            big.update_layout(
+                width=int(max(900, n * int(card_min_width_px))),
+                height=520,
+                margin=dict(l=10, r=10, t=40, b=10),
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
+            )
+            big.update_xaxes(
+                range=[base_xrange[0], base_xrange[0] + pitch_span * (n - 1) + (base_xrange[1] - base_xrange[0])],
+                showgrid=False,
+                zeroline=False,
+            )
+            big.update_yaxes(range=base_yrange, showgrid=False, zeroline=False, scaleanchor=None)
+            return big
+
+        def _render_result_grid(
+            results: list[dict],
+            header: str,
+            panel_key: str,
+            *,
+            horizontal_scroll: bool,
+            card_min_width_px: int,
+        ):
+            st.subheader(header)
+            num_results = len(results)
+            if horizontal_scroll and num_results > 0:
+                # Render as a single wide figure (tiled pitches). This avoids "squished/overlapped" plots.
+                marker_id = f"{panel_key}_wideplot_marker"
+                st.markdown(
+                    f"""
+<style>
+#{marker_id} + div div[data-testid="stPlotlyChart"] {{
+  overflow-x: auto;
+}}
+</style>
+<div id="{marker_id}"></div>
+""",
+                    unsafe_allow_html=True,
+                )
+                big_fig = _build_tiled_row_figure(results, panel_key, card_min_width_px=int(card_min_width_px))
+                if big_fig is not None:
+                    st.plotly_chart(
+                        big_fig,
+                        use_container_width=False,
+                        key=f"{panel_key}_wideplot",
+                    )
+                else:
+                    st.info("No valid results to display.")
                 return
 
             # Default grid layout
-            num_rows = (num_results + num_cols - 1) // num_cols
-            for row in range(num_rows):
-                cols = st.columns(num_cols)
-                for col_idx in range(num_cols):
+        num_rows = (num_results + num_cols - 1) // num_cols
+        for row in range(num_rows):
+            cols = st.columns(num_cols)
+            for col_idx in range(num_cols):
                     r_i = row * num_cols + col_idx
                     if r_i >= num_results:
                         continue
