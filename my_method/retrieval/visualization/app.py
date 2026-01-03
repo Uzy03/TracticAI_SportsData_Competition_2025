@@ -889,6 +889,20 @@ def main():
             value=True,
             help="画面が狭い場合に左右の結果が潰れないよう、横スクロールで表示します。",
         )
+    # Results rendering: avoid squished plots by forcing horizontal scrolling rows with a minimum card width.
+    results_horizontal_scroll = st.sidebar.checkbox(
+        "検索結果を横スクロール（Queryと同じくらい大きく表示）",
+        value=True,
+        help="Top-k / Bottom-k を1行横並びにして、各カードを潰さず横スクロールで見られるようにします。",
+    )
+    result_card_min_width_px = st.sidebar.slider(
+        "結果カード最小幅（px）",
+        min_value=500,
+        max_value=1400,
+        value=900,
+        step=50,
+        help="Query CKと同じくらいの見た目にしたい場合は大きめ（例: 900〜1200）にしてください。",
+    )
     with st.sidebar.expander("Proposed similarity settings", expanded=False):
         w_att = st.slider("Weight: attacking", 0.0, 3.0, 1.0, 0.1)
         w_def = st.slider("Weight: defending", 0.0, 3.0, 1.0, 0.1)
@@ -1109,9 +1123,86 @@ def main():
         )
         st.plotly_chart(query_fig, use_container_width=True, key=f"query_fig_{int(query_idx)}")
 
-        def _render_result_grid(results: list[dict], header: str, panel_key: str):
+        def _render_result_grid(
+            results: list[dict],
+            header: str,
+            panel_key: str,
+            *,
+            horizontal_scroll: bool,
+            card_min_width_px: int,
+        ):
             st.subheader(header)
             num_results = len(results)
+            if horizontal_scroll and num_results > 0:
+                # Put all results in a single horizontal row and scroll instead of shrinking.
+                marker_id = f"{panel_key}_results_row_marker"
+                st.markdown(
+                    f"""
+<style>
+#{marker_id} + div[data-testid="stHorizontalBlock"] {{
+  overflow-x: auto;
+  flex-wrap: nowrap;
+  gap: 1rem;
+}}
+#{marker_id} + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {{
+  min-width: {int(card_min_width_px)}px;
+}}
+</style>
+<div id="{marker_id}"></div>
+""",
+                    unsafe_allow_html=True,
+                )
+                cols = st.columns(num_results)
+                for r_i, result in enumerate(results):
+                    idx = int(result["index"])
+                    with cols[r_i]:
+                        sim_val = result.get("similarity", None)
+                        sim_str = "N/A"
+                        try:
+                            sim_f = float(sim_val)
+                            if math.isfinite(sim_f):
+                                sim_str = f"{sim_f:.4f}"
+                        except Exception:
+                            pass
+                        st.markdown(f"**Rank {r_i + 1}** (Similarity: {sim_str})")
+                        st.caption(f"Index: {idx}")
+                        try:
+                            if idx < len(dataset):
+                                _d, similar_target = dataset[idx]
+                                similar_raw_sample = _get_raw_sample(dataset, idx)
+                                similar_df = load_raw_sample_data(similar_raw_sample)
+                                fig = plot_ck_snapshot(
+                                    similar_df,
+                                    title=f"Idx {idx}",
+                                    show_vectors=show_vectors,
+                                    vector_scale=vector_scale,
+                                    max_vector_len=max_vector_len,
+                                    vector_offset_m=vector_offset_m,
+                                    min_vector_len=min_vector_len,
+                                    show_ids=show_ids,
+                                    show_ball_arc=show_ball_arc,
+                                    swing_mode=swing_mode,
+                                    trajectory_source=trajectory_source,
+                                    soccerdata_dir=soccerdata_dir,
+                                    traj_window_frames=int(traj_window_frames),
+                                    emphasize_swing=emphasize_swing,
+                                    show_raw_tracking=show_raw_tracking,
+                                    swing_curvature_m=float(swing_curvature_m),
+                                    receiver_idx=int(similar_target.item()),
+                                )
+                                st.plotly_chart(
+                                    fig,
+                                    use_container_width=True,
+                                    key=f"{panel_key}_rank{r_i+1}_idx{idx}",
+                                )
+                                st.caption(f"Receiver: {int(similar_target.item())}")
+                            else:
+                                st.warning(f"Index {idx} out of dataset range")
+                        except Exception as e:
+                            st.error(f"Error loading sample {idx}: {str(e)}")
+                return
+
+            # Default grid layout
             num_rows = (num_results + num_cols - 1) // num_cols
             for row in range(num_rows):
                 cols = st.columns(num_cols)
@@ -1189,17 +1280,65 @@ def main():
                 )
             col_l, col_r = st.columns(2)
             with col_l:
-                _render_result_grid(top_cos, f"[Cosine] Top-{len(top_cos)} Similar CKs", panel_key="cos_top")
-                _render_result_grid(bottom_cos, f"[Cosine] Bottom-{len(bottom_cos)} Dissimilar CKs", panel_key="cos_bottom")
+                _render_result_grid(
+                    top_cos,
+                    f"[Cosine] Top-{len(top_cos)} Similar CKs",
+                    panel_key="cos_top",
+                    horizontal_scroll=results_horizontal_scroll,
+                    card_min_width_px=int(result_card_min_width_px),
+                )
+                _render_result_grid(
+                    bottom_cos,
+                    f"[Cosine] Bottom-{len(bottom_cos)} Dissimilar CKs",
+                    panel_key="cos_bottom",
+                    horizontal_scroll=results_horizontal_scroll,
+                    card_min_width_px=int(result_card_min_width_px),
+                )
             with col_r:
-                _render_result_grid(top_prop, f"[Proposed] Top-{len(top_prop)} Similar CKs", panel_key="prop_top")
-                _render_result_grid(bottom_prop, f"[Proposed] Bottom-{len(bottom_prop)} Dissimilar CKs", panel_key="prop_bottom")
+                _render_result_grid(
+                    top_prop,
+                    f"[Proposed] Top-{len(top_prop)} Similar CKs",
+                    panel_key="prop_top",
+                    horizontal_scroll=results_horizontal_scroll,
+                    card_min_width_px=int(result_card_min_width_px),
+                )
+                _render_result_grid(
+                    bottom_prop,
+                    f"[Proposed] Bottom-{len(bottom_prop)} Dissimilar CKs",
+                    panel_key="prop_bottom",
+                    horizontal_scroll=results_horizontal_scroll,
+                    card_min_width_px=int(result_card_min_width_px),
+                )
         elif compare_mode == "Cosine only":
-            _render_result_grid(top_cos, f"Top-{len(top_cos)} Similar CKs (Cosine)", panel_key="cos_top")
-            _render_result_grid(bottom_cos, f"Bottom-{len(bottom_cos)} Dissimilar CKs (Cosine)", panel_key="cos_bottom")
+            _render_result_grid(
+                top_cos,
+                f"Top-{len(top_cos)} Similar CKs (Cosine)",
+                panel_key="cos_top",
+                horizontal_scroll=results_horizontal_scroll,
+                card_min_width_px=int(result_card_min_width_px),
+            )
+            _render_result_grid(
+                bottom_cos,
+                f"Bottom-{len(bottom_cos)} Dissimilar CKs (Cosine)",
+                panel_key="cos_bottom",
+                horizontal_scroll=results_horizontal_scroll,
+                card_min_width_px=int(result_card_min_width_px),
+            )
         else:
-            _render_result_grid(top_prop, f"Top-{len(top_prop)} Similar CKs (Proposed)", panel_key="prop_top")
-            _render_result_grid(bottom_prop, f"Bottom-{len(bottom_prop)} Dissimilar CKs (Proposed)", panel_key="prop_bottom")
+            _render_result_grid(
+                top_prop,
+                f"Top-{len(top_prop)} Similar CKs (Proposed)",
+                panel_key="prop_top",
+                horizontal_scroll=results_horizontal_scroll,
+                card_min_width_px=int(result_card_min_width_px),
+            )
+            _render_result_grid(
+                bottom_prop,
+                f"Bottom-{len(bottom_prop)} Dissimilar CKs (Proposed)",
+                panel_key="prop_bottom",
+                horizontal_scroll=results_horizontal_scroll,
+                card_min_width_px=int(result_card_min_width_px),
+            )
     
     else:
         st.info("👈 Configure settings in the sidebar and click 'Search' to view results.")
