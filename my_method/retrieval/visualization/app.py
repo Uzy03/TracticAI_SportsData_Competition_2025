@@ -1145,27 +1145,27 @@ def main():
                 if idx >= len(dataset):
                     continue
                 _d, similar_target = dataset[idx]
-                                similar_raw_sample = _get_raw_sample(dataset, idx)
-                                similar_df = load_raw_sample_data(similar_raw_sample)
+                similar_raw_sample = _get_raw_sample(dataset, idx)
+                similar_df = load_raw_sample_data(similar_raw_sample)
                 fig_i = plot_ck_snapshot(
-                                    similar_df,
+                    similar_df,
                     title=f"Idx {idx}",
-                                    show_vectors=show_vectors,
-                                    vector_scale=vector_scale,
-                                    max_vector_len=max_vector_len,
-                                    vector_offset_m=vector_offset_m,
-                                    min_vector_len=min_vector_len,
-                                    show_ids=show_ids,
-                                    show_ball_arc=show_ball_arc,
-                                    swing_mode=swing_mode,
-                                    trajectory_source=trajectory_source,
-                                    soccerdata_dir=soccerdata_dir,
-                                    traj_window_frames=int(traj_window_frames),
-                                    emphasize_swing=emphasize_swing,
-                                    show_raw_tracking=show_raw_tracking,
-                                    swing_curvature_m=float(swing_curvature_m),
-                                    receiver_idx=int(similar_target.item()),
-                                )
+                    show_vectors=show_vectors,
+                    vector_scale=vector_scale,
+                    max_vector_len=max_vector_len,
+                    vector_offset_m=vector_offset_m,
+                    min_vector_len=min_vector_len,
+                    show_ids=show_ids,
+                    show_ball_arc=show_ball_arc,
+                    swing_mode=swing_mode,
+                    trajectory_source=trajectory_source,
+                    soccerdata_dir=soccerdata_dir,
+                    traj_window_frames=int(traj_window_frames),
+                    emphasize_swing=emphasize_swing,
+                    show_raw_tracking=show_raw_tracking,
+                    swing_curvature_m=float(swing_curvature_m),
+                    receiver_idx=int(similar_target.item()),
+                )
                 per_figs.append(fig_i)
                 per_meta.append(
                     {
