@@ -1,0 +1,101 @@
+# my_method: Multi-task learning configuration for receiver + shot prediction (D2 enabled)
+#
+# Proposed: Consistency regularization is enabled (lambda_consistency > 0).
+#
+# 使い方（例）:
+#   python -m my_method.train.train_multitask --config configs_my_method/multitask_receiver_shot_d2_consistency.yaml
+
+run_name: "consistency"
+
+model:
+  input_dim: 16
+  hidden_dim: 512
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.0
+  num_classes: 22
+  edge_dim: 10
+  mlp_num_layers: 2
+
+optimizer:
+  type: "adam"
+  lr: 0.001
+  weight_decay: 0.0001
+
+scheduler:
+  type: "cosine"
+  T_max: 50
+  eta_min: 0.000001
+  warmup_epochs: 5
+
+train:
+  batch_size: 32
+  epochs: 50
+  amp: true
+  tf32: true
+  grad_clip:
+    enabled: true
+    max_norm: 0.5
+
+multitask:
+  lambda_receiver: 1.0
+  lambda_shot: 2.0
+  # Proposed (ON) - tune this value as needed
+  lambda_consistency: 0.1
+
+data:
+  receiver_train_path: "data/processed_ck/receiver_train/data.pickle"
+  receiver_val_path: "data/processed_ck/receiver_val/data.pickle"
+  receiver_test_path: "data/processed_ck/receiver_test/data.pickle"
+  shot_train_path: "data/processed_ck/shot_train/data.pickle"
+  shot_val_path: "data/processed_ck/shot_val/data.pickle"
+  shot_test_path: "data/processed_ck/shot_test/data.pickle"
+  format: "pickle"
+  merge_val_to_train: false
+
+loss:
+  receiver:
+    type: "cross_entropy"
+    label_smoothing: 0.0
+    weight: 1.0
+    focal_loss:
+      enabled: false
+      alpha: 0.25
+      gamma: 2.0
+    class_weights: null
+  shot:
+    type: "binary_cross_entropy"
+    label_smoothing: 0.0
+    weight: 1.0
+    pos_weight: 1.0
+    focal_loss:
+      enabled: false
+      alpha: 0.25
+      gamma: 2.0
+
+d2:
+  enabled: true
+  group_pool: false
+  transforms:
+    hflip: false
+    vflip: false
+
+early_stopping:
+  patience: 15
+  min_delta: 0.001
+  monitor: "val_total_loss"
+
+eval:
+  batch_size: 32
+
+device: "auto"
+seed: 42
+num_workers: 4
+log_level: "INFO"
+
+# Separate outputs from baseline tacticai/
+log_dir: "runs/my_method"
+checkpoint_dir: "checkpoints/my_method"
+model_save_dir: "checkpoints/my_method/receiver_shot"
+
+

@@ -1,0 +1,101 @@
+# my_method: Multi-task learning (receiver + shot) - DEBUG OVERFIT (8 samples, D2 enabled)
+#
+# Proposed: Consistency regularization ON
+#
+# 使い方（例）:
+#   python -m my_method.train.train_multitask --config configs_my_method/multitask_receiver_shot_d2_overfit8_consistency.yaml
+
+run_name: "overfit8_consistency"
+
+model:
+  input_dim: 16
+  hidden_dim: 512
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.0
+  num_classes: 22
+  edge_dim: 10
+  mlp_num_layers: 2
+
+optimizer:
+  type: "adam"
+  lr: 0.001
+  weight_decay: 0.0
+
+scheduler:
+  type: "none"
+
+train:
+  batch_size: 8
+  epochs: 500
+  amp: false
+  grad_clip:
+    enabled: true
+    max_norm: 0.5
+
+multitask:
+  lambda_receiver: 1.0
+  lambda_shot: 1.0
+  # Overfitでは強すぎると潰れることがあるので控えめに開始
+  lambda_consistency: 0.01
+
+data:
+  receiver_train_path: "data/processed_ck/receiver_train/data.pickle"
+  receiver_val_path: "data/processed_ck/receiver_val/data.pickle"
+  receiver_test_path: "data/processed_ck/receiver_test/data.pickle"
+  shot_train_path: "data/processed_ck/shot_train/data.pickle"
+  shot_val_path: "data/processed_ck/shot_val/data.pickle"
+  shot_test_path: "data/processed_ck/shot_test/data.pickle"
+  format: "pickle"
+  merge_val_to_train: false
+
+loss:
+  receiver:
+    type: "cross_entropy"
+    label_smoothing: 0.0
+    weight: 1.0
+    focal_loss:
+      enabled: false
+      alpha: 0.25
+      gamma: 2.0
+    class_weights: null
+  shot:
+    type: "binary_cross_entropy"
+    label_smoothing: 0.0
+    weight: 1.0
+    pos_weight: 1.0
+    focal_loss:
+      enabled: false
+      alpha: 0.25
+      gamma: 2.0
+
+d2:
+  enabled: true
+  group_pool: false
+  transforms:
+    hflip: false
+    vflip: false
+
+early_stopping:
+  patience: 99999
+  min_delta: 0.0
+  monitor: "val_receiver_top3"
+
+eval:
+  batch_size: 8
+
+device: "auto"
+seed: 42
+num_workers: 0
+log_level: "INFO"
+
+log_dir: "runs/my_method"
+checkpoint_dir: "checkpoints/my_method"
+model_save_dir: "checkpoints/my_method/receiver_shot"
+
+debug_overfit:
+  enabled: true
+  num_samples: 8
+  seed: 42
+
+

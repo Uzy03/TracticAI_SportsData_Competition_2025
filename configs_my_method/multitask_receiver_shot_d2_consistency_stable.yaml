@@ -1,0 +1,109 @@
+# my_method: Multi-task learning (receiver + shot) - D2 + Consistency (STABLE)
+#
+# 目的:
+# - 時間がない前提で「まず落ちない」ことを優先したフル学習設定
+# - AMP/TF32 を切って数値安定性を優先（速度は落ちるが NaN を避けたいとき向け）
+#
+# 使い方:
+#   python -m my_method.train.train_multitask --config configs_my_method/multitask_receiver_shot_d2_consistency_stable.yaml
+
+run_name: "consistency_stable"
+
+model:
+  input_dim: 16
+  hidden_dim: 512
+  num_layers: 3
+  num_heads: 4
+  dropout: 0.0
+  num_classes: 22
+  edge_dim: 10
+  mlp_num_layers: 2
+
+optimizer:
+  type: "adam"
+  # 少し下げて安定性重視
+  lr: 0.0005
+  weight_decay: 0.0001
+
+scheduler:
+  type: "cosine"
+  T_max: 50
+  eta_min: 0.000001
+  warmup_epochs: 5
+
+train:
+  batch_size: 32
+  epochs: 50
+  # 安定性優先（NaN対策）
+  amp: false
+  tf32: false
+  grad_clip:
+    enabled: true
+    max_norm: 0.5
+
+multitask:
+  lambda_receiver: 1.0
+  lambda_shot: 2.0
+  # 強すぎると不安定化しやすいので控えめ
+  lambda_consistency: 0.01
+
+data:
+  receiver_train_path: "data/processed_ck/receiver_train/data.pickle"
+  receiver_val_path: "data/processed_ck/receiver_val/data.pickle"
+  receiver_test_path: "data/processed_ck/receiver_test/data.pickle"
+  shot_train_path: "data/processed_ck/shot_train/data.pickle"
+  shot_val_path: "data/processed_ck/shot_val/data.pickle"
+  shot_test_path: "data/processed_ck/shot_test/data.pickle"
+  format: "pickle"
+  merge_val_to_train: false
+
+loss:
+  receiver:
+    type: "cross_entropy"
+    label_smoothing: 0.0
+    weight: 1.0
+    focal_loss:
+      enabled: false
+      alpha: 0.25
+      gamma: 2.0
+    class_weights: null
+  shot:
+    type: "binary_cross_entropy"
+    label_smoothing: 0.0
+    weight: 1.0
+    pos_weight: 1.0
+    focal_loss:
+      enabled: false
+      alpha: 0.25
+      gamma: 2.0
+
+d2:
+  enabled: true
+  group_pool: false
+  transforms:
+    hflip: false
+    vflip: false
+
+early_stopping:
+  patience: 15
+  min_delta: 0.001
+  monitor: "val_total_loss"
+
+eval:
+  batch_size: 32
+
+device: "auto"
+seed: 42
+num_workers: 4
+log_level: "INFO"
+
+# DataLoader perf knobs (handled in train_multitask.py)
+pin_memory: true
+persistent_workers: true
+prefetch_factor: 2
+
+log_dir: "runs/my_method"
+checkpoint_dir: "checkpoints/my_method"
+model_save_dir: "checkpoints/my_method/receiver_shot"
+
+
