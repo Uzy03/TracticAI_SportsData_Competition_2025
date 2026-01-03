@@ -86,6 +86,26 @@ def load_search_system(config_path: str, checkpoint_path: Optional[str] = None):
             checkpoint_path = f"{model_save_dir}/best_d2.ckpt"
         else:
             checkpoint_path = f"{model_save_dir}/best_no_d2.ckpt"
+
+    # Helpful error message when checkpoint is missing
+    ckpt_p = Path(str(checkpoint_path))
+    if not ckpt_p.exists():
+        parent = ckpt_p.parent.parent  # checkpoints/.../receiver_shot/<run_name>
+        try:
+            # list available checkpoints under checkpoints/my_method/receiver_shot/*
+            base_dir = Path("checkpoints") / "my_method" / "receiver_shot"
+            cand = sorted([str(p.as_posix()) for p in base_dir.glob("*/best_*.ckpt")])[:20]
+        except Exception:
+            cand = []
+        msg = (
+            f"Backbone checkpoint not found: {checkpoint_path}\n\n"
+            f"ヒント: 選択中のconfigの run_name と checkpoints 配下のディレクトリ名が一致している必要があります。\n"
+            f"例: baseline_stable を比較したい場合は、configも "
+            f"`configs_my_method/multitask_receiver_shot_d2_baseline_stable.yaml` を選んでください。\n\n"
+            f"見つかった候補（最大20件）:\n- " + "\n- ".join(cand) if cand else
+            f"Backbone checkpoint not found: {checkpoint_path}"
+        )
+        raise FileNotFoundError(msg)
     
     search_system = SimilarCKSearch(
         backbone_checkpoint_path=checkpoint_path,
@@ -671,11 +691,19 @@ def main():
     with st.sidebar.expander("詳細設定（手入力したい場合）", expanded=False):
         custom_config_path = st.text_input("Config file path（手入力）", value=config_path)
         custom_index_path = st.text_input("Index file path（手入力）", value=index_path)
+        custom_checkpoint_path = st.text_input(
+            "Backbone checkpoint path（手入力）",
+            value="",
+            help="空ならconfigから自動選択。run_name不一致などで見つからない場合に指定してください。",
+        )
         use_custom_paths = st.checkbox("手入力のパスを使う", value=False)
 
     if "use_custom_paths" in locals() and use_custom_paths:
         config_path = custom_config_path
         index_path = custom_index_path
+        checkpoint_path_override = custom_checkpoint_path.strip() or None
+    else:
+        checkpoint_path_override = None
 
     # Data path is rarely needed; keep it in advanced section
     data_path = "data/processed_ck/receiver_train/data.pickle"
@@ -802,7 +830,7 @@ def main():
     
     # Load search system and index
     try:
-        search_system, config = load_search_system(config_path)
+        search_system, config = load_search_system(config_path, checkpoint_path=checkpoint_path_override)
         embedding_dim = config["model"]["hidden_dim"]
         index = load_index(index_path, embedding_dim)
         
