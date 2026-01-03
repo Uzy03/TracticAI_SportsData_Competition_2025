@@ -1,9 +1,22 @@
-"""Test script for my_method similar CK retrieval (Top/Bottom-k)."""
+"""Test script for my_method similar CK retrieval (Top/Bottom-k).
+
+NOTE:
+- When executed as `python scripts/xxx.py`, Python may not include the project root
+  in sys.path inside some Docker/venv setups.
+- We therefore add the repository root to sys.path for reliable imports.
+"""
 
 import argparse
 from typing import Dict, Any
 import yaml
 import numpy as np
+
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from my_method.retrieval import SimilarCKSearch, SimilarCKIndex
 from my_method.dataio import ReceiverDataset

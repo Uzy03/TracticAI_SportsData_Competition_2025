@@ -1,9 +1,21 @@
-"""Script to build retrieval index using my_method backbone embeddings."""
+"""Script to build retrieval index using my_method backbone embeddings.
+
+NOTE:
+- When executed as `python scripts/xxx.py`, Python may not include the project root
+  in sys.path inside some Docker/venv setups.
+- We therefore add the repository root to sys.path for reliable imports.
+"""
 
 import argparse
 from pathlib import Path
 from typing import Dict, Any
 import yaml
+
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from torch.utils.data import ConcatDataset
 
