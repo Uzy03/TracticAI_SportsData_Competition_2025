@@ -882,6 +882,13 @@ def main():
         index=0,
         help="左=cos類似度、右=提案手法（構造的類似度）",
     )
+    enable_horizontal_scroll = False
+    if compare_mode == "Side-by-side (Cosine vs Proposed)":
+        enable_horizontal_scroll = st.sidebar.checkbox(
+            "横スクロールで左右比較（潰れ防止）",
+            value=True,
+            help="画面が狭い場合に左右の結果が潰れないよう、横スクロールで表示します。",
+        )
     with st.sidebar.expander("Proposed similarity settings", expanded=False):
         w_att = st.slider("Weight: attacking", 0.0, 3.0, 1.0, 0.1)
         w_def = st.slider("Weight: defending", 0.0, 3.0, 1.0, 0.1)
@@ -1161,6 +1168,25 @@ def main():
                             st.error(f"Error loading sample {idx}: {str(e)}")
 
         if compare_mode == "Side-by-side (Cosine vs Proposed)":
+            if enable_horizontal_scroll:
+                # Insert a marker element and CSS to target the next horizontal block (the columns)
+                st.markdown(
+                    """
+<style>
+/* Make the compare columns horizontally scrollable instead of shrinking. */
+#compare_panels_marker + div[data-testid="stHorizontalBlock"] {
+  overflow-x: auto;
+  flex-wrap: nowrap;
+  gap: 1rem;
+}
+#compare_panels_marker + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+  min-width: 560px; /* prevent squishing on narrow screens */
+}
+</style>
+<div id="compare_panels_marker"></div>
+""",
+                    unsafe_allow_html=True,
+                )
             col_l, col_r = st.columns(2)
             with col_l:
                 _render_result_grid(top_cos, f"[Cosine] Top-{len(top_cos)} Similar CKs", panel_key="cos_top")
