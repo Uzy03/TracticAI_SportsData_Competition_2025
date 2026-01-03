@@ -1100,9 +1100,9 @@ def main():
             swing_curvature_m=float(swing_curvature_m),
             receiver_idx=int(query_target.item()),
         )
-        st.plotly_chart(query_fig, use_container_width=True)
+        st.plotly_chart(query_fig, use_container_width=True, key=f"query_fig_{int(query_idx)}")
 
-        def _render_result_grid(results: list[dict], header: str):
+        def _render_result_grid(results: list[dict], header: str, panel_key: str):
             st.subheader(header)
             num_results = len(results)
             num_rows = (num_results + num_cols - 1) // num_cols
@@ -1149,7 +1149,11 @@ def main():
                                     swing_curvature_m=float(swing_curvature_m),
                                     receiver_idx=int(similar_target.item()),
                                 )
-                                st.plotly_chart(fig, use_container_width=True)
+                                st.plotly_chart(
+                                    fig,
+                                    use_container_width=True,
+                                    key=f"{panel_key}_rank{r_i+1}_idx{idx}",
+                                )
                                 st.caption(f"Receiver: {int(similar_target.item())}")
                             else:
                                 st.warning(f"Index {idx} out of dataset range")
@@ -1159,17 +1163,17 @@ def main():
         if compare_mode == "Side-by-side (Cosine vs Proposed)":
             col_l, col_r = st.columns(2)
             with col_l:
-                _render_result_grid(top_cos, f"[Cosine] Top-{len(top_cos)} Similar CKs")
-                _render_result_grid(bottom_cos, f"[Cosine] Bottom-{len(bottom_cos)} Dissimilar CKs")
+                _render_result_grid(top_cos, f"[Cosine] Top-{len(top_cos)} Similar CKs", panel_key="cos_top")
+                _render_result_grid(bottom_cos, f"[Cosine] Bottom-{len(bottom_cos)} Dissimilar CKs", panel_key="cos_bottom")
             with col_r:
-                _render_result_grid(top_prop, f"[Proposed] Top-{len(top_prop)} Similar CKs")
-                _render_result_grid(bottom_prop, f"[Proposed] Bottom-{len(bottom_prop)} Dissimilar CKs")
+                _render_result_grid(top_prop, f"[Proposed] Top-{len(top_prop)} Similar CKs", panel_key="prop_top")
+                _render_result_grid(bottom_prop, f"[Proposed] Bottom-{len(bottom_prop)} Dissimilar CKs", panel_key="prop_bottom")
         elif compare_mode == "Cosine only":
-            _render_result_grid(top_cos, f"Top-{len(top_cos)} Similar CKs (Cosine)")
-            _render_result_grid(bottom_cos, f"Bottom-{len(bottom_cos)} Dissimilar CKs (Cosine)")
+            _render_result_grid(top_cos, f"Top-{len(top_cos)} Similar CKs (Cosine)", panel_key="cos_top")
+            _render_result_grid(bottom_cos, f"Bottom-{len(bottom_cos)} Dissimilar CKs (Cosine)", panel_key="cos_bottom")
         else:
-            _render_result_grid(top_prop, f"Top-{len(top_prop)} Similar CKs (Proposed)")
-            _render_result_grid(bottom_prop, f"Bottom-{len(bottom_prop)} Dissimilar CKs (Proposed)")
+            _render_result_grid(top_prop, f"Top-{len(top_prop)} Similar CKs (Proposed)", panel_key="prop_top")
+            _render_result_grid(bottom_prop, f"Bottom-{len(bottom_prop)} Dissimilar CKs (Proposed)", panel_key="prop_bottom")
     
     else:
         st.info("👈 Configure settings in the sidebar and click 'Search' to view results.")
