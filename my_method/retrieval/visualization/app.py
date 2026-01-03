@@ -17,6 +17,12 @@ import torch
 from torch.utils.data import ConcatDataset
 import math
 
+# Proposed structural similarity (optional dependency)
+try:
+    from scipy.optimize import linear_sum_assignment  # type: ignore
+except Exception:  # pragma: no cover
+    linear_sum_assignment = None
+
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
@@ -636,6 +642,111 @@ def compute_all_similarities(
     return sims
 
 
+def _get_team_split_positions(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """Return (attacking_positions, defending_positions) as arrays [M,2], filtered for visualization dummies."""
+    df_vis = df.copy()
+    if "is_dummy" in df_vis.columns:
+        df_vis = df_vis[~df_vis["is_dummy"]]
+
+    # Determine attacking team by ball-holder (kicker proxy)
+    ball_rows = df_vis[df_vis.get("ball", 0.0) > 0.5] if "ball" in df_vis.columns else df_vis.iloc[0:0]
+    if len(ball_rows) > 0 and "team_id" in df_vis.columns:
+        attacking_team_id = int(ball_rows.iloc[0]["team_id"])
+    else:
+        attacking_team_id = int(df_vis["team_id"].iloc[0]) if "team_id" in df_vis.columns and len(df_vis) > 0 else 0
+
+    if "team_id" in df_vis.columns:
+        attacking = df_vis[df_vis["team_id"] == attacking_team_id]
+        defending = df_vis[df_vis["team_id"] != attacking_team_id]
+    else:
+        attacking = df_vis
+        defending = df_vis.iloc[0:0]
+
+    att = attacking[["x", "y"]].to_numpy(dtype=np.float32) if len(attacking) > 0 else np.zeros((0, 2), dtype=np.float32)
+    dfd = defending[["x", "y"]].to_numpy(dtype=np.float32) if len(defending) > 0 else np.zeros((0, 2), dtype=np.float32)
+
+    # Keep at most 11 players per side for stability (CK snapshot)
+    att = att[:11]
+    dfd = dfd[:11]
+    return att, dfd
+
+
+def _hungarian_mean_distance(a: np.ndarray, b: np.ndarray, pad_cost: float = 200.0) -> float:
+    """Mean assignment distance between two point sets using Hungarian algorithm.
+
+    If scipy is unavailable, falls back to greedy matching (slightly worse but works).
+    """
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+    na, nb = int(a.shape[0]), int(b.shape[0])
+    if na == 0 and nb == 0:
+        return 0.0
+    if na == 0 or nb == 0:
+        # All unmatched -> penalize
+        return float(pad_cost)
+
+    n = max(na, nb)
+    # Build padded arrays
+    A = np.zeros((n, 2), dtype=np.float32)
+    B = np.zeros((n, 2), dtype=np.float32)
+    A[:na] = a
+    B[:nb] = b
+
+    # Cost matrix: Euclidean distances
+    diff = A[:, None, :] - B[None, :, :]
+    cost = np.sqrt((diff ** 2).sum(axis=-1)).astype(np.float32)
+
+    # Penalize matches involving padded rows/cols
+    if na < n:
+        cost[na:, :] = pad_cost
+    if nb < n:
+        cost[:, nb:] = pad_cost
+
+    if linear_sum_assignment is not None:
+        row_ind, col_ind = linear_sum_assignment(cost)
+        return float(cost[row_ind, col_ind].mean())
+
+    # Fallback greedy matching
+    used_cols = set()
+    dists = []
+    for i in range(n):
+        j = int(np.argmin([cost[i, jj] if jj not in used_cols else 1e9 for jj in range(n)]))
+        used_cols.add(j)
+        dists.append(float(cost[i, j]))
+    return float(np.mean(dists)) if dists else float(pad_cost)
+
+
+def compute_structural_similarities(
+    query_sample: Dict[str, Any],
+    dataset: Any,
+    max_n: Optional[int] = None,
+    w_att: float = 1.0,
+    w_def: float = 1.0,
+) -> np.ndarray:
+    """Compute proposed structural similarity for all samples (higher is better).
+
+    Similarity is defined as 1 / (1 + distance), where distance is a weighted
+    Hungarian matching distance between attacking/defending point sets.
+    """
+    q_df = load_raw_sample_data(query_sample)
+    q_att, q_def = _get_team_split_positions(q_df)
+
+    n_total = len(dataset)
+    if max_n is not None:
+        n_total = min(n_total, int(max_n))
+
+    sims = np.zeros((n_total,), dtype=np.float32)
+    for i in range(n_total):
+        cand_raw = _get_raw_sample(dataset, i)
+        c_df = load_raw_sample_data(cand_raw)
+        c_att, c_def = _get_team_split_positions(c_df)
+        d_att = _hungarian_mean_distance(q_att, c_att)
+        d_def = _hungarian_mean_distance(q_def, c_def)
+        dist = float(w_att) * float(d_att) + float(w_def) * float(d_def)
+        sims[i] = 1.0 / (1.0 + np.float32(dist))
+    return sims
+
+
 def main():
     """Main Streamlit application."""
     st.title("⚽ Similar CK Retrieval Visualization")
@@ -763,6 +874,18 @@ def main():
         value=5,
         help="Show Top-k most similar and Bottom-k least similar CKs.",
     )
+
+    st.sidebar.header("Comparison Mode")
+    compare_mode = st.sidebar.selectbox(
+        "Compare",
+        options=["Side-by-side (Cosine vs Proposed)", "Cosine only", "Proposed only"],
+        index=0,
+        help="左=cos類似度、右=提案手法（構造的類似度）",
+    )
+    with st.sidebar.expander("Proposed similarity settings", expanded=False):
+        w_att = st.slider("Weight: attacking", 0.0, 3.0, 1.0, 0.1)
+        w_def = st.slider("Weight: defending", 0.0, 3.0, 1.0, 0.1)
+        st.caption("提案手法は、攻撃/守備それぞれの配置をHungarianマッチングで比較します。")
     
     # Display options
     st.sidebar.header("Display Options")
@@ -897,37 +1020,59 @@ def main():
     if st.sidebar.button("🔍 Search", type="primary"):
         try:
             with st.spinner("Searching for similar CKs..."):
-                sims = compute_all_similarities(search_system, query_data_dict, index)
-                n = int(len(sims))
+                # Cosine similarities (embedding-based)
+                sims_cos = compute_all_similarities(search_system, query_data_dict, index)
+
+                # Proposed structural similarities (geometry-based)
+                sims_prop = None
+                if compare_mode != "Cosine only":
+                    sims_prop = compute_structural_similarities(
+                        query_raw_sample,
+                        dataset,
+                        max_n=len(sims_cos),
+                        w_att=float(w_att),
+                        w_def=float(w_def),
+                    )
+
+                n = int(len(sims_cos))
                 k = int(min(int(top_k), n))
 
-                # Top-k (descending)
-                top_indices = np.argsort(sims)[::-1][:k]
-                top_results = [{
-                    "similarity": float(sims[i]),
-                    "metadata": index.metadata[int(i)].copy() if (index.metadata and int(i) < len(index.metadata)) else {},
-                    "index": int(i),
-                } for i in top_indices]
+                def _pack_results(sims_arr: np.ndarray) -> tuple[list[dict], list[dict]]:
+                    top_indices = np.argsort(sims_arr)[::-1][:k]
+                    bottom_indices = np.argsort(sims_arr)[:k]
+                    top_r = [{
+                        "similarity": float(sims_arr[i]),
+                        "metadata": index.metadata[int(i)].copy() if (index.metadata and int(i) < len(index.metadata)) else {},
+                        "index": int(i),
+                    } for i in top_indices]
+                    bot_r = [{
+                        "similarity": float(sims_arr[i]),
+                        "metadata": index.metadata[int(i)].copy() if (index.metadata and int(i) < len(index.metadata)) else {},
+                        "index": int(i),
+                    } for i in bottom_indices]
+                    return top_r, bot_r
 
-                # Bottom-k (ascending)
-                bottom_indices = np.argsort(sims)[:k]
-                bottom_results = [{
-                    "similarity": float(sims[i]),
-                    "metadata": index.metadata[int(i)].copy() if (index.metadata and int(i) < len(index.metadata)) else {},
-                    "index": int(i),
-                } for i in bottom_indices]
+                top_cos, bottom_cos = _pack_results(sims_cos)
+                if sims_prop is not None:
+                    top_prop, bottom_prop = _pack_results(sims_prop)
+                else:
+                    top_prop, bottom_prop = [], []
             
-            st.session_state['top_results'] = top_results
-            st.session_state['bottom_results'] = bottom_results
+            st.session_state['top_results_cos'] = top_cos
+            st.session_state['bottom_results_cos'] = bottom_cos
+            st.session_state['top_results_prop'] = top_prop
+            st.session_state['bottom_results_prop'] = bottom_prop
             st.session_state['query_sample'] = query_raw_sample
             st.session_state['query_index'] = query_index
         except Exception as e:
             st.error(f"Error performing search: {str(e)}")
     
     # Display results
-    if 'top_results' in st.session_state and 'bottom_results' in st.session_state:
-        top_results = st.session_state['top_results']
-        bottom_results = st.session_state['bottom_results']
+    if 'top_results_cos' in st.session_state and 'bottom_results_cos' in st.session_state:
+        top_cos = st.session_state['top_results_cos']
+        bottom_cos = st.session_state['bottom_results_cos']
+        top_prop = st.session_state.get('top_results_prop', [])
+        bottom_prop = st.session_state.get('bottom_results_prop', [])
         query_sample = st.session_state['query_sample']
         query_idx = st.session_state['query_index']
         
@@ -956,24 +1101,19 @@ def main():
             receiver_idx=int(query_target.item()),
         )
         st.plotly_chart(query_fig, use_container_width=True)
-        
-        # Display similar CKs (Top-k)
-        st.subheader(f"Top-{len(top_results)} Similar CKs")
-        
-        # Create grid layout
-        num_results = len(top_results)
-        num_rows = (num_results + num_cols - 1) // num_cols
-        
-        for row in range(num_rows):
-            cols = st.columns(num_cols)
-            for col_idx in range(num_cols):
-                result_idx = row * num_cols + col_idx
-                if result_idx < num_results:
-                    result = top_results[result_idx]
-                    similarity = result['similarity']
-                    idx = result['index']
-                    metadata = result['metadata']
-                    
+
+        def _render_result_grid(results: list[dict], header: str):
+            st.subheader(header)
+            num_results = len(results)
+            num_rows = (num_results + num_cols - 1) // num_cols
+            for row in range(num_rows):
+                cols = st.columns(num_cols)
+                for col_idx in range(num_cols):
+                    r_i = row * num_cols + col_idx
+                    if r_i >= num_results:
+                        continue
+                    result = results[r_i]
+                    idx = int(result["index"])
                     with cols[col_idx]:
                         sim_val = result.get("similarity", None)
                         sim_str = "N/A"
@@ -983,24 +1123,16 @@ def main():
                                 sim_str = f"{sim_f:.4f}"
                         except Exception:
                             pass
-
-                        st.markdown(f"**Rank {result_idx + 1}** (Similarity: {sim_str})")
+                        st.markdown(f"**Rank {r_i + 1}** (Similarity: {sim_str})")
                         st.caption(f"Index: {idx}")
-                        
-                        # Load and plot similar CK
-                        # Note: We need to load the actual sample from the dataset
-                        # For now, we'll use the index to get the sample
-                        # This assumes the index metadata contains enough info to load the sample
                         try:
-                            # Try to get sample from dataset using index
                             if idx < len(dataset):
-                                similar_data_dict, similar_target = dataset[idx]
+                                _d, similar_target = dataset[idx]
                                 similar_raw_sample = _get_raw_sample(dataset, idx)
-                                
                                 similar_df = load_raw_sample_data(similar_raw_sample)
-                                similar_fig = plot_ck_snapshot(
+                                fig = plot_ck_snapshot(
                                     similar_df,
-                                    title=f"Rank {result_idx + 1} (Idx {idx})",
+                                    title=f"Idx {idx}",
                                     show_vectors=show_vectors,
                                     vector_scale=vector_scale,
                                     max_vector_len=max_vector_len,
@@ -1017,68 +1149,27 @@ def main():
                                     swing_curvature_m=float(swing_curvature_m),
                                     receiver_idx=int(similar_target.item()),
                                 )
-                                st.plotly_chart(similar_fig, use_container_width=True)
-                                
-                                st.caption(f"Receiver: {similar_target.item()}")
+                                st.plotly_chart(fig, use_container_width=True)
+                                st.caption(f"Receiver: {int(similar_target.item())}")
                             else:
                                 st.warning(f"Index {idx} out of dataset range")
                         except Exception as e:
                             st.error(f"Error loading sample {idx}: {str(e)}")
 
-        # Display dissimilar CKs (Bottom-k)
-        st.subheader(f"Bottom-{len(bottom_results)} Dissimilar CKs")
-
-        num_results = len(bottom_results)
-        num_rows = (num_results + num_cols - 1) // num_cols
-        for row in range(num_rows):
-            cols = st.columns(num_cols)
-            for col_idx in range(num_cols):
-                result_idx = row * num_cols + col_idx
-                if result_idx < num_results:
-                    result = bottom_results[result_idx]
-                    idx = result['index']
-                    with cols[col_idx]:
-                        sim_val = result.get("similarity", None)
-                        sim_str = "N/A"
-                        try:
-                            sim_f = float(sim_val)
-                            if math.isfinite(sim_f):
-                                sim_str = f"{sim_f:.4f}"
-                        except Exception:
-                            pass
-
-                        st.markdown(f"**Rank {result_idx + 1}** (Similarity: {sim_str})")
-                        st.caption(f"Index: {idx}")
-                        try:
-                            if idx < len(dataset):
-                                similar_data_dict, similar_target = dataset[idx]
-                                similar_raw_sample = _get_raw_sample(dataset, idx)
-                                similar_df = load_raw_sample_data(similar_raw_sample)
-                                similar_fig = plot_ck_snapshot(
-                                    similar_df,
-                                    title=f"Bottom {result_idx + 1} (Idx {idx})",
-                                    show_vectors=show_vectors,
-                                    vector_scale=vector_scale,
-                                    max_vector_len=max_vector_len,
-                                    vector_offset_m=vector_offset_m,
-                                    min_vector_len=min_vector_len,
-                                    show_ids=show_ids,
-                                    show_ball_arc=show_ball_arc,
-                                    swing_mode=swing_mode,
-                                    trajectory_source=trajectory_source,
-                                    soccerdata_dir=soccerdata_dir,
-                                    traj_window_frames=int(traj_window_frames),
-                                    emphasize_swing=emphasize_swing,
-                                    show_raw_tracking=show_raw_tracking,
-                                    swing_curvature_m=float(swing_curvature_m),
-                                    receiver_idx=int(similar_target.item()),
-                                )
-                                st.plotly_chart(similar_fig, use_container_width=True)
-                                st.caption(f"Receiver: {similar_target.item()}")
-                            else:
-                                st.warning(f"Index {idx} out of dataset range")
-                        except Exception as e:
-                            st.error(f"Error loading sample {idx}: {str(e)}")
+        if compare_mode == "Side-by-side (Cosine vs Proposed)":
+            col_l, col_r = st.columns(2)
+            with col_l:
+                _render_result_grid(top_cos, f"[Cosine] Top-{len(top_cos)} Similar CKs")
+                _render_result_grid(bottom_cos, f"[Cosine] Bottom-{len(bottom_cos)} Dissimilar CKs")
+            with col_r:
+                _render_result_grid(top_prop, f"[Proposed] Top-{len(top_prop)} Similar CKs")
+                _render_result_grid(bottom_prop, f"[Proposed] Bottom-{len(bottom_prop)} Dissimilar CKs")
+        elif compare_mode == "Cosine only":
+            _render_result_grid(top_cos, f"Top-{len(top_cos)} Similar CKs (Cosine)")
+            _render_result_grid(bottom_cos, f"Bottom-{len(bottom_cos)} Dissimilar CKs (Cosine)")
+        else:
+            _render_result_grid(top_prop, f"Top-{len(top_prop)} Similar CKs (Proposed)")
+            _render_result_grid(bottom_prop, f"Bottom-{len(bottom_prop)} Dissimilar CKs (Proposed)")
     
     else:
         st.info("👈 Configure settings in the sidebar and click 'Search' to view results.")
