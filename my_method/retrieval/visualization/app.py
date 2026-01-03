@@ -644,6 +644,24 @@ def main():
     # Sidebar configuration
     st.sidebar.header("Configuration")
     
+    # Quick presets (recommended): avoid mismatched config/index/checkpoint.
+    preset = st.sidebar.radio(
+        "Preset（おすすめ）",
+        options=["consistency_stable", "baseline_stable", "custom"],
+        index=0,
+        help="普段は consistency_stable と baseline_stable の2つを比較するだけなので、まずはプリセットを推奨。",
+    )
+
+    # Cache clear helper (often needed when switching configs)
+    if st.sidebar.button("♻️ キャッシュクリア（読み直し）"):
+        try:
+            load_search_system.clear()
+            load_index.clear()
+            st.sidebar.success("Cache cleared.")
+        except Exception:
+            # Best-effort: if Streamlit changes API, ignore.
+            st.sidebar.info("Cache clear requested (restart browser if not reflected).")
+
     # ---- Easy selectors (recommended) ----
     # Config selection (dropdown)
     default_config = "configs_my_method/multitask_receiver_shot_d2_consistency_stable.yaml"
@@ -654,12 +672,18 @@ def main():
     if default_config not in cfg_candidates:
         cfg_candidates = [default_config] + cfg_candidates
 
-    config_path = st.sidebar.selectbox(
-        "Config（選択）",
-        options=cfg_candidates,
-        index=0,
-        help="普段はここだけ選べばOK（my_method用config）",
-    )
+    # Apply preset defaults
+    if preset == "consistency_stable":
+        config_path = "configs_my_method/multitask_receiver_shot_d2_consistency_stable.yaml"
+    elif preset == "baseline_stable":
+        config_path = "configs_my_method/multitask_receiver_shot_d2_baseline_stable.yaml"
+    else:
+        config_path = st.sidebar.selectbox(
+            "Config（選択）",
+            options=cfg_candidates,
+            index=0,
+            help="customのときのみ選択（普段はプリセット推奨）",
+        )
 
     # Infer default index path from selected config (run_name + d2)
     inferred_index_path = None
@@ -679,13 +703,16 @@ def main():
         idx_candidates = []
     if inferred_index_path not in idx_candidates:
         idx_candidates = [inferred_index_path] + idx_candidates
-
-    index_path = st.sidebar.selectbox(
-        "Index（選択）",
-        options=idx_candidates,
-        index=0,
-        help="consistency_stable / baseline_stable など run_name ごとの index を選択",
-    )
+    if preset in ("consistency_stable", "baseline_stable"):
+        index_path = inferred_index_path
+        st.sidebar.caption(f"Index（自動）: `{index_path}`")
+    else:
+        index_path = st.sidebar.selectbox(
+            "Index（選択）",
+            options=idx_candidates,
+            index=0,
+            help="consistency_stable / baseline_stable など run_name ごとの index を選択",
+        )
 
     # Advanced: allow manual override (optional)
     with st.sidebar.expander("詳細設定（手入力したい場合）", expanded=False):
