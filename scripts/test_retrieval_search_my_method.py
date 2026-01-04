@@ -94,10 +94,34 @@ def main():
     with np.errstate(all="ignore"):
         import torch
         with torch.no_grad():
-            q = search_system._forward_batch(x, edge_index, edge_attr, batch).detach().cpu().numpy().reshape(1, -1)
-        q = q.astype(np.float32)
-        q = q / np.maximum(np.linalg.norm(q, axis=1, keepdims=True), 1e-12)
-        sims = np.dot(q, index.embeddings.T).reshape(-1)
+            if getattr(index, "embeddings_att", None) is not None and getattr(index, "embeddings_def", None) is not None:
+                _z, z_att, z_def = search_system._forward_batch(
+                    x,
+                    edge_index,
+                    edge_attr,
+                    batch,
+                    return_split=True,
+                    corner_canonicalize=getattr(search_system, "corner_canonicalize", True),
+                )
+                qa = z_att.detach().cpu().numpy().astype(np.float32).reshape(1, -1)
+                qd = z_def.detach().cpu().numpy().astype(np.float32).reshape(1, -1)
+                qa = qa / np.maximum(np.linalg.norm(qa, axis=1, keepdims=True), 1e-12)
+                qd = qd / np.maximum(np.linalg.norm(qd, axis=1, keepdims=True), 1e-12)
+                Ea = np.asarray(index.embeddings_att, dtype=np.float32)
+                Ed = np.asarray(index.embeddings_def, dtype=np.float32)
+                sims = (0.5 * np.dot(qa, Ea.T) + 0.5 * np.dot(qd, Ed.T)).reshape(-1)
+            else:
+                q = search_system._forward_batch(
+                    x,
+                    edge_index,
+                    edge_attr,
+                    batch,
+                    return_split=False,
+                    corner_canonicalize=getattr(search_system, "corner_canonicalize", True),
+                ).detach().cpu().numpy().reshape(1, -1)
+                q = q.astype(np.float32)
+                q = q / np.maximum(np.linalg.norm(q, axis=1, keepdims=True), 1e-12)
+                sims = np.dot(q, index.embeddings.T).reshape(-1)
 
     n = int(len(sims))
     k = int(min(int(args.k), n))

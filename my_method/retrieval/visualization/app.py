@@ -616,6 +616,8 @@ def compute_all_similarities(
     search_system: SimilarCKSearch,
     query_data: Dict[str, Any],
     index: SimilarCKIndex,
+    w_att: float = 0.5,
+    w_def: float = 0.5,
 ) -> np.ndarray:
     """Compute cosine similarity between query and all index embeddings."""
     if index.embeddings is None:
@@ -631,7 +633,34 @@ def compute_all_similarities(
         batch = batch.to(search_system.device)
 
     with torch.no_grad():
-        q = search_system._forward_batch(x, edge_index, edge_attr, batch).detach().cpu().numpy()
+        # If split embeddings exist, compute similarity as weighted sum of att/def cosine similarities.
+        if getattr(index, "embeddings_att", None) is not None and getattr(index, "embeddings_def", None) is not None:
+            _z, z_att, z_def = search_system._forward_batch(
+                x,
+                edge_index,
+                edge_attr,
+                batch,
+                return_split=True,
+                corner_canonicalize=getattr(search_system, "corner_canonicalize", True),
+            )
+            qa = z_att.detach().cpu().numpy().astype(np.float32).reshape(1, -1)
+            qd = z_def.detach().cpu().numpy().astype(np.float32).reshape(1, -1)
+            qa = qa / np.maximum(np.linalg.norm(qa, axis=1, keepdims=True), 1e-12)
+            qd = qd / np.maximum(np.linalg.norm(qd, axis=1, keepdims=True), 1e-12)
+            Ea = np.asarray(index.embeddings_att, dtype=np.float32)
+            Ed = np.asarray(index.embeddings_def, dtype=np.float32)
+            sims = float(w_att) * np.dot(qa, Ea.T) + float(w_def) * np.dot(qd, Ed.T)
+            return sims.reshape(-1)
+
+        # Fallback: combined embedding cosine
+        q = search_system._forward_batch(
+            x,
+            edge_index,
+            edge_attr,
+            batch,
+            return_split=False,
+            corner_canonicalize=getattr(search_system, "corner_canonicalize", True),
+        ).detach().cpu().numpy()
     q = np.asarray(q, dtype=np.float32).reshape(1, -1)
     qn = np.linalg.norm(q, axis=1, keepdims=True)
     qn = np.where(qn == 0, 1.0, qn)
@@ -722,6 +751,7 @@ def compute_structural_similarities(
     max_n: Optional[int] = None,
     w_att: float = 1.0,
     w_def: float = 1.0,
+    corner_canonicalize: bool = True,
 ) -> np.ndarray:
     """Compute proposed structural similarity for all samples (higher is better).
 
@@ -729,6 +759,21 @@ def compute_structural_similarities(
     Hungarian matching distance between attacking/defending point sets.
     """
     q_df = load_raw_sample_data(query_sample)
+    if corner_canonicalize:
+        q_df = q_df.copy()
+        # Canonicalize 4 corners by reflecting around axes so the corner is always (+,+).
+        # Use ball-holder as kicker proxy.
+        try:
+            ball_rows = q_df[q_df.get("ball", 0.0) > 0.5] if "ball" in q_df.columns else q_df.iloc[0:0]
+            if len(ball_rows) > 0:
+                bx = float(ball_rows.iloc[0]["x"])
+                by = float(ball_rows.iloc[0]["y"])
+                if bx < 0:
+                    q_df["x"] = -q_df["x"]
+                if by < 0:
+                    q_df["y"] = -q_df["y"]
+        except Exception:
+            pass
     q_att, q_def = _get_team_split_positions(q_df)
 
     n_total = len(dataset)
@@ -739,6 +784,19 @@ def compute_structural_similarities(
     for i in range(n_total):
         cand_raw = _get_raw_sample(dataset, i)
         c_df = load_raw_sample_data(cand_raw)
+        if corner_canonicalize:
+            c_df = c_df.copy()
+            try:
+                ball_rows = c_df[c_df.get("ball", 0.0) > 0.5] if "ball" in c_df.columns else c_df.iloc[0:0]
+                if len(ball_rows) > 0:
+                    bx = float(ball_rows.iloc[0]["x"])
+                    by = float(ball_rows.iloc[0]["y"])
+                    if bx < 0:
+                        c_df["x"] = -c_df["x"]
+                    if by < 0:
+                        c_df["y"] = -c_df["y"]
+            except Exception:
+                pass
         c_att, c_def = _get_team_split_positions(c_df)
         d_att = _hungarian_mean_distance(q_att, c_att)
         d_def = _hungarian_mean_distance(q_def, c_def)
@@ -1029,7 +1087,13 @@ def main():
         try:
             with st.spinner("Searching for similar CKs..."):
                 # Cosine similarities (embedding-based)
-                sims_cos = compute_all_similarities(search_system, query_data_dict, index)
+                sims_cos = compute_all_similarities(
+                    search_system,
+                    query_data_dict,
+                    index,
+                    w_att=float(w_att),
+                    w_def=float(w_def),
+                )
 
                 # Proposed structural similarities (geometry-based)
                 sims_prop = None
@@ -1040,6 +1104,7 @@ def main():
                         max_n=len(sims_cos),
                         w_att=float(w_att),
                         w_def=float(w_def),
+                        corner_canonicalize=True,
                     )
 
                 n = int(len(sims_cos))

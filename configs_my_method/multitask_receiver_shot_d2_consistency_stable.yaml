@@ -106,4 +106,14 @@ log_dir: "runs/my_method"
 checkpoint_dir: "checkpoints/my_method"
 model_save_dir: "checkpoints/my_method/receiver_shot"
 
+# Retrieval (similar CK search) settings
+# - split_att_def: 攻撃/守備ノードを分けて埋め込み・類似度計算
+# - corner_canonicalize: 4つのCK位置（左右/上下）を反転で同一視して、位置依存を弱める
+retrieval:
+  split_att_def: true
+  corner_canonicalize: true
+  # Cosine類似度の合成重み（攻/守）
+  w_att: 0.5
+  w_def: 0.5
+
 
