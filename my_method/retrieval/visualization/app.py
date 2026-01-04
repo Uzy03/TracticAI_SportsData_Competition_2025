@@ -16,7 +16,6 @@ import yaml
 import torch
 from torch.utils.data import ConcatDataset
 import math
-import copy
 
 # Proposed structural similarity (optional dependency)
 try:
@@ -890,24 +889,7 @@ def main():
             value=True,
             help="画面が狭い場合に左右の結果が潰れないよう、横スクロールで表示します。",
         )
-    # Results rendering: avoid squished plots by forcing horizontal scrolling rows with a minimum card width.
-    # NOTE: 横スクロール表示は環境差（Streamlitのレイアウト/ブラウザ）で崩れやすいので、
-    # デフォルトは「縦に並べて大きく表示」にしています。
-    results_horizontal_scroll = st.sidebar.checkbox(
-        "（任意）検索結果を横スクロールで表示",
-        value=False,
-        help="環境によっては崩れることがあるため、基本はOFF推奨です。",
-    )
-    result_card_min_width_px = 900
-    if results_horizontal_scroll:
-        result_card_min_width_px = st.sidebar.slider(
-            "結果カード最小幅（px）",
-            min_value=500,
-            max_value=1400,
-            value=900,
-            step=50,
-            help="横スクロールのときだけ使います。",
-        )
+    # NOTE: 検索結果は「縦に大きく表示」を基本にして、潰れ/重なりを確実に回避します。
     with st.sidebar.expander("Proposed similarity settings", expanded=False):
         w_att = st.slider("Weight: attacking", 0.0, 3.0, 1.0, 0.1)
         w_def = st.slider("Weight: defending", 0.0, 3.0, 1.0, 0.1)
@@ -1128,119 +1110,11 @@ def main():
         )
         st.plotly_chart(query_fig, use_container_width=True, key=f"query_fig_{int(query_idx)}")
 
-        def _build_tiled_row_figure(
-            results: list[dict],
-            panel_key: str,
-            *,
-            card_min_width_px: int,
-        ) -> Optional[go.Figure]:
-            """Build a single wide Plotly figure by tiling multiple CK snapshot figures horizontally.
-
-            This avoids Streamlit's `st.columns` shrink behavior (which squashes plots on narrow screens).
-            """
-            if not results:
-                return None
-
-            # Build per-sample figures first (re-using the same snapshot function).
-            per_figs: list[go.Figure] = []
-            per_meta: list[dict] = []
+        def _render_results_vertical(results: list[dict], header: str, panel_key: str) -> None:
+            st.subheader(header)
             for r_i, result in enumerate(results):
                 idx = int(result["index"])
-                if idx >= len(dataset):
-                    continue
-                _d, similar_target = dataset[idx]
-                                similar_raw_sample = _get_raw_sample(dataset, idx)
-                                similar_df = load_raw_sample_data(similar_raw_sample)
-                fig_i = plot_ck_snapshot(
-                                    similar_df,
-                    title=f"Idx {idx}",
-                                    show_vectors=show_vectors,
-                                    vector_scale=vector_scale,
-                                    max_vector_len=max_vector_len,
-                                    vector_offset_m=vector_offset_m,
-                                    min_vector_len=min_vector_len,
-                                    show_ids=show_ids,
-                                    show_ball_arc=show_ball_arc,
-                                    swing_mode=swing_mode,
-                                    trajectory_source=trajectory_source,
-                                    soccerdata_dir=soccerdata_dir,
-                                    traj_window_frames=int(traj_window_frames),
-                                    emphasize_swing=emphasize_swing,
-                                    show_raw_tracking=show_raw_tracking,
-                                    swing_curvature_m=float(swing_curvature_m),
-                                    receiver_idx=int(similar_target.item()),
-                                )
-                per_figs.append(fig_i)
-                per_meta.append(
-                    {
-                        "rank": r_i + 1,
-                        "idx": idx,
-                        "receiver": int(similar_target.item()),
-                        "similarity": result.get("similarity", None),
-                    }
-                )
-
-            if not per_figs:
-                return None
-
-            # Determine base axis ranges from the first figure.
-            base_xrange = [-60.0, 60.0]
-            base_yrange = [-39.0, 39.0]
-            try:
-                xr = per_figs[0].layout.xaxis.range
-                yr = per_figs[0].layout.yaxis.range
-                if xr is not None and len(xr) == 2:
-                    base_xrange = [float(xr[0]), float(xr[1])]
-                if yr is not None and len(yr) == 2:
-                    base_yrange = [float(yr[0]), float(yr[1])]
-            except Exception:
-                pass
-
-            pitch_span = (base_xrange[1] - base_xrange[0]) + 15.0  # add gap between pitches
-
-            big = go.Figure()
-
-            # Helper to shift a trace's x coordinates
-            def _shift_trace_x(tr: go.BaseTraceType, dx: float, showlegend: bool) -> go.BaseTraceType:
-                tr2 = copy.deepcopy(tr)
-                try:
-                    if hasattr(tr2, "x") and tr2.x is not None:
-                        x_arr = np.asarray(tr2.x, dtype=float)
-                        tr2.x = (x_arr + float(dx)).tolist()
-                except Exception:
-                    pass
-                tr2.showlegend = bool(showlegend and getattr(tr2, "showlegend", True))
-                return tr2
-
-            # Helper to shift a shape dict's x coordinates
-            def _shift_shape_x(shape_obj: Any, dx: float) -> dict:
-                s = shape_obj.to_plotly_json() if hasattr(shape_obj, "to_plotly_json") else dict(shape_obj)
-                if "x0" in s:
-                    s["x0"] = float(s["x0"]) + float(dx)
-                if "x1" in s:
-                    s["x1"] = float(s["x1"]) + float(dx)
-                # Keep xref/yref default ("x","y") since we tile on a single axis.
-                s.pop("xref", None)
-                s.pop("yref", None)
-                return s
-
-            for i, (fig_i, meta) in enumerate(zip(per_figs, per_meta)):
-                dx = float(i) * float(pitch_span)
-                showlegend = (i == 0)  # show legend only once to avoid clutter
-
-                # Add shapes (field markings etc.)
-                try:
-                    for sh in (fig_i.layout.shapes or []):
-                        big.add_shape(**_shift_shape_x(sh, dx))
-                except Exception:
-                    pass
-
-                # Add traces (players, ball, swing, corner arcs etc.)
-                for tr in fig_i.data:
-                    big.add_trace(_shift_trace_x(tr, dx, showlegend=showlegend))
-
-                # Add a clear title annotation above each pitch
-                sim_val = meta.get("similarity", None)
+                sim_val = result.get("similarity", None)
                 sim_str = "N/A"
                 try:
                     sim_f = float(sim_val)
@@ -1248,115 +1122,42 @@ def main():
                         sim_str = f"{sim_f:.4f}"
                 except Exception:
                     pass
-                big.add_annotation(
-                    x=dx + 0.5 * (base_xrange[0] + base_xrange[1]),
-                    y=base_yrange[1] + 2.5,
-                    xref="x",
-                    yref="y",
-                    text=f"Rank {meta['rank']} | idx {meta['idx']} | sim {sim_str} | recv {meta['receiver']}",
-                    showarrow=False,
-                    font=dict(size=12),
-                )
-
-            # Layout: wide fixed width so the browser can scroll horizontally
-            n = len(per_figs)
-            big.update_layout(
-                width=int(max(900, n * int(card_min_width_px))),
-                height=520,
-                margin=dict(l=10, r=10, t=40, b=10),
-                showlegend=True,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
-            )
-            big.update_xaxes(
-                range=[base_xrange[0], base_xrange[0] + pitch_span * (n - 1) + (base_xrange[1] - base_xrange[0])],
-                showgrid=False,
-                zeroline=False,
-            )
-            big.update_yaxes(range=base_yrange, showgrid=False, zeroline=False, scaleanchor=None)
-            return big
-
-        def _render_result_grid(
-            results: list[dict],
-            header: str,
-            panel_key: str,
-            *,
-            horizontal_scroll: bool,
-            card_min_width_px: int,
-        ):
-            st.subheader(header)
-            num_results = len(results)
-            if horizontal_scroll and num_results > 0:
-                # Render as a single wide figure (tiled pitches). This avoids "squished/overlapped" plots.
-                marker_id = f"{panel_key}_wideplot_marker"
-                st.markdown(
-                    f"""
-<style>
-#{marker_id} + div div[data-testid="stPlotlyChart"] {{
-  overflow-x: auto;
-}}
-</style>
-<div id="{marker_id}"></div>
-""",
-                    unsafe_allow_html=True,
-                )
-                big_fig = _build_tiled_row_figure(results, panel_key, card_min_width_px=int(card_min_width_px))
-                if big_fig is not None:
-                    st.plotly_chart(
-                        big_fig,
-                        use_container_width=False,
-                        key=f"{panel_key}_wideplot",
-                    )
-                else:
-                    st.info("No valid results to display.")
-                return
-
-            # Default (recommended): vertical layout (no squish, no overlap)
-            for r_i, result in enumerate(results):
-                idx = int(result["index"])
-                        sim_val = result.get("similarity", None)
-                        sim_str = "N/A"
-                        try:
-                            sim_f = float(sim_val)
-                            if math.isfinite(sim_f):
-                                sim_str = f"{sim_f:.4f}"
-                        except Exception:
-                            pass
 
                 st.markdown(f"**Rank {r_i + 1}** (Similarity: {sim_str})  |  Index: {idx}")
-                        try:
-                            if idx < len(dataset):
+                try:
+                    if idx < len(dataset):
                         _d, similar_target = dataset[idx]
-                                similar_raw_sample = _get_raw_sample(dataset, idx)
-                                similar_df = load_raw_sample_data(similar_raw_sample)
+                        similar_raw_sample = _get_raw_sample(dataset, idx)
+                        similar_df = load_raw_sample_data(similar_raw_sample)
                         fig = plot_ck_snapshot(
-                                    similar_df,
+                            similar_df,
                             title=f"Idx {idx}",
-                                    show_vectors=show_vectors,
-                                    vector_scale=vector_scale,
-                                    max_vector_len=max_vector_len,
-                                    vector_offset_m=vector_offset_m,
-                                    min_vector_len=min_vector_len,
-                                    show_ids=show_ids,
-                                    show_ball_arc=show_ball_arc,
-                                    swing_mode=swing_mode,
-                                    trajectory_source=trajectory_source,
-                                    soccerdata_dir=soccerdata_dir,
-                                    traj_window_frames=int(traj_window_frames),
-                                    emphasize_swing=emphasize_swing,
-                                    show_raw_tracking=show_raw_tracking,
-                                    swing_curvature_m=float(swing_curvature_m),
-                                    receiver_idx=int(similar_target.item()),
-                                )
+                            show_vectors=show_vectors,
+                            vector_scale=vector_scale,
+                            max_vector_len=max_vector_len,
+                            vector_offset_m=vector_offset_m,
+                            min_vector_len=min_vector_len,
+                            show_ids=show_ids,
+                            show_ball_arc=show_ball_arc,
+                            swing_mode=swing_mode,
+                            trajectory_source=trajectory_source,
+                            soccerdata_dir=soccerdata_dir,
+                            traj_window_frames=int(traj_window_frames),
+                            emphasize_swing=emphasize_swing,
+                            show_raw_tracking=show_raw_tracking,
+                            swing_curvature_m=float(swing_curvature_m),
+                            receiver_idx=int(similar_target.item()),
+                        )
                         st.plotly_chart(
                             fig,
                             use_container_width=True,
                             key=f"{panel_key}_rank{r_i+1}_idx{idx}",
                         )
                         st.caption(f"Receiver: {int(similar_target.item())}")
-                            else:
-                                st.warning(f"Index {idx} out of dataset range")
-                        except Exception as e:
-                            st.error(f"Error loading sample {idx}: {str(e)}")
+                    else:
+                        st.warning(f"Index {idx} out of dataset range")
+                except Exception as e:
+                    st.error(f"Error loading sample {idx}: {str(e)}")
                 st.divider()
 
         if compare_mode == "Side-by-side (Cosine vs Proposed)":
@@ -1381,65 +1182,17 @@ def main():
                 )
             col_l, col_r = st.columns(2)
             with col_l:
-                _render_result_grid(
-                    top_cos,
-                    f"[Cosine] Top-{len(top_cos)} Similar CKs",
-                    panel_key="cos_top",
-                    horizontal_scroll=results_horizontal_scroll,
-                    card_min_width_px=int(result_card_min_width_px),
-                )
-                _render_result_grid(
-                    bottom_cos,
-                    f"[Cosine] Bottom-{len(bottom_cos)} Dissimilar CKs",
-                    panel_key="cos_bottom",
-                    horizontal_scroll=results_horizontal_scroll,
-                    card_min_width_px=int(result_card_min_width_px),
-                )
+                _render_results_vertical(top_cos, f"[Cosine] Top-{len(top_cos)} Similar CKs", panel_key="cos_top")
+                _render_results_vertical(bottom_cos, f"[Cosine] Bottom-{len(bottom_cos)} Dissimilar CKs", panel_key="cos_bottom")
             with col_r:
-                _render_result_grid(
-                    top_prop,
-                    f"[Proposed] Top-{len(top_prop)} Similar CKs",
-                    panel_key="prop_top",
-                    horizontal_scroll=results_horizontal_scroll,
-                    card_min_width_px=int(result_card_min_width_px),
-                )
-                _render_result_grid(
-                    bottom_prop,
-                    f"[Proposed] Bottom-{len(bottom_prop)} Dissimilar CKs",
-                    panel_key="prop_bottom",
-                    horizontal_scroll=results_horizontal_scroll,
-                    card_min_width_px=int(result_card_min_width_px),
-                )
+                _render_results_vertical(top_prop, f"[Proposed] Top-{len(top_prop)} Similar CKs", panel_key="prop_top")
+                _render_results_vertical(bottom_prop, f"[Proposed] Bottom-{len(bottom_prop)} Dissimilar CKs", panel_key="prop_bottom")
         elif compare_mode == "Cosine only":
-            _render_result_grid(
-                top_cos,
-                f"Top-{len(top_cos)} Similar CKs (Cosine)",
-                panel_key="cos_top",
-                horizontal_scroll=results_horizontal_scroll,
-                card_min_width_px=int(result_card_min_width_px),
-            )
-            _render_result_grid(
-                bottom_cos,
-                f"Bottom-{len(bottom_cos)} Dissimilar CKs (Cosine)",
-                panel_key="cos_bottom",
-                horizontal_scroll=results_horizontal_scroll,
-                card_min_width_px=int(result_card_min_width_px),
-            )
+            _render_results_vertical(top_cos, f"Top-{len(top_cos)} Similar CKs (Cosine)", panel_key="cos_top")
+            _render_results_vertical(bottom_cos, f"Bottom-{len(bottom_cos)} Dissimilar CKs (Cosine)", panel_key="cos_bottom")
         else:
-            _render_result_grid(
-                top_prop,
-                f"Top-{len(top_prop)} Similar CKs (Proposed)",
-                panel_key="prop_top",
-                horizontal_scroll=results_horizontal_scroll,
-                card_min_width_px=int(result_card_min_width_px),
-            )
-            _render_result_grid(
-                bottom_prop,
-                f"Bottom-{len(bottom_prop)} Dissimilar CKs (Proposed)",
-                panel_key="prop_bottom",
-                horizontal_scroll=results_horizontal_scroll,
-                card_min_width_px=int(result_card_min_width_px),
-            )
+            _render_results_vertical(top_prop, f"Top-{len(top_prop)} Similar CKs (Proposed)", panel_key="prop_top")
+            _render_results_vertical(bottom_prop, f"Bottom-{len(bottom_prop)} Dissimilar CKs (Proposed)", panel_key="prop_bottom")
     
     else:
         st.info("👈 Configure settings in the sidebar and click 'Search' to view results.")
