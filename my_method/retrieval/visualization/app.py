@@ -164,6 +164,23 @@ def plot_ck_snapshot(
         Plotly figure object
     """
     fig = go.Figure()
+
+    def _clamp_pitch_xy(xv: float, yv: float, margin: float = 3.0) -> tuple[float, float]:
+        """Clamp a point into the visible pitch rectangle to keep arrows/heads from disappearing."""
+        hl = 105.0 / 2.0
+        hw = 68.0 / 2.0
+        return (
+            float(max(-hl - margin, min(hl + margin, float(xv)))),
+            float(max(-hw - margin, min(hw + margin, float(yv)))),
+        )
+
+    def _safe_add_arrow(x: float, y: float, ax: float, ay: float, **kwargs) -> None:
+        """Add a Plotly arrow annotation, clamping and skipping degenerate arrows."""
+        x2, y2 = _clamp_pitch_xy(x, y)
+        ax2, ay2 = _clamp_pitch_xy(ax, ay)
+        if (x2 - ax2) ** 2 + (y2 - ay2) ** 2 < 1e-6:
+            return
+        fig.add_annotation(x=x2, y=y2, ax=ax2, ay=ay2, xref="x", yref="y", axref="x", ayref="y", showarrow=True, **kwargs)
     
     # Draw soccer field
     draw_soccer_field(fig)
@@ -336,16 +353,11 @@ def plot_ck_snapshot(
                                 line=dict(color=arc_color, width=4, dash='solid' if is_in else 'dash'),
                                 name="Swing",
                             ))
-                            fig.add_annotation(
+                            _safe_add_arrow(
                                 x=float(arc_x[-1]),
                                 y=float(arc_y[-1]),
                                 ax=float(arc_x[-2]),
                                 ay=float(arc_y[-2]),
-                                xref="x",
-                                yref="y",
-                                axref="x",
-                                ayref="y",
-                                showarrow=True,
                                 arrowhead=3,
                                 arrowsize=2.0,
                                 arrowwidth=3,
@@ -367,16 +379,11 @@ def plot_ck_snapshot(
                                     line=dict(color=arc_color, width=3, dash=('solid' if is_in else 'dash')),
                                     name='Swing',
                                 ))
-                                fig.add_annotation(
+                                _safe_add_arrow(
                                     x=end[0],
                                     y=end[1],
                                     ax=start[0],
                                     ay=start[1],
-                                    xref="x",
-                                    yref="y",
-                                    axref="x",
-                                    ayref="y",
-                                    showarrow=True,
                                     arrowhead=3,
                                     arrowsize=1.6,
                                     arrowwidth=2,
@@ -408,16 +415,11 @@ def plot_ck_snapshot(
                             ),
                             name="Swing",
                         ))
-                        fig.add_annotation(
+                        _safe_add_arrow(
                             x=float(arc_x[-1]),
                             y=float(arc_y[-1]),
                             ax=float(arc_x[-2]),
                             ay=float(arc_y[-2]),
-                            xref="x",
-                            yref="y",
-                            axref="x",
-                            ayref="y",
-                            showarrow=True,
                             arrowhead=3,
                             arrowsize=1.8,
                             arrowwidth=2,
@@ -440,16 +442,11 @@ def plot_ck_snapshot(
                                 line=dict(color=arc_color, width=3, dash=('solid' if is_in else 'dash')),
                                 name="Swing",
                             ))
-                            fig.add_annotation(
+                            _safe_add_arrow(
                                 x=end[0],
                                 y=end[1],
                                 ax=start[0],
                                 ay=start[1],
-                                xref="x",
-                                yref="y",
-                                axref="x",
-                                ayref="y",
-                                showarrow=True,
                                 arrowhead=3,
                                 arrowsize=1.6,
                                 arrowwidth=2,
@@ -472,16 +469,11 @@ def plot_ck_snapshot(
                         ),
                         name="Swing",
                     ))
-                    fig.add_annotation(
+                    _safe_add_arrow(
                         x=float(arc_x[-1]),
                         y=float(arc_y[-1]),
                         ax=float(arc_x[-2]),
                         ay=float(arc_y[-2]),
-                        xref="x",
-                        yref="y",
-                        axref="x",
-                        ayref="y",
-                        showarrow=True,
                         arrowhead=3,
                         arrowsize=1.8,
                         arrowwidth=2,
@@ -504,16 +496,11 @@ def plot_ck_snapshot(
                             line=dict(color=arc_color, width=3, dash=('solid' if is_in else 'dash')),
                             name="Swing",
                         ))
-                        fig.add_annotation(
+                        _safe_add_arrow(
                             x=end[0],
                             y=end[1],
                             ax=start[0],
                             ay=start[1],
-                            xref="x",
-                            yref="y",
-                            axref="x",
-                            ayref="y",
-                            showarrow=True,
                             arrowhead=3,
                             arrowsize=1.6,
                             arrowwidth=2,
