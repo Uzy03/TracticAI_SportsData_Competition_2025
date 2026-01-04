@@ -111,4 +111,11 @@ log_dir: "runs/my_method"
 checkpoint_dir: "checkpoints/my_method"
 model_save_dir: "checkpoints/my_method/receiver_shot"
 
+# Retrieval (similar CK search) settings
+retrieval:
+  split_att_def: true
+  corner_canonicalize: true
+  w_att: 0.5
+  w_def: 0.5
+
 

@@ -230,12 +230,31 @@ def load_raw_sample_data(
     ball = np.array(sample.get("ball", []))
     mask = np.array(sample.get("mask", []))
     # Some samples may not have an explicit ball flag. Use kicker position as proxy.
-    if (ball.size > 0) and (ball.sum() == 0) and ("kicker_idx" in sample) and (sample["kicker_idx"] is not None):
+    # Also, some samples have a bogus "ball holder" row placed at a corner placeholder
+    # (e.g., x=-52.5,y=34.0) even when players are elsewhere. In that case, prefer kicker_idx.
+    if (ball.size > 0) and ("kicker_idx" in sample) and (sample["kicker_idx"] is not None):
         try:
             k = int(sample["kicker_idx"])
             if 0 <= k < ball.size:
                 ball = ball.astype(float)
-                ball[k] = 1.0
+                if ball.sum() == 0:
+                    ball[k] = 1.0
+                else:
+                    bidx = int(np.argmax(ball))
+                    # If the marked ball row looks like a placeholder, override to kicker.
+                    # We only use raw x/y here (before unit normalization).
+                    bx0 = float(x_raw[bidx]) if bidx < x_raw.size else 0.0
+                    by0 = float(y_raw[bidx]) if bidx < y_raw.size else 0.0
+                    # normalized corner placeholders are near (0 or 1)
+                    is_norm_corner = (
+                        (abs(bx0 - 0.0) < 1e-6 or abs(bx0 - 1.0) < 1e-6)
+                        and (abs(by0 - 0.0) < 1e-6 or abs(by0 - 1.0) < 1e-6)
+                    )
+                    # if we have a mask, a masked-out ball row is also suspicious
+                    is_masked_ball = (mask.size > 0 and bidx < mask.size and float(mask[bidx]) < 0.5)
+                    if is_norm_corner or is_masked_ball:
+                        ball[:] = 0.0
+                        ball[k] = 1.0
         except Exception:
             pass
     
@@ -308,6 +327,23 @@ def load_raw_sample_data(
 
     is_masked_out = (mask.astype(float) < 0.5)
     is_dummy = is_corner_dummy | is_center_dummy | is_masked_out
+
+    # Second-pass fix: if the current ball row is exactly on a pitch corner in meters,
+    # but kicker_idx exists, prefer kicker (this catches non-normalized corner placeholders).
+    if (ball.sum() > 0) and ("kicker_idx" in sample) and (sample["kicker_idx"] is not None):
+        try:
+            k = int(sample["kicker_idx"])
+            bidx = int(np.argmax(ball))
+            if 0 <= k < min_len and 0 <= bidx < min_len:
+                hl = FIELD_LENGTH / 2.0
+                hw = FIELD_WIDTH / 2.0
+                is_meter_corner = (abs(abs(float(x[bidx])) - hl) < 1e-6) and (abs(abs(float(y[bidx])) - hw) < 1e-6)
+                if is_meter_corner:
+                    ball = ball.astype(float)
+                    ball[:] = 0.0
+                    ball[k] = 1.0
+        except Exception:
+            pass
 
     # Create DataFrame
     df = pd.DataFrame({

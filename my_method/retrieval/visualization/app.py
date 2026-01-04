@@ -17,30 +17,36 @@ import torch
 from torch.utils.data import ConcatDataset
 import math
 
+# Proposed structural similarity (optional dependency)
+try:
+    from scipy.optimize import linear_sum_assignment  # type: ignore
+except Exception:  # pragma: no cover
+    linear_sum_assignment = None
+
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from tacticai.retrieval import SimilarCKSearch, SimilarCKIndex
-from tacticai.dataio import ReceiverDataset
-from tacticai.modules import get_device
+from my_method.retrieval import SimilarCKSearch, SimilarCKIndex
+from my_method.dataio import ReceiverDataset
+from my_method.modules import get_device
 
 # Import utils (handle both relative and absolute imports)
 try:
     from .utils import draw_soccer_field, load_raw_sample_data, get_ball_swing_arc
 except ImportError:
-    from tacticai.retrieval.visualization.utils import draw_soccer_field, load_raw_sample_data, get_ball_swing_arc
+    from my_method.retrieval.visualization.utils import draw_soccer_field, load_raw_sample_data, get_ball_swing_arc
 try:
     from .utils import get_short_pass_arrow
 except ImportError:
-    from tacticai.retrieval.visualization.utils import get_short_pass_arrow
+    from my_method.retrieval.visualization.utils import get_short_pass_arrow
 try:
     from .utils import load_ball_trajectory_from_tracking, infer_swing_from_ball_trajectory
 except ImportError:
-    from tacticai.retrieval.visualization.utils import load_ball_trajectory_from_tracking, infer_swing_from_ball_trajectory
+    from my_method.retrieval.visualization.utils import load_ball_trajectory_from_tracking, infer_swing_from_ball_trajectory
 try:
     from .utils import get_emphasized_swing_arc_from_start
 except ImportError:
-    from tacticai.retrieval.visualization.utils import get_emphasized_swing_arc_from_start
+    from my_method.retrieval.visualization.utils import get_emphasized_swing_arc_from_start
 
 
 def _get_raw_sample(dataset: Any, idx: int) -> Dict[str, Any]:
@@ -79,10 +85,33 @@ def load_search_system(config_path: str, checkpoint_path: Optional[str] = None):
         d2_enabled = config.get("d2", {}).get("enabled", False)
         checkpoint_dir = config.get("checkpoint_dir", "checkpoints")
         model_save_dir = config.get("model_save_dir", f"{checkpoint_dir}/receiver_shot")
+        run_name = config.get("run_name", None)
+        if run_name:
+            model_save_dir = f"{model_save_dir}/{run_name}"
         if d2_enabled:
             checkpoint_path = f"{model_save_dir}/best_d2.ckpt"
         else:
             checkpoint_path = f"{model_save_dir}/best_no_d2.ckpt"
+
+    # Helpful error message when checkpoint is missing
+    ckpt_p = Path(str(checkpoint_path))
+    if not ckpt_p.exists():
+        parent = ckpt_p.parent.parent  # checkpoints/.../receiver_shot/<run_name>
+        try:
+            # list available checkpoints under checkpoints/my_method/receiver_shot/*
+            base_dir = Path("checkpoints") / "my_method" / "receiver_shot"
+            cand = sorted([str(p.as_posix()) for p in base_dir.glob("*/best_*.ckpt")])[:20]
+        except Exception:
+            cand = []
+        msg = (
+            f"Backbone checkpoint not found: {checkpoint_path}\n\n"
+            f"ヒント: 選択中のconfigの run_name と checkpoints 配下のディレクトリ名が一致している必要があります。\n"
+            f"例: baseline_stable を比較したい場合は、configも "
+            f"`configs_my_method/multitask_receiver_shot_d2_baseline_stable.yaml` を選んでください。\n\n"
+            f"見つかった候補（最大20件）:\n- " + "\n- ".join(cand) if cand else
+            f"Backbone checkpoint not found: {checkpoint_path}"
+        )
+        raise FileNotFoundError(msg)
     
     search_system = SimilarCKSearch(
         backbone_checkpoint_path=checkpoint_path,
@@ -135,6 +164,23 @@ def plot_ck_snapshot(
         Plotly figure object
     """
     fig = go.Figure()
+
+    def _clamp_pitch_xy(xv: float, yv: float, margin: float = 3.0) -> tuple[float, float]:
+        """Clamp a point into the visible pitch rectangle to keep arrows/heads from disappearing."""
+        hl = 105.0 / 2.0
+        hw = 68.0 / 2.0
+        return (
+            float(max(-hl - margin, min(hl + margin, float(xv)))),
+            float(max(-hw - margin, min(hw + margin, float(yv)))),
+        )
+
+    def _safe_add_arrow(x: float, y: float, ax: float, ay: float, **kwargs) -> None:
+        """Add a Plotly arrow annotation, clamping and skipping degenerate arrows."""
+        x2, y2 = _clamp_pitch_xy(x, y)
+        ax2, ay2 = _clamp_pitch_xy(ax, ay)
+        if (x2 - ax2) ** 2 + (y2 - ay2) ** 2 < 1e-6:
+            return
+        fig.add_annotation(x=x2, y=y2, ax=ax2, ay=ay2, xref="x", yref="y", axref="x", ayref="y", showarrow=True, **kwargs)
     
     # Draw soccer field
     draw_soccer_field(fig)
@@ -307,16 +353,11 @@ def plot_ck_snapshot(
                                 line=dict(color=arc_color, width=4, dash='solid' if is_in else 'dash'),
                                 name="Swing",
                             ))
-                            fig.add_annotation(
+                            _safe_add_arrow(
                                 x=float(arc_x[-1]),
                                 y=float(arc_y[-1]),
                                 ax=float(arc_x[-2]),
                                 ay=float(arc_y[-2]),
-                                xref="x",
-                                yref="y",
-                                axref="x",
-                                ayref="y",
-                                showarrow=True,
                                 arrowhead=3,
                                 arrowsize=2.0,
                                 arrowwidth=3,
@@ -338,16 +379,11 @@ def plot_ck_snapshot(
                                     line=dict(color=arc_color, width=3, dash=('solid' if is_in else 'dash')),
                                     name='Swing',
                                 ))
-                                fig.add_annotation(
+                                _safe_add_arrow(
                                     x=end[0],
                                     y=end[1],
                                     ax=start[0],
                                     ay=start[1],
-                                    xref="x",
-                                    yref="y",
-                                    axref="x",
-                                    ayref="y",
-                                    showarrow=True,
                                     arrowhead=3,
                                     arrowsize=1.6,
                                     arrowwidth=2,
@@ -379,16 +415,11 @@ def plot_ck_snapshot(
                             ),
                             name="Swing",
                         ))
-                        fig.add_annotation(
+                        _safe_add_arrow(
                             x=float(arc_x[-1]),
                             y=float(arc_y[-1]),
                             ax=float(arc_x[-2]),
                             ay=float(arc_y[-2]),
-                            xref="x",
-                            yref="y",
-                            axref="x",
-                            ayref="y",
-                            showarrow=True,
                             arrowhead=3,
                             arrowsize=1.8,
                             arrowwidth=2,
@@ -411,16 +442,11 @@ def plot_ck_snapshot(
                                 line=dict(color=arc_color, width=3, dash=('solid' if is_in else 'dash')),
                                 name="Swing",
                             ))
-                            fig.add_annotation(
+                            _safe_add_arrow(
                                 x=end[0],
                                 y=end[1],
                                 ax=start[0],
                                 ay=start[1],
-                                xref="x",
-                                yref="y",
-                                axref="x",
-                                ayref="y",
-                                showarrow=True,
                                 arrowhead=3,
                                 arrowsize=1.6,
                                 arrowwidth=2,
@@ -443,16 +469,11 @@ def plot_ck_snapshot(
                         ),
                         name="Swing",
                     ))
-                    fig.add_annotation(
+                    _safe_add_arrow(
                         x=float(arc_x[-1]),
                         y=float(arc_y[-1]),
                         ax=float(arc_x[-2]),
                         ay=float(arc_y[-2]),
-                        xref="x",
-                        yref="y",
-                        axref="x",
-                        ayref="y",
-                        showarrow=True,
                         arrowhead=3,
                         arrowsize=1.8,
                         arrowwidth=2,
@@ -475,16 +496,11 @@ def plot_ck_snapshot(
                             line=dict(color=arc_color, width=3, dash=('solid' if is_in else 'dash')),
                             name="Swing",
                         ))
-                        fig.add_annotation(
+                        _safe_add_arrow(
                             x=end[0],
                             y=end[1],
                             ax=start[0],
                             ay=start[1],
-                            xref="x",
-                            yref="y",
-                            axref="x",
-                            ayref="y",
-                            showarrow=True,
                             arrowhead=3,
                             arrowsize=1.6,
                             arrowwidth=2,
@@ -587,6 +603,8 @@ def compute_all_similarities(
     search_system: SimilarCKSearch,
     query_data: Dict[str, Any],
     index: SimilarCKIndex,
+    w_att: float = 0.5,
+    w_def: float = 0.5,
 ) -> np.ndarray:
     """Compute cosine similarity between query and all index embeddings."""
     if index.embeddings is None:
@@ -602,7 +620,34 @@ def compute_all_similarities(
         batch = batch.to(search_system.device)
 
     with torch.no_grad():
-        q = search_system._forward_batch(x, edge_index, edge_attr, batch).detach().cpu().numpy()
+        # If split embeddings exist, compute similarity as weighted sum of att/def cosine similarities.
+        if getattr(index, "embeddings_att", None) is not None and getattr(index, "embeddings_def", None) is not None:
+            _z, z_att, z_def = search_system._forward_batch(
+                x,
+                edge_index,
+                edge_attr,
+                batch,
+                return_split=True,
+                corner_canonicalize=getattr(search_system, "corner_canonicalize", True),
+            )
+            qa = z_att.detach().cpu().numpy().astype(np.float32).reshape(1, -1)
+            qd = z_def.detach().cpu().numpy().astype(np.float32).reshape(1, -1)
+            qa = qa / np.maximum(np.linalg.norm(qa, axis=1, keepdims=True), 1e-12)
+            qd = qd / np.maximum(np.linalg.norm(qd, axis=1, keepdims=True), 1e-12)
+            Ea = np.asarray(index.embeddings_att, dtype=np.float32)
+            Ed = np.asarray(index.embeddings_def, dtype=np.float32)
+            sims = float(w_att) * np.dot(qa, Ea.T) + float(w_def) * np.dot(qd, Ed.T)
+            return sims.reshape(-1)
+
+        # Fallback: combined embedding cosine
+        q = search_system._forward_batch(
+            x,
+            edge_index,
+            edge_attr,
+            batch,
+            return_split=False,
+            corner_canonicalize=getattr(search_system, "corner_canonicalize", True),
+        ).detach().cpu().numpy()
     q = np.asarray(q, dtype=np.float32).reshape(1, -1)
     qn = np.linalg.norm(q, axis=1, keepdims=True)
     qn = np.where(qn == 0, 1.0, qn)
@@ -610,6 +655,140 @@ def compute_all_similarities(
 
     # index.embeddings are L2-normalized when built
     sims = np.dot(q, index.embeddings.T).reshape(-1)  # [N]
+    return sims
+
+
+def _get_team_split_positions(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """Return (attacking_positions, defending_positions) as arrays [M,2], filtered for visualization dummies."""
+    df_vis = df.copy()
+    if "is_dummy" in df_vis.columns:
+        df_vis = df_vis[~df_vis["is_dummy"]]
+
+    # Determine attacking team by ball-holder (kicker proxy)
+    ball_rows = df_vis[df_vis.get("ball", 0.0) > 0.5] if "ball" in df_vis.columns else df_vis.iloc[0:0]
+    if len(ball_rows) > 0 and "team_id" in df_vis.columns:
+        attacking_team_id = int(ball_rows.iloc[0]["team_id"])
+    else:
+        attacking_team_id = int(df_vis["team_id"].iloc[0]) if "team_id" in df_vis.columns and len(df_vis) > 0 else 0
+
+    if "team_id" in df_vis.columns:
+        attacking = df_vis[df_vis["team_id"] == attacking_team_id]
+        defending = df_vis[df_vis["team_id"] != attacking_team_id]
+    else:
+        attacking = df_vis
+        defending = df_vis.iloc[0:0]
+
+    att = attacking[["x", "y"]].to_numpy(dtype=np.float32) if len(attacking) > 0 else np.zeros((0, 2), dtype=np.float32)
+    dfd = defending[["x", "y"]].to_numpy(dtype=np.float32) if len(defending) > 0 else np.zeros((0, 2), dtype=np.float32)
+
+    # Keep at most 11 players per side for stability (CK snapshot)
+    att = att[:11]
+    dfd = dfd[:11]
+    return att, dfd
+
+
+def _hungarian_mean_distance(a: np.ndarray, b: np.ndarray, pad_cost: float = 200.0) -> float:
+    """Mean assignment distance between two point sets using Hungarian algorithm.
+
+    If scipy is unavailable, falls back to greedy matching (slightly worse but works).
+    """
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+    na, nb = int(a.shape[0]), int(b.shape[0])
+    if na == 0 and nb == 0:
+        return 0.0
+    if na == 0 or nb == 0:
+        # All unmatched -> penalize
+        return float(pad_cost)
+
+    n = max(na, nb)
+    # Build padded arrays
+    A = np.zeros((n, 2), dtype=np.float32)
+    B = np.zeros((n, 2), dtype=np.float32)
+    A[:na] = a
+    B[:nb] = b
+
+    # Cost matrix: Euclidean distances
+    diff = A[:, None, :] - B[None, :, :]
+    cost = np.sqrt((diff ** 2).sum(axis=-1)).astype(np.float32)
+
+    # Penalize matches involving padded rows/cols
+    if na < n:
+        cost[na:, :] = pad_cost
+    if nb < n:
+        cost[:, nb:] = pad_cost
+
+    if linear_sum_assignment is not None:
+        row_ind, col_ind = linear_sum_assignment(cost)
+        return float(cost[row_ind, col_ind].mean())
+
+    # Fallback greedy matching
+    used_cols = set()
+    dists = []
+    for i in range(n):
+        j = int(np.argmin([cost[i, jj] if jj not in used_cols else 1e9 for jj in range(n)]))
+        used_cols.add(j)
+        dists.append(float(cost[i, j]))
+    return float(np.mean(dists)) if dists else float(pad_cost)
+
+
+def compute_structural_similarities(
+    query_sample: Dict[str, Any],
+    dataset: Any,
+    max_n: Optional[int] = None,
+    w_att: float = 1.0,
+    w_def: float = 1.0,
+    corner_canonicalize: bool = True,
+) -> np.ndarray:
+    """Compute proposed structural similarity for all samples (higher is better).
+
+    Similarity is defined as 1 / (1 + distance), where distance is a weighted
+    Hungarian matching distance between attacking/defending point sets.
+    """
+    q_df = load_raw_sample_data(query_sample)
+    if corner_canonicalize:
+        q_df = q_df.copy()
+        # Canonicalize 4 corners by reflecting around axes so the corner is always (+,+).
+        # Use ball-holder as kicker proxy.
+        try:
+            ball_rows = q_df[q_df.get("ball", 0.0) > 0.5] if "ball" in q_df.columns else q_df.iloc[0:0]
+            if len(ball_rows) > 0:
+                bx = float(ball_rows.iloc[0]["x"])
+                by = float(ball_rows.iloc[0]["y"])
+                if bx < 0:
+                    q_df["x"] = -q_df["x"]
+                if by < 0:
+                    q_df["y"] = -q_df["y"]
+        except Exception:
+            pass
+    q_att, q_def = _get_team_split_positions(q_df)
+
+    n_total = len(dataset)
+    if max_n is not None:
+        n_total = min(n_total, int(max_n))
+
+    sims = np.zeros((n_total,), dtype=np.float32)
+    for i in range(n_total):
+        cand_raw = _get_raw_sample(dataset, i)
+        c_df = load_raw_sample_data(cand_raw)
+        if corner_canonicalize:
+            c_df = c_df.copy()
+            try:
+                ball_rows = c_df[c_df.get("ball", 0.0) > 0.5] if "ball" in c_df.columns else c_df.iloc[0:0]
+                if len(ball_rows) > 0:
+                    bx = float(ball_rows.iloc[0]["x"])
+                    by = float(ball_rows.iloc[0]["y"])
+                    if bx < 0:
+                        c_df["x"] = -c_df["x"]
+                    if by < 0:
+                        c_df["y"] = -c_df["y"]
+            except Exception:
+                pass
+        c_att, c_def = _get_team_split_positions(c_df)
+        d_att = _hungarian_mean_distance(q_att, c_att)
+        d_def = _hungarian_mean_distance(q_def, c_def)
+        dist = float(w_att) * float(d_att) + float(w_def) * float(d_def)
+        sims[i] = 1.0 / (1.0 + np.float32(dist))
     return sims
 
 
@@ -621,25 +800,101 @@ def main():
     # Sidebar configuration
     st.sidebar.header("Configuration")
     
-    # Config file selection
-    config_path = st.sidebar.text_input(
-        "Config file path",
-        value="configs/multitask_receiver_shot_d2.yaml",
-        help="Path to YAML config file",
+    # Quick presets (recommended): avoid mismatched config/index/checkpoint.
+    preset = st.sidebar.radio(
+        "Preset（おすすめ）",
+        options=["consistency_stable", "baseline_stable", "custom"],
+        index=0,
+        help="普段は consistency_stable と baseline_stable の2つを比較するだけなので、まずはプリセットを推奨。",
     )
-    
-    # Index file selection
-    index_path = st.sidebar.text_input(
-        "Index file path",
-        value="runs/retrieval/index_d2.pkl",
-        help="Path to search index file",
-    )
-    
-    # Data path selection
-    data_path = st.sidebar.text_input(
-        "Data path",
-        value="data/processed_ck/receiver_train/data.pickle",
-        help="Path to receiver dataset",
+
+    # Cache clear helper (often needed when switching configs)
+    if st.sidebar.button("♻️ キャッシュクリア（読み直し）"):
+        try:
+            load_search_system.clear()
+            load_index.clear()
+            st.sidebar.success("Cache cleared.")
+        except Exception:
+            # Best-effort: if Streamlit changes API, ignore.
+            st.sidebar.info("Cache clear requested (restart browser if not reflected).")
+
+    # ---- Easy selectors (recommended) ----
+    # Config selection (dropdown)
+    default_config = "configs_my_method/multitask_receiver_shot_d2_consistency_stable.yaml"
+    try:
+        cfg_candidates = sorted([str(p.as_posix()) for p in Path("configs_my_method").glob("*.yaml")])
+    except Exception:
+        cfg_candidates = []
+    if default_config not in cfg_candidates:
+        cfg_candidates = [default_config] + cfg_candidates
+
+    # Apply preset defaults
+    if preset == "consistency_stable":
+        config_path = "configs_my_method/multitask_receiver_shot_d2_consistency_stable.yaml"
+    elif preset == "baseline_stable":
+        config_path = "configs_my_method/multitask_receiver_shot_d2_baseline_stable.yaml"
+    else:
+        config_path = st.sidebar.selectbox(
+            "Config（選択）",
+            options=cfg_candidates,
+            index=0,
+            help="customのときのみ選択（普段はプリセット推奨）",
+        )
+
+    # Infer default index path from selected config (run_name + d2)
+    inferred_index_path = None
+    try:
+        with open(config_path, "r") as f:
+            _cfg_tmp = yaml.safe_load(f)
+        rn = _cfg_tmp.get("run_name", "default_run")
+        d2_enabled = _cfg_tmp.get("d2", {}).get("enabled", False)
+        inferred_index_path = f"runs/my_method/{rn}/indices/index_{'d2' if d2_enabled else 'no_d2'}.pkl"
+    except Exception:
+        inferred_index_path = "runs/my_method/consistency_stable/indices/index_d2.pkl"
+
+    # Index selection (dropdown)
+    try:
+        idx_candidates = sorted([str(p.as_posix()) for p in Path("runs/my_method").glob("*/indices/index_*.pkl")])
+    except Exception:
+        idx_candidates = []
+    if inferred_index_path not in idx_candidates:
+        idx_candidates = [inferred_index_path] + idx_candidates
+    if preset in ("consistency_stable", "baseline_stable"):
+        index_path = inferred_index_path
+        st.sidebar.caption(f"Index（自動）: `{index_path}`")
+    else:
+        index_path = st.sidebar.selectbox(
+            "Index（選択）",
+            options=idx_candidates,
+            index=0,
+            help="consistency_stable / baseline_stable など run_name ごとの index を選択",
+        )
+
+    # Advanced: allow manual override (optional)
+    with st.sidebar.expander("詳細設定（手入力したい場合）", expanded=False):
+        custom_config_path = st.text_input("Config file path（手入力）", value=config_path)
+        custom_index_path = st.text_input("Index file path（手入力）", value=index_path)
+        custom_checkpoint_path = st.text_input(
+            "Backbone checkpoint path（手入力）",
+            value="",
+            help="空ならconfigから自動選択。run_name不一致などで見つからない場合に指定してください。",
+        )
+        use_custom_paths = st.checkbox("手入力のパスを使う", value=False)
+
+    if "use_custom_paths" in locals() and use_custom_paths:
+        config_path = custom_config_path
+        index_path = custom_index_path
+        checkpoint_path_override = custom_checkpoint_path.strip() or None
+    else:
+        checkpoint_path_override = None
+
+    # Data path is rarely needed; keep it in advanced section
+    data_path = "data/processed_ck/receiver_train/data.pickle"
+    with st.sidebar.expander("データセット設定（通常は触らない）", expanded=False):
+        data_path = st.text_input(
+            "Data path（手入力）",
+            value=data_path,
+            help="通常は下の「configのreceiver_train/val/testを使う」をONにしておけばOK",
     )
 
     use_config_splits = st.sidebar.checkbox(
@@ -664,6 +919,26 @@ def main():
         value=5,
         help="Show Top-k most similar and Bottom-k least similar CKs.",
     )
+
+    st.sidebar.header("Comparison Mode")
+    compare_mode = st.sidebar.selectbox(
+        "Compare",
+        options=["Side-by-side (Cosine vs Proposed)", "Cosine only", "Proposed only"],
+        index=0,
+        help="左=cos類似度、右=提案手法（構造的類似度）",
+    )
+    enable_horizontal_scroll = False
+    if compare_mode == "Side-by-side (Cosine vs Proposed)":
+        enable_horizontal_scroll = st.sidebar.checkbox(
+            "横スクロールで左右比較（潰れ防止）",
+            value=True,
+            help="画面が狭い場合に左右の結果が潰れないよう、横スクロールで表示します。",
+        )
+    # NOTE: 検索結果は「縦に大きく表示」を基本にして、潰れ/重なりを確実に回避します。
+    with st.sidebar.expander("Proposed similarity settings", expanded=False):
+        w_att = st.slider("Weight: attacking", 0.0, 3.0, 1.0, 0.1)
+        w_def = st.slider("Weight: defending", 0.0, 3.0, 1.0, 0.1)
+        st.caption("提案手法は、攻撃/守備それぞれの配置をHungarianマッチングで比較します。")
     
     # Display options
     st.sidebar.header("Display Options")
@@ -758,7 +1033,7 @@ def main():
     
     # Load search system and index
     try:
-        search_system, config = load_search_system(config_path)
+        search_system, config = load_search_system(config_path, checkpoint_path=checkpoint_path_override)
         embedding_dim = config["model"]["hidden_dim"]
         index = load_index(index_path, embedding_dim)
         
@@ -798,37 +1073,66 @@ def main():
     if st.sidebar.button("🔍 Search", type="primary"):
         try:
             with st.spinner("Searching for similar CKs..."):
-                sims = compute_all_similarities(search_system, query_data_dict, index)
-                n = int(len(sims))
+                # Cosine similarities (embedding-based)
+                sims_cos = compute_all_similarities(
+                    search_system,
+                    query_data_dict,
+                    index,
+                    w_att=float(w_att),
+                    w_def=float(w_def),
+                )
+
+                # Proposed structural similarities (geometry-based)
+                sims_prop = None
+                if compare_mode != "Cosine only":
+                    sims_prop = compute_structural_similarities(
+                        query_raw_sample,
+                        dataset,
+                        max_n=len(sims_cos),
+                        w_att=float(w_att),
+                        w_def=float(w_def),
+                        corner_canonicalize=True,
+                    )
+
+                n = int(len(sims_cos))
                 k = int(min(int(top_k), n))
 
-                # Top-k (descending)
-                top_indices = np.argsort(sims)[::-1][:k]
-                top_results = [{
-                    "similarity": float(sims[i]),
+                def _pack_results(sims_arr: np.ndarray) -> tuple[list[dict], list[dict]]:
+                    top_indices = np.argsort(sims_arr)[::-1][:k]
+                    bottom_indices = np.argsort(sims_arr)[:k]
+                    top_r = [{
+                        "similarity": float(sims_arr[i]),
                     "metadata": index.metadata[int(i)].copy() if (index.metadata and int(i) < len(index.metadata)) else {},
                     "index": int(i),
                 } for i in top_indices]
-
-                # Bottom-k (ascending)
-                bottom_indices = np.argsort(sims)[:k]
-                bottom_results = [{
-                    "similarity": float(sims[i]),
+                    bot_r = [{
+                        "similarity": float(sims_arr[i]),
                     "metadata": index.metadata[int(i)].copy() if (index.metadata and int(i) < len(index.metadata)) else {},
                     "index": int(i),
                 } for i in bottom_indices]
+                    return top_r, bot_r
+
+                top_cos, bottom_cos = _pack_results(sims_cos)
+                if sims_prop is not None:
+                    top_prop, bottom_prop = _pack_results(sims_prop)
+                else:
+                    top_prop, bottom_prop = [], []
             
-            st.session_state['top_results'] = top_results
-            st.session_state['bottom_results'] = bottom_results
+            st.session_state['top_results_cos'] = top_cos
+            st.session_state['bottom_results_cos'] = bottom_cos
+            st.session_state['top_results_prop'] = top_prop
+            st.session_state['bottom_results_prop'] = bottom_prop
             st.session_state['query_sample'] = query_raw_sample
             st.session_state['query_index'] = query_index
         except Exception as e:
             st.error(f"Error performing search: {str(e)}")
     
     # Display results
-    if 'top_results' in st.session_state and 'bottom_results' in st.session_state:
-        top_results = st.session_state['top_results']
-        bottom_results = st.session_state['bottom_results']
+    if 'top_results_cos' in st.session_state and 'bottom_results_cos' in st.session_state:
+        top_cos = st.session_state['top_results_cos']
+        bottom_cos = st.session_state['bottom_results_cos']
+        top_prop = st.session_state.get('top_results_prop', [])
+        bottom_prop = st.session_state.get('bottom_results_prop', [])
         query_sample = st.session_state['query_sample']
         query_idx = st.session_state['query_index']
         
@@ -856,130 +1160,91 @@ def main():
             swing_curvature_m=float(swing_curvature_m),
             receiver_idx=int(query_target.item()),
         )
-        st.plotly_chart(query_fig, use_container_width=True)
-        
-        # Display similar CKs (Top-k)
-        st.subheader(f"Top-{len(top_results)} Similar CKs")
-        
-        # Create grid layout
-        num_results = len(top_results)
-        num_rows = (num_results + num_cols - 1) // num_cols
-        
-        for row in range(num_rows):
-            cols = st.columns(num_cols)
-            for col_idx in range(num_cols):
-                result_idx = row * num_cols + col_idx
-                if result_idx < num_results:
-                    result = top_results[result_idx]
-                    similarity = result['similarity']
-                    idx = result['index']
-                    metadata = result['metadata']
-                    
-                    with cols[col_idx]:
-                        sim_val = result.get("similarity", None)
-                        sim_str = "N/A"
-                        try:
-                            sim_f = float(sim_val)
-                            if math.isfinite(sim_f):
-                                sim_str = f"{sim_f:.4f}"
-                        except Exception:
-                            pass
+        st.plotly_chart(query_fig, use_container_width=True, key=f"query_fig_{int(query_idx)}")
 
-                        st.markdown(f"**Rank {result_idx + 1}** (Similarity: {sim_str})")
-                        st.caption(f"Index: {idx}")
-                        
-                        # Load and plot similar CK
-                        # Note: We need to load the actual sample from the dataset
-                        # For now, we'll use the index to get the sample
-                        # This assumes the index metadata contains enough info to load the sample
-                        try:
-                            # Try to get sample from dataset using index
-                            if idx < len(dataset):
-                                similar_data_dict, similar_target = dataset[idx]
-                                similar_raw_sample = _get_raw_sample(dataset, idx)
-                                
-                                similar_df = load_raw_sample_data(similar_raw_sample)
-                                similar_fig = plot_ck_snapshot(
-                                    similar_df,
-                                    title=f"Rank {result_idx + 1} (Idx {idx})",
-                                    show_vectors=show_vectors,
-                                    vector_scale=vector_scale,
-                                    max_vector_len=max_vector_len,
-                                    vector_offset_m=vector_offset_m,
-                                    min_vector_len=min_vector_len,
-                                    show_ids=show_ids,
-                                    show_ball_arc=show_ball_arc,
-                                    swing_mode=swing_mode,
-                                    trajectory_source=trajectory_source,
-                                    soccerdata_dir=soccerdata_dir,
-                                    traj_window_frames=int(traj_window_frames),
-                                    emphasize_swing=emphasize_swing,
-                                    show_raw_tracking=show_raw_tracking,
-                                    swing_curvature_m=float(swing_curvature_m),
-                                    receiver_idx=int(similar_target.item()),
-                                )
-                                st.plotly_chart(similar_fig, use_container_width=True)
-                                
-                                st.caption(f"Receiver: {similar_target.item()}")
-                            else:
-                                st.warning(f"Index {idx} out of dataset range")
-                        except Exception as e:
-                            st.error(f"Error loading sample {idx}: {str(e)}")
+        def _render_results_vertical(results: list[dict], header: str, panel_key: str) -> None:
+            st.subheader(header)
+            for r_i, result in enumerate(results):
+                idx = int(result["index"])
+                sim_val = result.get("similarity", None)
+                sim_str = "N/A"
+                try:
+                    sim_f = float(sim_val)
+                    if math.isfinite(sim_f):
+                        sim_str = f"{sim_f:.4f}"
+                except Exception:
+                    pass
 
-        # Display dissimilar CKs (Bottom-k)
-        st.subheader(f"Bottom-{len(bottom_results)} Dissimilar CKs")
+                st.markdown(f"**Rank {r_i + 1}** (Similarity: {sim_str})  |  Index: {idx}")
+                try:
+                    if idx < len(dataset):
+                        _d, similar_target = dataset[idx]
+                        similar_raw_sample = _get_raw_sample(dataset, idx)
+                        similar_df = load_raw_sample_data(similar_raw_sample)
+                        fig = plot_ck_snapshot(
+                            similar_df,
+                            title=f"Idx {idx}",
+                            show_vectors=show_vectors,
+                            vector_scale=vector_scale,
+                            max_vector_len=max_vector_len,
+                            vector_offset_m=vector_offset_m,
+                            min_vector_len=min_vector_len,
+                            show_ids=show_ids,
+                            show_ball_arc=show_ball_arc,
+                            swing_mode=swing_mode,
+                            trajectory_source=trajectory_source,
+                            soccerdata_dir=soccerdata_dir,
+                            traj_window_frames=int(traj_window_frames),
+                            emphasize_swing=emphasize_swing,
+                            show_raw_tracking=show_raw_tracking,
+                            swing_curvature_m=float(swing_curvature_m),
+                            receiver_idx=int(similar_target.item()),
+                        )
+                        st.plotly_chart(
+                            fig,
+                            use_container_width=True,
+                            key=f"{panel_key}_rank{r_i+1}_idx{idx}",
+                        )
+                        st.caption(f"Receiver: {int(similar_target.item())}")
+                    else:
+                        st.warning(f"Index {idx} out of dataset range")
+                except Exception as e:
+                    st.error(f"Error loading sample {idx}: {str(e)}")
+                st.divider()
 
-        num_results = len(bottom_results)
-        num_rows = (num_results + num_cols - 1) // num_cols
-        for row in range(num_rows):
-            cols = st.columns(num_cols)
-            for col_idx in range(num_cols):
-                result_idx = row * num_cols + col_idx
-                if result_idx < num_results:
-                    result = bottom_results[result_idx]
-                    idx = result['index']
-                    with cols[col_idx]:
-                        sim_val = result.get("similarity", None)
-                        sim_str = "N/A"
-                        try:
-                            sim_f = float(sim_val)
-                            if math.isfinite(sim_f):
-                                sim_str = f"{sim_f:.4f}"
-                        except Exception:
-                            pass
-
-                        st.markdown(f"**Rank {result_idx + 1}** (Similarity: {sim_str})")
-                        st.caption(f"Index: {idx}")
-                        try:
-                            if idx < len(dataset):
-                                similar_data_dict, similar_target = dataset[idx]
-                                similar_raw_sample = _get_raw_sample(dataset, idx)
-                                similar_df = load_raw_sample_data(similar_raw_sample)
-                                similar_fig = plot_ck_snapshot(
-                                    similar_df,
-                                    title=f"Bottom {result_idx + 1} (Idx {idx})",
-                                    show_vectors=show_vectors,
-                                    vector_scale=vector_scale,
-                                    max_vector_len=max_vector_len,
-                                    vector_offset_m=vector_offset_m,
-                                    min_vector_len=min_vector_len,
-                                    show_ids=show_ids,
-                                    show_ball_arc=show_ball_arc,
-                                    swing_mode=swing_mode,
-                                    trajectory_source=trajectory_source,
-                                    soccerdata_dir=soccerdata_dir,
-                                    traj_window_frames=int(traj_window_frames),
-                                    emphasize_swing=emphasize_swing,
-                                    show_raw_tracking=show_raw_tracking,
-                                    swing_curvature_m=float(swing_curvature_m),
-                                    receiver_idx=int(similar_target.item()),
-                                )
-                                st.plotly_chart(similar_fig, use_container_width=True)
-                                st.caption(f"Receiver: {similar_target.item()}")
-                            else:
-                                st.warning(f"Index {idx} out of dataset range")
-                        except Exception as e:
-                            st.error(f"Error loading sample {idx}: {str(e)}")
+        if compare_mode == "Side-by-side (Cosine vs Proposed)":
+            if enable_horizontal_scroll:
+                # Insert a marker element and CSS to target the next horizontal block (the columns)
+                st.markdown(
+                    """
+<style>
+/* Make the compare columns horizontally scrollable instead of shrinking. */
+#compare_panels_marker + div[data-testid="stHorizontalBlock"] {
+  overflow-x: auto;
+  flex-wrap: nowrap;
+  gap: 1rem;
+}
+#compare_panels_marker + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+  min-width: 560px; /* prevent squishing on narrow screens */
+}
+</style>
+<div id="compare_panels_marker"></div>
+""",
+                    unsafe_allow_html=True,
+                )
+            col_l, col_r = st.columns(2)
+            with col_l:
+                _render_results_vertical(top_cos, f"[Cosine] Top-{len(top_cos)} Similar CKs", panel_key="cos_top")
+                _render_results_vertical(bottom_cos, f"[Cosine] Bottom-{len(bottom_cos)} Dissimilar CKs", panel_key="cos_bottom")
+            with col_r:
+                _render_results_vertical(top_prop, f"[Proposed] Top-{len(top_prop)} Similar CKs", panel_key="prop_top")
+                _render_results_vertical(bottom_prop, f"[Proposed] Bottom-{len(bottom_prop)} Dissimilar CKs", panel_key="prop_bottom")
+        elif compare_mode == "Cosine only":
+            _render_results_vertical(top_cos, f"Top-{len(top_cos)} Similar CKs (Cosine)", panel_key="cos_top")
+            _render_results_vertical(bottom_cos, f"Bottom-{len(bottom_cos)} Dissimilar CKs (Cosine)", panel_key="cos_bottom")
+        else:
+            _render_results_vertical(top_prop, f"Top-{len(top_prop)} Similar CKs (Proposed)", panel_key="prop_top")
+            _render_results_vertical(bottom_prop, f"Bottom-{len(bottom_prop)} Dissimilar CKs (Proposed)", panel_key="prop_bottom")
     
     else:
         st.info("👈 Configure settings in the sidebar and click 'Search' to view results.")

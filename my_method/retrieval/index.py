@@ -36,6 +36,10 @@ class SimilarCKIndex:
         
         # Storage: embeddings as numpy array [N, embedding_dim]
         self.embeddings: Optional[np.ndarray] = None
+        # Optional split embeddings (attacking/defending) for decomposed similarity.
+        # When present, cosine similarity can be computed as weighted sum of two dot products.
+        self.embeddings_att: Optional[np.ndarray] = None
+        self.embeddings_def: Optional[np.ndarray] = None
         
         # Metadata: list of dicts, one per embedding
         # Each dict contains: {'data_id': str, 'file_path': str, ...}
@@ -99,6 +103,114 @@ class SimilarCKIndex:
             self.faiss_index.add(embeddings)
         
         logger.info(f"Added {len(embeddings)} embeddings to index. Total: {len(self.metadata)}")
+
+    def add_embeddings_split(
+        self,
+        embeddings_att: np.ndarray,
+        embeddings_def: np.ndarray,
+        metadata: List[Dict[str, Any]],
+        normalize: bool = True,
+    ) -> None:
+        """Add attacking/defending embeddings to index (and keep combined embeddings for compatibility)."""
+        a = np.asarray(embeddings_att, dtype=np.float32)
+        d = np.asarray(embeddings_def, dtype=np.float32)
+        if a.shape != d.shape:
+            raise ValueError(f"Split embedding shape mismatch: att={a.shape}, def={d.shape}")
+        if a.ndim != 2:
+            raise ValueError(f"Expected 2D embeddings, got {a.ndim}D")
+        if a.shape[1] != self.embedding_dim:
+            raise ValueError(
+                f"Embedding dimension mismatch: expected {self.embedding_dim}, got {a.shape[1]}"
+            )
+        if len(metadata) != a.shape[0]:
+            raise ValueError(f"Metadata length mismatch: {len(metadata)} for {a.shape[0]} embeddings")
+
+        if normalize:
+            an = np.linalg.norm(a, axis=1, keepdims=True)
+            dn = np.linalg.norm(d, axis=1, keepdims=True)
+            an = np.where(an == 0, 1.0, an)
+            dn = np.where(dn == 0, 1.0, dn)
+            a = a / an
+            d = d / dn
+
+        # Store split
+        if self.embeddings_att is None:
+            self.embeddings_att = a
+            self.embeddings_def = d
+            # Initialize metadata if needed
+            if self.embeddings is None:
+                self.metadata = metadata.copy()
+        else:
+            self.embeddings_att = np.vstack([self.embeddings_att, a])
+            assert self.embeddings_def is not None
+            self.embeddings_def = np.vstack([self.embeddings_def, d])
+            self.metadata.extend(metadata)
+
+        # Also keep a combined embedding for backward compatibility with older code paths.
+        combined = a + d
+        cn = np.linalg.norm(combined, axis=1, keepdims=True)
+        cn = np.where(cn == 0, 1.0, cn)
+        combined = combined / cn
+        if self.embeddings is None:
+            self.embeddings = combined
+        else:
+            self.embeddings = np.vstack([self.embeddings, combined])
+
+        # Note: Faiss index is left as-is; if you want Faiss with split similarity, extend this class.
+        logger.info(f"Added {len(a)} split embeddings to index. Total: {len(self.metadata)}")
+
+    def search_split(
+        self,
+        query_embeddings_att: np.ndarray,
+        query_embeddings_def: np.ndarray,
+        top_k: int = 10,
+        normalize: bool = True,
+        w_att: float = 0.5,
+        w_def: float = 0.5,
+    ) -> List[List[Dict[str, Any]]]:
+        """Search using split embeddings (att/def), combining similarities as weighted sum."""
+        if self.embeddings_att is None or self.embeddings_def is None:
+            # Fallback to standard search if split index not available
+            q = np.asarray(query_embeddings_att, dtype=np.float32)
+            return self.search(q, top_k=top_k, normalize=normalize)
+        if self.embeddings_att is None or self.embeddings_def is None:
+            raise ValueError("Split embeddings not loaded.")
+        qa = np.asarray(query_embeddings_att, dtype=np.float32)
+        qd = np.asarray(query_embeddings_def, dtype=np.float32)
+        if qa.ndim == 1:
+            qa = qa[np.newaxis, :]
+        if qd.ndim == 1:
+            qd = qd[np.newaxis, :]
+        if qa.shape != qd.shape:
+            raise ValueError(f"Query split shape mismatch: att={qa.shape}, def={qd.shape}")
+        if qa.shape[1] != self.embedding_dim:
+            raise ValueError(
+                f"Query embedding dimension mismatch: expected {self.embedding_dim}, got {qa.shape[1]}"
+            )
+        if normalize:
+            an = np.linalg.norm(qa, axis=1, keepdims=True)
+            dn = np.linalg.norm(qd, axis=1, keepdims=True)
+            an = np.where(an == 0, 1.0, an)
+            dn = np.where(dn == 0, 1.0, dn)
+            qa = qa / an
+            qd = qd / dn
+
+        # Weighted cosine similarity = weighted dot products of normalized vectors
+        sims = float(w_att) * np.dot(qa, self.embeddings_att.T) + float(w_def) * np.dot(qd, self.embeddings_def.T)
+
+        results: List[List[Dict[str, Any]]] = []
+        for i in range(sims.shape[0]):
+            query_similarities = sims[i]
+            top_indices = np.argsort(query_similarities)[::-1][:top_k]
+            query_results = []
+            for idx in top_indices:
+                query_results.append({
+                    'similarity': float(query_similarities[idx]),
+                    'metadata': self.metadata[int(idx)].copy(),
+                    'index': int(idx),
+                })
+            results.append(query_results)
+        return results
     
     def search(
         self,
@@ -190,6 +302,8 @@ class SimilarCKIndex:
         
         index_data = {
             'embeddings': self.embeddings,
+            'embeddings_att': self.embeddings_att,
+            'embeddings_def': self.embeddings_def,
             'metadata': self.metadata,
             'embedding_dim': self.embedding_dim,
             'use_faiss': self.use_faiss,
@@ -224,6 +338,8 @@ class SimilarCKIndex:
             index_data = pickle.load(f)
         
         self.embeddings = index_data['embeddings']
+        self.embeddings_att = index_data.get('embeddings_att', None)
+        self.embeddings_def = index_data.get('embeddings_def', None)
         self.metadata = index_data['metadata']
         self.embedding_dim = index_data['embedding_dim']
         self.use_faiss = index_data.get('use_faiss', False)
