@@ -22,6 +22,9 @@ CK（Corner Kick）局面をグラフとして表現し、**受け手予測**・
 
 詳細：`_docs/類似CK検索_改善まとめ_20260104.md`
 
+#### 結果画面
+![類似CK戦術検索結果1](https://raw.githubusercontent.com/Uzy03/TracticAI_SportsData_Competition_2025/feature/40_poster/_images/%E9%A1%9E%E4%BC%BCCK%E6%88%A6%E8%A1%93%E6%A4%9C%E7%B4%A2%E7%B5%90%E6%9E%9C1.png)
+
 ## コマンド（最短）
 
 ### 0) 前処理（CKデータ）
