@@ -923,22 +923,18 @@ def main():
     st.sidebar.header("Comparison Mode")
     compare_mode = st.sidebar.selectbox(
         "Compare",
-        options=["Side-by-side (Cosine vs Proposed)", "Cosine only", "Proposed only"],
+        options=["Side-by-side (Baseline vs Proposed)", "Baseline only", "Proposed only"],
         index=0,
-        help="左=cos類似度、右=提案手法（構造的類似度）",
+        help="左=baseline_stable（TacticAIベースライン）、右=提案手法（改良版cos類似度）",
     )
     enable_horizontal_scroll = False
-    if compare_mode == "Side-by-side (Cosine vs Proposed)":
+    if compare_mode == "Side-by-side (Baseline vs Proposed)":
         enable_horizontal_scroll = st.sidebar.checkbox(
             "横スクロールで左右比較（潰れ防止）",
             value=True,
             help="画面が狭い場合に左右の結果が潰れないよう、横スクロールで表示します。",
         )
     # NOTE: 検索結果は「縦に大きく表示」を基本にして、潰れ/重なりを確実に回避します。
-    with st.sidebar.expander("Proposed similarity settings", expanded=False):
-        w_att = st.slider("Weight: attacking", 0.0, 3.0, 1.0, 0.1)
-        w_def = st.slider("Weight: defending", 0.0, 3.0, 1.0, 0.1)
-        st.caption("提案手法は、攻撃/守備それぞれの配置をHungarianマッチングで比較します。")
     
     # Display options
     st.sidebar.header("Display Options")
@@ -1031,7 +1027,7 @@ def main():
         help="Number of columns for displaying results",
     )
     
-    # Load search system and index
+    # Load search system and index (for proposed method)
     try:
         search_system, config = load_search_system(config_path, checkpoint_path=checkpoint_path_override)
         embedding_dim = config["model"]["hidden_dim"]
@@ -1041,6 +1037,44 @@ def main():
     except Exception as e:
         st.sidebar.error(f"Error loading search system: {str(e)}")
         st.stop()
+    
+    # Load baseline search system and index (for comparison)
+    baseline_search_system = None
+    baseline_index = None
+    baseline_config = None
+    if compare_mode in ("Side-by-side (Baseline vs Proposed)", "Baseline only"):
+        try:
+            baseline_config_path = "configs_my_method/multitask_receiver_shot_d2_baseline_stable.yaml"
+            baseline_checkpoint_path = None
+            try:
+                with open(baseline_config_path, "r") as f:
+                    _baseline_cfg = yaml.safe_load(f)
+                baseline_checkpoint_path = _baseline_cfg.get("checkpoint_dir", "checkpoints")
+                baseline_model_save_dir = _baseline_cfg.get("model_save_dir", f"{baseline_checkpoint_path}/receiver_shot")
+                baseline_run_name = _baseline_cfg.get("run_name", None)
+                if baseline_run_name:
+                    baseline_model_save_dir = f"{baseline_model_save_dir}/{baseline_run_name}"
+                baseline_d2_enabled = _baseline_cfg.get("d2", {}).get("enabled", False)
+                if baseline_d2_enabled:
+                    baseline_checkpoint_path = f"{baseline_model_save_dir}/best_d2.ckpt"
+                else:
+                    baseline_checkpoint_path = f"{baseline_model_save_dir}/best_no_d2.ckpt"
+            except Exception:
+                pass
+            
+            baseline_search_system, baseline_config = load_search_system(
+                baseline_config_path, 
+                checkpoint_path=baseline_checkpoint_path
+            )
+            baseline_embedding_dim = baseline_config["model"]["hidden_dim"]
+            baseline_index_path = f"runs/my_method/baseline_stable/indices/index_{'d2' if baseline_config.get('d2', {}).get('enabled', False) else 'no_d2'}.pkl"
+            baseline_index = load_index(baseline_index_path, baseline_embedding_dim)
+            st.sidebar.success(f"Loaded baseline index with {len(baseline_index)} embeddings")
+        except Exception as e:
+            st.sidebar.warning(f"Baseline index not found: {str(e)}. Baseline comparison will be disabled.")
+            if compare_mode == "Baseline only":
+                st.sidebar.error("Baseline only mode requires baseline_stable index. Please build it first.")
+                st.stop()
     
     # Load query dataset
     try:
@@ -1073,66 +1107,67 @@ def main():
     if st.sidebar.button("🔍 Search", type="primary"):
         try:
             with st.spinner("Searching for similar CKs..."):
-                # Cosine similarities (embedding-based)
-                sims_cos = compute_all_similarities(
-                    search_system,
-                    query_data_dict,
-                    index,
-                    w_att=float(w_att),
-                    w_def=float(w_def),
-                )
-
-                # Proposed structural similarities (geometry-based)
-                sims_prop = None
-                if compare_mode != "Cosine only":
-                    sims_prop = compute_structural_similarities(
-                        query_raw_sample,
-                        dataset,
-                        max_n=len(sims_cos),
-                        w_att=float(w_att),
-                        w_def=float(w_def),
-                        corner_canonicalize=True,
-                    )
-
-                n = int(len(sims_cos))
-                k = int(min(int(top_k), n))
-
-                def _pack_results(sims_arr: np.ndarray) -> tuple[list[dict], list[dict]]:
+                def _pack_results(sims_arr: np.ndarray, idx_obj: Any) -> tuple[list[dict], list[dict]]:
+                    n = int(len(sims_arr))
+                    k = int(min(int(top_k), n))
                     top_indices = np.argsort(sims_arr)[::-1][:k]
                     bottom_indices = np.argsort(sims_arr)[:k]
                     top_r = [{
                         "similarity": float(sims_arr[i]),
-                    "metadata": index.metadata[int(i)].copy() if (index.metadata and int(i) < len(index.metadata)) else {},
-                    "index": int(i),
-                } for i in top_indices]
+                        "metadata": idx_obj.metadata[int(i)].copy() if (idx_obj.metadata and int(i) < len(idx_obj.metadata)) else {},
+                        "index": int(i),
+                    } for i in top_indices]
                     bot_r = [{
                         "similarity": float(sims_arr[i]),
-                    "metadata": index.metadata[int(i)].copy() if (index.metadata and int(i) < len(index.metadata)) else {},
-                    "index": int(i),
-                } for i in bottom_indices]
+                        "metadata": idx_obj.metadata[int(i)].copy() if (idx_obj.metadata and int(i) < len(idx_obj.metadata)) else {},
+                        "index": int(i),
+                    } for i in bottom_indices]
                     return top_r, bot_r
 
-                top_cos, bottom_cos = _pack_results(sims_cos)
-                if sims_prop is not None:
-                    top_prop, bottom_prop = _pack_results(sims_prop)
-                else:
-                    top_prop, bottom_prop = [], []
+                # Proposed method (improved cosine similarity)
+                sims_proposed = None
+                top_proposed, bottom_proposed = [], []
+                if compare_mode in ("Side-by-side (Baseline vs Proposed)", "Proposed only"):
+                    sims_proposed = compute_all_similarities(
+                        search_system,
+                        query_data_dict,
+                        index,
+                        w_att=0.5,  # Default weights for proposed method
+                        w_def=0.5,
+                    )
+                    top_proposed, bottom_proposed = _pack_results(sims_proposed, index)
+
+                # Baseline method (standard cosine similarity)
+                sims_baseline = None
+                top_baseline, bottom_baseline = [], []
+                if compare_mode in ("Side-by-side (Baseline vs Proposed)", "Baseline only"):
+                    if baseline_search_system is not None and baseline_index is not None:
+                        sims_baseline = compute_all_similarities(
+                            baseline_search_system,
+                            query_data_dict,
+                            baseline_index,
+                            w_att=0.5,  # Default weights (baseline doesn't use split embeddings)
+                            w_def=0.5,
+                        )
+                        top_baseline, bottom_baseline = _pack_results(sims_baseline, baseline_index)
+                    else:
+                        st.sidebar.warning("Baseline index not available. Please build baseline_stable index first.")
             
-            st.session_state['top_results_cos'] = top_cos
-            st.session_state['bottom_results_cos'] = bottom_cos
-            st.session_state['top_results_prop'] = top_prop
-            st.session_state['bottom_results_prop'] = bottom_prop
+            st.session_state['top_results_baseline'] = top_baseline
+            st.session_state['bottom_results_baseline'] = bottom_baseline
+            st.session_state['top_results_proposed'] = top_proposed
+            st.session_state['bottom_results_proposed'] = bottom_proposed
             st.session_state['query_sample'] = query_raw_sample
             st.session_state['query_index'] = query_index
         except Exception as e:
             st.error(f"Error performing search: {str(e)}")
     
     # Display results
-    if 'top_results_cos' in st.session_state and 'bottom_results_cos' in st.session_state:
-        top_cos = st.session_state['top_results_cos']
-        bottom_cos = st.session_state['bottom_results_cos']
-        top_prop = st.session_state.get('top_results_prop', [])
-        bottom_prop = st.session_state.get('bottom_results_prop', [])
+    if 'top_results_baseline' in st.session_state or 'top_results_proposed' in st.session_state:
+        top_baseline = st.session_state.get('top_results_baseline', [])
+        bottom_baseline = st.session_state.get('bottom_results_baseline', [])
+        top_proposed = st.session_state.get('top_results_proposed', [])
+        bottom_proposed = st.session_state.get('bottom_results_proposed', [])
         query_sample = st.session_state['query_sample']
         query_idx = st.session_state['query_index']
         
@@ -1212,7 +1247,7 @@ def main():
                     st.error(f"Error loading sample {idx}: {str(e)}")
                 st.divider()
 
-        if compare_mode == "Side-by-side (Cosine vs Proposed)":
+        if compare_mode == "Side-by-side (Baseline vs Proposed)":
             if enable_horizontal_scroll:
                 # Insert a marker element and CSS to target the next horizontal block (the columns)
                 st.markdown(
@@ -1234,17 +1269,17 @@ def main():
                 )
             col_l, col_r = st.columns(2)
             with col_l:
-                _render_results_vertical(top_cos, f"[Cosine] Top-{len(top_cos)} Similar CKs", panel_key="cos_top")
-                _render_results_vertical(bottom_cos, f"[Cosine] Bottom-{len(bottom_cos)} Dissimilar CKs", panel_key="cos_bottom")
+                _render_results_vertical(top_baseline, f"[Baseline] Top-{len(top_baseline)} Similar CKs", panel_key="baseline_top")
+                _render_results_vertical(bottom_baseline, f"[Baseline] Bottom-{len(bottom_baseline)} Dissimilar CKs", panel_key="baseline_bottom")
             with col_r:
-                _render_results_vertical(top_prop, f"[Proposed] Top-{len(top_prop)} Similar CKs", panel_key="prop_top")
-                _render_results_vertical(bottom_prop, f"[Proposed] Bottom-{len(bottom_prop)} Dissimilar CKs", panel_key="prop_bottom")
-        elif compare_mode == "Cosine only":
-            _render_results_vertical(top_cos, f"Top-{len(top_cos)} Similar CKs (Cosine)", panel_key="cos_top")
-            _render_results_vertical(bottom_cos, f"Bottom-{len(bottom_cos)} Dissimilar CKs (Cosine)", panel_key="cos_bottom")
+                _render_results_vertical(top_proposed, f"[Proposed] Top-{len(top_proposed)} Similar CKs", panel_key="proposed_top")
+                _render_results_vertical(bottom_proposed, f"[Proposed] Bottom-{len(bottom_proposed)} Dissimilar CKs", panel_key="proposed_bottom")
+        elif compare_mode == "Baseline only":
+            _render_results_vertical(top_baseline, f"Top-{len(top_baseline)} Similar CKs (Baseline)", panel_key="baseline_top")
+            _render_results_vertical(bottom_baseline, f"Bottom-{len(bottom_baseline)} Dissimilar CKs (Baseline)", panel_key="baseline_bottom")
         else:
-            _render_results_vertical(top_prop, f"Top-{len(top_prop)} Similar CKs (Proposed)", panel_key="prop_top")
-            _render_results_vertical(bottom_prop, f"Bottom-{len(bottom_prop)} Dissimilar CKs (Proposed)", panel_key="prop_bottom")
+            _render_results_vertical(top_proposed, f"Top-{len(top_proposed)} Similar CKs (Proposed)", panel_key="proposed_top")
+            _render_results_vertical(bottom_proposed, f"Bottom-{len(bottom_proposed)} Dissimilar CKs (Proposed)", panel_key="proposed_bottom")
     
     else:
         st.info("👈 Configure settings in the sidebar and click 'Search' to view results.")
