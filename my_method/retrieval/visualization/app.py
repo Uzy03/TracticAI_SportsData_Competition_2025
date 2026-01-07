@@ -1173,7 +1173,7 @@ def main():
         
         st.header("Search Results")
         
-        # Display query CK
+        # Display query CK (same size as other results)
         st.subheader(f"Query CK (Index {query_idx})")
         query_df = load_raw_sample_data(query_sample)
         query_fig = plot_ck_snapshot(
@@ -1195,7 +1195,8 @@ def main():
             swing_curvature_m=float(swing_curvature_m),
             receiver_idx=int(query_target.item()),
         )
-        st.plotly_chart(query_fig, use_container_width=True, key=f"query_fig_{int(query_idx)}")
+        # Use same height as other results for consistency
+        st.plotly_chart(query_fig, use_container_width=True, height=500, key=f"query_fig_{int(query_idx)}")
 
         def _render_results_vertical(results: list[dict], header: str, panel_key: str) -> None:
             st.subheader(header)
@@ -1238,6 +1239,7 @@ def main():
                         st.plotly_chart(
                             fig,
                             use_container_width=True,
+                            height=500,
                             key=f"{panel_key}_rank{r_i+1}_idx{idx}",
                         )
                         st.caption(f"Receiver: {int(similar_target.item())}")
