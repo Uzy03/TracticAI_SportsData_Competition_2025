@@ -143,9 +143,10 @@ def draw_soccer_field(fig: Figure, field_length: float = FIELD_LENGTH, field_wid
     corner_arc_points = 20
     
     # Top-left corner: arc from (-half_length, half_width) towards field center (x increases, y decreases)
+    # Arc goes from left edge (theta=pi) to top edge (theta=pi/2)
     theta = np.linspace(np.pi, np.pi / 2, corner_arc_points)
-    arc_x = -half_length + CORNER_ARC_RADIUS * np.cos(theta)
-    arc_y = half_width + CORNER_ARC_RADIUS * np.sin(theta)  # Note: sin(pi to pi/2) is positive to 1, so we add to go inward
+    arc_x = -half_length + CORNER_ARC_RADIUS * np.cos(theta)  # cos(pi to pi/2): -1 to 0, so x increases
+    arc_y = half_width - CORNER_ARC_RADIUS * np.sin(theta)    # sin(pi to pi/2): 0 to 1, so y decreases
     fig.add_trace(go.Scatter(
         x=arc_x, y=arc_y,
         mode='lines',
@@ -155,9 +156,10 @@ def draw_soccer_field(fig: Figure, field_length: float = FIELD_LENGTH, field_wid
     ))
     
     # Top-right corner: arc from (half_length, half_width) towards field center (x decreases, y decreases)
-    theta = np.linspace(0, np.pi / 2, corner_arc_points)
-    arc_x = half_length - CORNER_ARC_RADIUS * np.cos(theta)
-    arc_y = half_width - CORNER_ARC_RADIUS * np.sin(theta)
+    # Arc goes from top edge (theta=pi/2) to right edge (theta=0)
+    theta = np.linspace(np.pi / 2, 0, corner_arc_points)
+    arc_x = half_length - CORNER_ARC_RADIUS * np.cos(theta)  # cos(pi/2 to 0): 0 to 1, so x decreases
+    arc_y = half_width - CORNER_ARC_RADIUS * np.sin(theta)   # sin(pi/2 to 0): 1 to 0, so y decreases
     fig.add_trace(go.Scatter(
         x=arc_x, y=arc_y,
         mode='lines',
@@ -167,9 +169,10 @@ def draw_soccer_field(fig: Figure, field_length: float = FIELD_LENGTH, field_wid
     ))
     
     # Bottom-left corner: arc from (-half_length, -half_width) towards field center (x increases, y increases)
-    theta = np.linspace(-np.pi, -np.pi / 2, corner_arc_points)
-    arc_x = -half_length + CORNER_ARC_RADIUS * np.cos(theta)
-    arc_y = -half_width - CORNER_ARC_RADIUS * np.sin(theta)  # Note: sin(-pi to -pi/2) is 0 to -1, so we subtract to go inward
+    # Arc goes from bottom edge (theta=-pi/2) to left edge (theta=-pi)
+    theta = np.linspace(-np.pi / 2, -np.pi, corner_arc_points)
+    arc_x = -half_length + CORNER_ARC_RADIUS * np.cos(theta)  # cos(-pi/2 to -pi): 0 to -1, so x increases
+    arc_y = -half_width - CORNER_ARC_RADIUS * np.sin(theta)   # sin(-pi/2 to -pi): -1 to 0, so y increases
     fig.add_trace(go.Scatter(
         x=arc_x, y=arc_y,
         mode='lines',
@@ -179,9 +182,10 @@ def draw_soccer_field(fig: Figure, field_length: float = FIELD_LENGTH, field_wid
     ))
     
     # Bottom-right corner: arc from (half_length, -half_width) towards field center (x decreases, y increases)
+    # Arc goes from right edge (theta=0) to bottom edge (theta=-pi/2)
     theta = np.linspace(0, -np.pi / 2, corner_arc_points)
-    arc_x = half_length - CORNER_ARC_RADIUS * np.cos(theta)
-    arc_y = -half_width + CORNER_ARC_RADIUS * np.sin(theta)  # Note: sin(0 to -pi/2) is 0 to -1, so we add to go inward
+    arc_x = half_length - CORNER_ARC_RADIUS * np.cos(theta)  # cos(0 to -pi/2): 1 to 0, so x decreases
+    arc_y = -half_width - CORNER_ARC_RADIUS * np.sin(theta)  # sin(0 to -pi/2): 0 to -1, so y increases
     fig.add_trace(go.Scatter(
         x=arc_x, y=arc_y,
         mode='lines',
