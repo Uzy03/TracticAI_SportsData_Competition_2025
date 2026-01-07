@@ -1249,33 +1249,17 @@ def main():
                     st.error(f"Error loading sample {idx}: {str(e)}")
                 st.divider()
 
+        # Display results in a single column: Query → Proposed → Baseline
         if compare_mode == "Side-by-side (Baseline vs Proposed)":
-            if enable_horizontal_scroll:
-                # Insert a marker element and CSS to target the next horizontal block (the columns)
-                st.markdown(
-                    """
-<style>
-/* Make the compare columns horizontally scrollable instead of shrinking. */
-#compare_panels_marker + div[data-testid="stHorizontalBlock"] {
-  overflow-x: auto;
-  flex-wrap: nowrap;
-  gap: 1rem;
-}
-#compare_panels_marker + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-  min-width: 560px; /* prevent squishing on narrow screens */
-}
-</style>
-<div id="compare_panels_marker"></div>
-""",
-                    unsafe_allow_html=True,
-                )
-            col_l, col_r = st.columns(2)
-            with col_l:
-                _render_results_vertical(top_baseline, f"[Baseline] Top-{len(top_baseline)} Similar CKs", panel_key="baseline_top")
-                _render_results_vertical(bottom_baseline, f"[Baseline] Bottom-{len(bottom_baseline)} Dissimilar CKs", panel_key="baseline_bottom")
-            with col_r:
+            # Proposed method results
+            if len(top_proposed) > 0 or len(bottom_proposed) > 0:
                 _render_results_vertical(top_proposed, f"[Proposed] Top-{len(top_proposed)} Similar CKs", panel_key="proposed_top")
                 _render_results_vertical(bottom_proposed, f"[Proposed] Bottom-{len(bottom_proposed)} Dissimilar CKs", panel_key="proposed_bottom")
+            
+            # Baseline method results
+            if len(top_baseline) > 0 or len(bottom_baseline) > 0:
+                _render_results_vertical(top_baseline, f"[Baseline] Top-{len(top_baseline)} Similar CKs", panel_key="baseline_top")
+                _render_results_vertical(bottom_baseline, f"[Baseline] Bottom-{len(bottom_baseline)} Dissimilar CKs", panel_key="baseline_bottom")
         elif compare_mode == "Baseline only":
             _render_results_vertical(top_baseline, f"Top-{len(top_baseline)} Similar CKs (Baseline)", panel_key="baseline_top")
             _render_results_vertical(bottom_baseline, f"Bottom-{len(bottom_baseline)} Dissimilar CKs (Baseline)", panel_key="baseline_bottom")
